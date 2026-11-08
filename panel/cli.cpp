@@ -42,7 +42,7 @@ const wchar_t kHelp[] =
     L"             take the logging settings.\n"
     L"  /fps       Show the frame rate overlay (as administrator): frames the screen shows, VSyncs,\n"
     L"             the longest gap between frames and mouse reports, and below them each program's frame\n"
-    L"             rate, in the top-left corner. Ctrl+Alt+F closes it.\n"
+    L"             rate and GPU memory, in the top-left corner. Ctrl+Alt+F closes it.\n"
     L"      off        close it\n"
     L"  /update [release|develop]\n"
     L"             Update Venera (as administrator) to the newest release, or the newest build of main that\n"

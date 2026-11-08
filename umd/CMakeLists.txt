@@ -20,6 +20,7 @@ include(${PROJECT_SOURCE_DIR}/cmake/ddi_slots.cmake)
 
 # --- Shared --------------------------------------------------------------------------------------------------------
 add_library(venera-umd-common STATIC
+    common/device_memory.cpp
     common/kmt.cpp
     common/linear_image.cpp
     common/log.cpp

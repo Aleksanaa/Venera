@@ -46,6 +46,9 @@ HRESULT image_info(ID3D11Device5* device, const D3D11_TEXTURE2D_DESC1& desc, VkF
 // calls `f` with DXVK's graphics queue, to which DXVK submits nothing else meanwhile.
 HRESULT with_submitted_queue(ID3D11Device5* device, HRESULT (*f)(VkQueue queue, void* data), void* data);
 
+// What DXVK's memory allocator holds for `device` and of it uses for resources, in bytes, over all heaps.
+void pool_memory(ID3D11Device5* device, uint64_t* allocated, uint64_t* used);
+
 // The DXBC checksum of a container (dxbc-spirv's): DXVK keys its shaders on it.
 void dxbc_checksum(const void* dxbc, size_t size, uint32_t checksum[4]);
 

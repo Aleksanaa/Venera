@@ -217,6 +217,17 @@ HRESULT image_info(ID3D11Device5* device, const D3D11_TEXTURE2D_DESC1& desc, VkF
     return S_OK;
 }
 
+void pool_memory(ID3D11Device5* device, uint64_t* allocated, uint64_t* used)
+{
+    const Rc<DxvkDevice> dxvk = static_cast<D3D11Device*>(device)->GetDXVKDevice();
+    *allocated = *used = 0;
+    for (uint32_t i = 0; i < dxvk->adapter()->memoryProperties().memoryHeapCount; i++) {
+        const DxvkMemoryStats s = dxvk->getMemoryStats(i);
+        *allocated += s.memoryAllocated;
+        *used += s.memoryUsed;
+    }
+}
+
 void dxbc_checksum(const void* dxbc, size_t size, uint32_t checksum[4])
 {
     const auto digest = dxbc_spv::dxbc::hashDxbcBinary(dxbc, size);

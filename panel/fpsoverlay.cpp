@@ -9,6 +9,10 @@
 // Below them, each program that presents with its frame rate: its presents per second, from the Present_Start events
 // dxgi.dll and d3d9.dll log in its process. Every API ends in one of these here, Vulkan too (Mesa's WSI presents
 // through a DXGI swap chain); in-game counters and PresentMon count the same.
+// Beside a program's frame rate, the Vulkan device memory our UMDs report for its process (umd/common/device_memory.h):
+// what the host holds for it. For D3D11 it reads used/total: of the total, what holds resources rather than lying free
+// in DXVK's memory pools. A leak shows as a total that keeps growing; a used part growing with it means resources kept
+// alive, a flat one memory the allocator does not give back.
 // The numbers lag by up to a second: ETW hands real-time events over in buffers, flushed at least once a second.
 #include "panel.h"
 
@@ -35,6 +39,13 @@ constexpr ULONGLONG kPresentKeyword = 0x8000000;
 const GUID kDxgi = {0xca11c036, 0x0102, 0x4a2d, {0xa6, 0xad, 0xf0, 0x3c, 0xfe, 0xd5, 0xd3, 0xc9}};
 const GUID kD3d9 = {0x783aca0a, 0x790e, 0x4d7f, {0x84, 0x51, 0xaa, 0x85, 0x05, 0x11, 0xc6, 0xb9}};
 constexpr USHORT kDxgiPresent = 42, kD3d9Present = 1;
+// Our UMDs' provider "Venera" and its memory event, whose data is a MemoryEvent (umd/common/device_memory.cpp)
+const GUID kVenera = {0xc9b4c00a, 0x01bd, 0x4a11, {0xb5, 0x49, 0xd7, 0x3a, 0xc3, 0xf0, 0x55, 0xee}};
+constexpr USHORT kVeneraMemory = 1;
+struct MemoryEvent {
+    uint32_t api, reserved;
+    uint64_t total, poolAllocated, poolUsed;
+};
 // evntprov.h's event id filter, which mingw's lacks
 constexpr ULONG kFilterEventId = 0x80000200;  // EVENT_FILTER_TYPE_EVENT_ID
 struct EventIdFilter {
@@ -56,12 +67,22 @@ std::mutex lock;
 std::deque<LONGLONG> flips, vsyncs;  // event times, 100 ns units
 std::deque<ULONGLONG> inputs;        // mouse reports' arrival, GetTickCount64 ms
 std::map<DWORD, std::deque<LONGLONG>> presents;  // by process
+std::map<DWORD, std::pair<LONGLONG, MemoryEvent>> memory;  // the newest report and its time, by process
 LONGLONG newest = 0;
 
 void WINAPI onEvent(EVENT_RECORD* record)
 {
     const GUID& provider = record->EventHeader.ProviderId;
     USHORT id = record->EventHeader.EventDescriptor.Id;
+    if (IsEqualGUID(provider, kVenera)) {
+        if (id != kVeneraMemory || record->UserDataLength < sizeof(MemoryEvent))
+            return;
+        std::lock_guard g(lock);
+        auto& [t, e] = memory[record->EventHeader.ProcessId];
+        t = record->EventHeader.TimeStamp.QuadPart;
+        memcpy(&e, record->UserData, sizeof(e));
+        return;
+    }
     bool present =
         (IsEqualGUID(provider, kDxgi) && id == kDxgiPresent) || (IsEqualGUID(provider, kD3d9) && id == kD3d9Present);
     if (!present && (!IsEqualGUID(provider, kDxgKrnl) || (id != kMmioFlip && id != kVSyncDpc)))
@@ -118,6 +139,7 @@ DWORD startTrace()
         params.FilterDescCount = 1;
         EnableTraceEx2(session, provider, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, ~0ull, 0, 0, &params);
     }
+    EnableTraceEx2(session, &kVenera, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_VERBOSE, ~0ull, 0, 0, nullptr);
     EVENT_TRACE_LOGFILEW log = {};
     log.LoggerName = const_cast<wchar_t*>(kSession);
     log.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
@@ -137,11 +159,27 @@ void stopTrace()
     ControlTraceW(session, nullptr, &props.p, EVENT_TRACE_CONTROL_STOP);
 }
 
+// A memory report as a row shows it: MB, used/total where the used part is known.
+std::wstring memoryText(const MemoryEvent& e)
+{
+    const uint64_t mb = 1 << 20, total = e.total;
+    if (!e.poolAllocated)
+        return std::to_wstring(total / mb) + L" MB";
+    const uint64_t idle = e.poolAllocated - std::min(e.poolUsed, e.poolAllocated);
+    return std::to_wstring((total - std::min(idle, total)) / mb) + L"/" + std::to_wstring(total / mb) + L" MB";
+}
+
 // The last second, ending at the newest event: flips, VSyncs, the longest gap between flips in ms, and the presents
-// of each process that presented, the most first.
+// of each process that presented, the most first, with its memory if our UMDs reported it lately.
+struct App {
+    int presents;
+    DWORD pid;
+    std::wstring memory;
+};
+
 struct Stats {
     int flips, vsyncs, inputs;
-    std::vector<std::pair<int, DWORD>> apps;  // presents, process
+    std::vector<App> apps;
     double worstMs;
     bool any;  // an event came: until then there is nothing to show
 };
@@ -155,6 +193,8 @@ Stats sample()
             p->second.pop_front();
         p = p->second.empty() ? presents.erase(p) : std::next(p);
     }
+    for (auto m = memory.begin(); m != memory.end();)  // reports come every second while a process presents
+        m = m->second.first < from - 30000000 ? memory.erase(m) : std::next(m);
     while (!flips.empty() && flips.front() < from - 10000000)
         flips.pop_front();
     while (!vsyncs.empty() && vsyncs.front() < from)
@@ -163,9 +203,12 @@ Stats sample()
     while (!inputs.empty() && inputs.front() < now - 1000)
         inputs.pop_front();
     Stats s = {0, int(vsyncs.size()), int(inputs.size()), {}, 0, newest != 0};
-    for (const auto& [pid, times] : presents)
-        s.apps.push_back({int(times.size()), pid});
-    std::sort(s.apps.begin(), s.apps.end(), std::greater<>());
+    for (const auto& [pid, times] : presents) {
+        auto m = memory.find(pid);
+        s.apps.push_back({int(times.size()), pid, m != memory.end() ? memoryText(m->second.second) : L""});
+    }
+    std::sort(s.apps.begin(), s.apps.end(),
+              [](const App& a, const App& b) { return std::pair(a.presents, a.pid) > std::pair(b.presents, b.pid); });
     if (s.apps.size() > kMaxRows)
         s.apps.resize(kMaxRows);
     LONGLONG prev = 0;
@@ -206,6 +249,7 @@ private:
     float h_ = kH;
     std::map<DWORD, std::wstring> names_;
     float columnW_[4] = {}, w_ = 0;
+    float countW_ = 0, memoryW_ = 0;  // a row's frame rate and memory, at their widest
 };
 
 Overlay* g_overlay;
@@ -228,7 +272,7 @@ std::wstring Overlay::appName(DWORD pid)
         return L"Process " + std::to_wstring(pid);
     if (name.size() > 4 && !_wcsicmp(name.c_str() + name.size() - 4, L".exe"))
         name.resize(name.size() - 4);
-    float room = w_ - 2 * kGap - ui_.measure(L"0000", Ui::kBodyStrong) - 12;
+    float room = w_ - 2 * kGap - countW_ - 12 - memoryW_ - 12;
     if (ui_.measure(name, Ui::kBody) > room) {
         while (!name.empty() && ui_.measure(name + L"…", Ui::kBody) > room)
             name.pop_back();
@@ -283,9 +327,11 @@ void Overlay::paint()
         ui_.fill({kGap, y - 0.5f, w_ - kGap, y + 0.5f}, 0, kWhite, kControlStroke);
         y += 6;
     }
-    for (const auto& [count, pid] : stats_.apps) {
-        ui_.text(appName(pid), Ui::kBody, {kGap, y, w_ - kGap, y + kRowH}, kWhite, kTextSecondary);
-        ui_.text(std::to_wstring(count), Ui::kBodyStrong, {kGap, y, w_ - kGap, y + kRowH}, kWhite, 1,
+    for (const auto& app : stats_.apps) {
+        ui_.text(appName(app.pid), Ui::kBody, {kGap, y, w_ - kGap, y + kRowH}, kWhite, kTextSecondary);
+        ui_.text(app.memory, Ui::kBody, {kGap, y, w_ - kGap - countW_ - 12, y + kRowH}, kWhite, kTextSecondary,
+                 DWRITE_TEXT_ALIGNMENT_TRAILING);
+        ui_.text(std::to_wstring(app.presents), Ui::kBodyStrong, {kGap, y, w_ - kGap, y + kRowH}, kWhite, 1,
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
         y += kRowH;
     }
@@ -358,6 +404,9 @@ int Overlay::run()
         columnW_[i] = std::max(ui_.measure(kLabels[i], Ui::kCaption), ui_.measure(kWidest[i], Ui::kSubtitle));
         w_ += columnW_[i] + kGap;
     }
+    countW_ = ui_.measure(L"0000", Ui::kBodyStrong);
+    memoryW_ = ui_.measure(L"00000/00000 MB", Ui::kBody);
+    w_ = std::max(w_, 2 * kGap + ui_.measure(L"Process 00000", Ui::kBody) + 12 + memoryW_ + 12 + countW_);
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d_);
     dc_ = CreateCompatibleDC(nullptr);
     WNDCLASSW wc = {};

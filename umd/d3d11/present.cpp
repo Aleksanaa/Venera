@@ -6,6 +6,7 @@
 // that DXVK wraps as a texture. Present hands the allocations to the runtime with the present context waiting for our
 // rendering on them: a fence the GPU signals through our ICD (icd/patches/0006), else a wait here.
 #include "device.h"
+#include "device_memory.h"
 #include "shared_surface.h"
 
 #include <atomic>
@@ -387,6 +388,11 @@ HRESULT APIENTRY present(DXGI_DDI_ARG_PRESENT* a)
     if (!src) {
         VENERA_WARN("Present: surface %p has no allocation", reinterpret_cast<void*>(a->hSurfaceToPresent));
         return E_INVALIDARG;
+    }
+    if (memory_report_due()) {
+        uint64_t allocated, used;
+        dxvk::pool_memory(d.d3d.get(), &allocated, &used);
+        report_memory(11, allocated, used);
     }
     // Also before: a present that blocks (on our rendering or in the KMD) never reaches the line below.
     if (n < 8 || verbose())

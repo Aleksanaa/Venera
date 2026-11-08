@@ -15,6 +15,7 @@
 // are windowed Blt presents, which dxgkrnl carries out waiting for the context with the device held, so work of ours
 // still pending on the context deadlocked it against the CPU signal that would complete it (queue_bridge.h).
 #include "device.h"
+#include "device_memory.h"
 #include "log.h"
 #include "objects.h"
 #include "kmt.h"
@@ -378,6 +379,8 @@ void APIENTRY present(D3D12DDI_HCOMMANDLIST hl, D3D12DDI_HCOMMANDQUEUE hq, const
         VENERA_WARN("Present: bad arguments");
         return;
     }
+    if (memory_report_due())
+        report_memory(12, 0, 0);
     // Set even if this present fails: the runtime submits on it regardless, and dereferences a null one.
     contexts->hContext = object<CommandQueueObject>(hq)->bridge->context();
     D3DKMT_HANDLE src = allocation_of(args->phSurfacesToPresent[0].hSurface);

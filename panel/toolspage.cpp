@@ -49,7 +49,7 @@ void Tools::draw(Ui& ui, float x, float w, float& y)
     shown_ = overlayOn();
     float cy = ui.settingsCard(x, y, w, kCardH, L"", L"Frame rate overlay",
                                L"Frames the screen shows, the longest gap between them, mouse reports and each "
-                               L"program's frame rate, over everything. Ctrl+Alt+F closes it.");
+                               L"program's frame rate and GPU memory, over everything. Ctrl+Alt+F closes it.");
     ui.toggle(x + w - 16, cy, kFpsId, shown_);
     y += kCardH + kGap;
     ui.sectionHeader(L"Troubleshooting", x, y);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "vulkan_icd.h"
+#include "device_memory.h"
 #include "log.h"
 
 #include <windows.h>
@@ -74,7 +75,10 @@ PFN_vkGetInstanceProcAddr load_venus_icd()
 {
     static std::once_flag once;
     static PFN_vkGetInstanceProcAddr gipa = nullptr;
-    std::call_once(once, [] { gipa = load(); });
+    std::call_once(once, [] {
+        if (PFN_vkGetInstanceProcAddr icd = load())
+            gipa = counting_gipa(icd);
+    });
     return gipa;
 }
 
