@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Builds everything the guest needs and packs it into the installer (venera-setup-<version>.exe), as README's build
-# steps do. A tag v<x.y.z> also publishes it as a release; the tag has to match the project's VERSION
+# steps do, and puts it on a disc image (.iso) as well. A tag v<x.y.z> also publishes both as a release; the tag has to match the project's VERSION
 # (CMakeLists.txt), to which the build appends the commit count and hash.
 name: build
 
@@ -69,6 +69,12 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
           cp build/win/setup/venera-setup.exe "venera-setup-$version.exe"
 
+      # The installer on a disc image, to attach to a VM as a CD-ROM. Joliet for the names Windows shows.
+      - name: Wrap the installer in an ISO
+        run: |
+          nix develop -c xorriso -as mkisofs -J -joliet-long -R -V VENERA \
+            -o "venera-setup-$VERSION.iso" "venera-setup-$VERSION.exe"
+
       - name: Compiler cache statistics
         if: always()
         run: nix develop -c ccache -s
@@ -76,7 +82,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: venera-setup-${{ env.VERSION }}
-          path: venera-setup-${{ env.VERSION }}.exe
+          path: |
+            venera-setup-${{ env.VERSION }}.exe
+            venera-setup-${{ env.VERSION }}.iso
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -85,4 +93,5 @@ jobs:
         run: |
           case "$VERSION" in "${GITHUB_REF_NAME#v}".*) ;; *)
             echo "Tag $GITHUB_REF_NAME does not match the version $VERSION"; exit 1 ;; esac
-          gh release create "$GITHUB_REF_NAME" "venera-setup-$VERSION.exe" --title "Venera $VERSION" --generate-notes
+          gh release create "$GITHUB_REF_NAME" "venera-setup-$VERSION.exe" "venera-setup-$VERSION.iso" \
+            --title "Venera $VERSION" --generate-notes

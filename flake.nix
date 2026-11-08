@@ -29,6 +29,8 @@
           mingw.buildPackages.binutils
           # Wraps the MinGW compilers when on PATH (icd/build.sh, CMakeLists.txt, cmake/meson.cmake).
           ccache
+          # Puts the installer on a disc image (.github/workflows/build.yml).
+          xorriso
         ];
 
         # Every store path has the same mtime, so ccache's default check would miss a compiler update: hash the
