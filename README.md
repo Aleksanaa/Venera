@@ -59,6 +59,9 @@ page and tagged releases.
 
 Do take a VM snapshot first.
 
+After installation, you can run Venera Display Control Panel from start menu. It can help you diagnose issues
+and download updates.
+
 ## Building
 
 Everything builds on a Linux host inside `nix develop` (see `flake.nix`).
