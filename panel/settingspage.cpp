@@ -51,7 +51,7 @@ struct PointerSetting {
 const PointerSetting kPointer[] = {
     {L"cursor", L"HWCursor", L"\uE962", L"Hardware cursor", L"The host draws the pointer, so it keeps up with the mouse", 1},
     {L"cursor-swap-rb", L"HWCursorSwapRB", L"\uE790", L"Swap red and blue",
-     L"For QEMU's GTK display, which shows the pointer's red as blue unless its virglrenderer is patched", 0},
+     L"For QEMU's GTK display without a patched virglrenderer", 0},
 };
 constexpr int kPointerCount = int(std::size(kPointer));
 
@@ -195,7 +195,7 @@ void Settings::draw(Ui& ui, float x, float w, float& y)
     ui.toggle(x + w - 16, cy, kLogFileId, !logFile_.empty(), admin_);
     y += kCardH + kGap;
     cy = ui.settingsCard(x, y, w, kCardH, L"\uE9D9", L"Verbose",
-                         L"Also every answer about format support and multisampling. Slows programs down.");
+                         L"Also every format and multisampling query. Slows programs down.");
     ui.toggle(x + w - 16, cy, kVerboseId, verbose_, admin_);
     y += kCardH + kGap;
     for (int i = 0; i < kLevelCount; i++) {

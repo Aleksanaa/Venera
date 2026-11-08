@@ -383,8 +383,7 @@ void About::drawUpdate(Ui& ui, float x, float w, float& y)
     y += kHeroH + kGap;
 
     float ccy = ui.settingsCard(x, y, w, kCardH, L"" /* Switch */, L"Update channel",
-                                L"Release: tagged releases. Develop: the newest build of main that worked, "
-                                L"untested; through nightly.link, checked against GitHub's checksum.");
+                                L"Release: tagged versions. Develop: the newest working build of main");
     ui.comboBox(x + w - 16, ccy, kChannelId, {L"Release", L"Develop"}, channel_ == Channel::kDevelop,
                 state_ != kDownloading && state_ != kInstalling);
     y += kCardH + kGap;
