@@ -19,6 +19,11 @@ On an Intel iGPU host, `-accel kvm,honor-guest-pat=on` is needed. Without it, KV
 attributes and maps the `hostmem` window write-back, so the guest's write-combined views of host GPU memory are not
 coherent with the iGPU. KVM on AMD always honors them, so AMD hosts don't need it.
 
+Don't pass `-sandbox` with `elevateprivileges=deny`. Its seccomp filter kills virglrenderer's render server as it
+starts (the forked child calls `setpgid`), so the guest's Venus context never exists and the host logs
+`virgl blob create error: Invalid argument` and `virtio_gpu_virgl_process_cmd: ctrl 0x10c, error 0x1200` for every
+blob while the guest stays black.
+
 - **SDL** is pixel-exact on a fractionally scaled Wayland desktop if QEMU's environment has
   `SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1`. SDL sizes the window in physical pixels and the guest's resolution matches
   it. The hardware cursor shows a bit large, as SDL scales it by the host's display scale on top of the guest's own.

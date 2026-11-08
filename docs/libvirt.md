@@ -43,5 +43,8 @@ element is for lower SPICE latency, by disabling image, audio, video compression
 </qemu:override>
 ```
 
+libvirt starts QEMU with a `-sandbox` whose seccomp filter kills virglrenderer's render server (see
+[qemu.md](qemu.md)), so set `seccomp_sandbox = 0` in libvirt's `qemu.conf` and restart libvirtd.
+
 For lower input latency, add virtio mouse and keyboard in place of the emulated PS/2 ones (the guest needs
 virtio-win's `vioinput` driver).
