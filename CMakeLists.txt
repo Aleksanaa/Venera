@@ -18,6 +18,8 @@ if(VENERA_CCACHE)
   set(CMAKE_CXX_COMPILER_LAUNCHER "${VENERA_CCACHE}")
 endif()
 
+option(VENERA_RELEASE "A release build, which CI sets for tags; any other is a develop build (of main)" OFF)
+
 set(VENERA_WINKITS_DIR "${CMAKE_SOURCE_DIR}/refs/winkits" CACHE PATH
     "WDK/SDK headers extracted from the Microsoft.Windows.WDK.x64 / SDK.CPP NuGet packages (umd only)")
 

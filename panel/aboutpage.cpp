@@ -126,7 +126,7 @@ private:
 
     HWND window_;
     State state_ = kIdle;
-    Channel channel_ = savedChannel();
+    Channel channel_ = buildChannel();  // or the other for this session: what it installs then follows that one
     std::wstring installed_ = installedVersion();
     Update update_;
     std::wstring errorTitle_, error_, checkedAt_;
@@ -288,7 +288,6 @@ void About::click(int id)
         Channel chosen = c == 2 ? Channel::kDevelop : Channel::kRelease;
         if (c > 0 && chosen != channel_) {
             channel_ = chosen;
-            saveChannel(channel_);
             ++gen_;  // a check of the other channel going on is dropped
             state_ = kIdle;
         }
@@ -443,7 +442,9 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
     ui.text(L"Venera", Ui::kTitle, {tx, y + 26, right, y + 66});
     ui.text(L"Hardware-accelerated Direct3D 9 to 12, Vulkan and OpenGL for Windows guests in QEMU", Ui::kBody,
             {tx, y + 68, right, y + 90}, kWhite, kTextSecondary);
-    ui.selectable(kVersionText, installed_.empty() ? L"Not installed" : L"Version " + installed_, Ui::kCaption,
+    const std::wstring version =
+        L"Version " + installed_ + (buildChannel() == Channel::kDevelop ? L", develop build" : L"");
+    ui.selectable(kVersionText, installed_.empty() ? L"Not installed" : version, Ui::kCaption,
                   {tx, y + 92, right, y + 112}, kWhite, kTextTertiary);
     ui.fill({x + 1, y + topH, x + w - 1, y + topH + 1}, 0, kBlack, 0.25f);
     float ry = y + topH + 1 + 12;

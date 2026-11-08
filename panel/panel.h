@@ -355,8 +355,7 @@ void hostGpu(const ProbeResult* probe, std::wstring& gpu, std::wstring& driver);
 // Release: the newest tagged release. Develop: the newest build of main that worked.
 enum class Channel { kRelease, kDevelop };
 const wchar_t* channelName(Channel c);  // "release", "develop": /update's argument
-Channel savedChannel();                 // the About page's choice, per user
-void saveChannel(Channel c);
+Channel buildChannel();                 // this build's: Release for a release build (CI's, of a tag), else Develop
 // Compares the four numbers of versions ("0.1.0.121.9e11c1e"); the commit hash after them does not rank.
 int compareVersions(const std::wstring& a, const std::wstring& b);
 

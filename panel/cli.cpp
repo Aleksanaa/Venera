@@ -46,8 +46,8 @@ const wchar_t kHelp[] =
     L"      off        close it\n"
     L"  /update [release|develop]\n"
     L"             Update Venera (as administrator) to the newest release, or the newest build of main that\n"
-    L"             worked (by default the About page's choice). It downloads the installer from GitHub,\n"
-    L"             checks it against GitHub's checksum and starts it, when it is newer than what is installed.\n"
+    L"             worked (by default this build's kind). It downloads the installer from GitHub, checks\n"
+    L"             it against GitHub's checksum and starts it, when it is newer than what is installed.\n"
     L"  /page N    Open the control panel on page N: 0 Overview, 1 Settings, 2 Logs, 3 Tests, 4 Tools,\n"
     L"             5 About.\n"
     L"  /help      Show this help.\n"
@@ -310,7 +310,7 @@ int runCommandLine(int argc, wchar_t** argv, int* page)
             return 1;
         }
         if (o == L"update") {
-            Channel channel = savedChannel();
+            Channel channel = buildChannel();
             std::wstring from;
             for (int j = i + 1; j < argc; j++) {
                 if (!_wcsicmp(argv[j], L"release"))

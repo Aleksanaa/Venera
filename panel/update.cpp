@@ -25,7 +25,6 @@ namespace {
 constexpr wchar_t kApi[] = L"https://api.github.com/repos/Aleksanaa/Venera";
 constexpr wchar_t kArtifacts[] = L"https://nightly.link/Aleksanaa/Venera/actions/artifacts/";
 constexpr wchar_t kWorkflow[] = L"build.yml";
-constexpr wchar_t kSettingsKey[] = L"Software\\Venera\\Panel";
 
 // ---- JSON: just enough to read GitHub's answers -------------------------------------------------------------------
 
@@ -526,21 +525,13 @@ bool endsWith(const std::wstring& s, const std::wstring& end)
 
 const wchar_t* channelName(Channel c) { return c == Channel::kDevelop ? L"develop" : L"release"; }
 
-Channel savedChannel()
+Channel buildChannel()
 {
-    wchar_t buf[32];
-    DWORD size = sizeof(buf);
-    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"UpdateChannel", RRF_RT_REG_SZ, nullptr, buf, &size) ==
-            ERROR_SUCCESS && !_wcsicmp(buf, L"develop"))
-        return Channel::kDevelop;
+#ifdef VENERA_RELEASE
     return Channel::kRelease;
-}
-
-void saveChannel(Channel c)
-{
-    const wchar_t* name = channelName(c);
-    RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, L"UpdateChannel", REG_SZ, name,
-                    DWORD((wcslen(name) + 1) * sizeof(wchar_t)));
+#else
+    return Channel::kDevelop;
+#endif
 }
 
 int compareVersions(const std::wstring& a, const std::wstring& b)
