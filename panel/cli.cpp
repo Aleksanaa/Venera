@@ -44,7 +44,12 @@ const wchar_t kHelp[] =
     L"             the longest gap between frames and mouse reports, and below them each program's frame\n"
     L"             rate, in the top-left corner. Ctrl+Alt+F closes it.\n"
     L"      off        close it\n"
-    L"  /page N    Open the control panel on page N: 0 Overview, 1 Settings, 2 Logs, 3 Tests, 4 Tools.\n"
+    L"  /update [release|develop]\n"
+    L"             Update Venera (as administrator) to the newest release, or the newest build of main that\n"
+    L"             worked (by default the About page's choice). It downloads the installer from GitHub,\n"
+    L"             checks it against GitHub's checksum and starts it, when it is newer than what is installed.\n"
+    L"  /page N    Open the control panel on page N: 0 Overview, 1 Settings, 2 Logs, 3 Tests, 4 Tools,\n"
+    L"             5 About.\n"
     L"  /help      Show this help.\n"
     L"\n"
     L"Options may also start with - or --.\n";
@@ -206,6 +211,24 @@ int followLog(bool all)
     return 0;
 }
 
+// /update [CHANNEL] [/from FILE]: FILE is what the About page downloaded. Exits 0 when the installer started or Venera
+// is up to date. Started from the About page there is no console: the steps go nowhere, an error to a message box.
+int runUpdate(Channel channel, const std::wstring& from)
+{
+    Output out(STD_OUTPUT_HANDLE);
+    bool printed = GetConsoleWindow() || GetFileType(GetStdHandle(STD_OUTPUT_HANDLE)) != FILE_TYPE_UNKNOWN;
+    bool started;
+    std::wstring e = installUpdate(channel, from, [&](const std::wstring& step) { out.print(step + L"\n"); },
+                                   &started);
+    if (e.empty())
+        return 0;
+    if (printed)
+        Output(STD_ERROR_HANDLE).print(e + L".\n");
+    else
+        MessageBoxW(nullptr, (e + L".").c_str(), L"Venera update", MB_ICONERROR);
+    return 1;
+}
+
 }  // namespace
 
 int runCommandLine(int argc, wchar_t** argv, int* page)
@@ -285,6 +308,23 @@ int runCommandLine(int argc, wchar_t** argv, int* page)
             else
                 MessageBoxW(nullptr, (e + L".").c_str(), L"Frame rate overlay", MB_ICONERROR);
             return 1;
+        }
+        if (o == L"update") {
+            Channel channel = savedChannel();
+            std::wstring from;
+            for (int j = i + 1; j < argc; j++) {
+                if (!_wcsicmp(argv[j], L"release"))
+                    channel = Channel::kRelease;
+                else if (!_wcsicmp(argv[j], L"develop"))
+                    channel = Channel::kDevelop;
+                else if (option(argv[j]) == L"from" && j + 1 < argc)
+                    from = argv[++j];
+                else {
+                    Output(STD_ERROR_HANDLE).print(L"Unknown option: " + std::wstring(argv[j]) + L"\n\n" + kHelp);
+                    return 2;
+                }
+            }
+            return runUpdate(channel, from);
         }
         if (o == L"restart-dwm") {
             if (!elevated()) {

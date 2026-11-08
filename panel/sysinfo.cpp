@@ -300,11 +300,13 @@ std::vector<Display> readDisplays(const std::wstring& adapterName)
     return out;
 }
 
+std::wstring installedVersion() { return regString(HKEY_LOCAL_MACHINE, kUninstallKey, L"DisplayVersion"); }
+
 SystemInfo readSystemInfo()
 {
     SystemInfo s;
     readDevice(s);
-    s.productVersion = regString(HKEY_LOCAL_MACHINE, kUninstallKey, L"DisplayVersion");
+    s.productVersion = installedVersion();
     unsigned y = 0, m = 0, d = 0;  // InstallDate is yyyymmdd
     if (swscanf(regString(HKEY_LOCAL_MACHINE, kUninstallKey, L"InstallDate").c_str(), L"%4u%2u%2u", &y, &m, &d) == 3)
         s.installDate = longDate(y, m, d);

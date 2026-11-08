@@ -2,3 +2,32 @@
 1 24 "panel.manifest"
 // The logo (docs/venera.svg), from 16 to 256 pixels: the exe's icon, and the window's.
 1 ICON "../docs/venera.ico"
+// Windows' version information, with the project's version (CMakeLists.txt). Without it, and with symbols, Defender's
+// machine-learning detection took the panel for a trojan (Bearfoos.B!ml) once it downloaded and ran updates.
+#include <winver.h>
+#define STR2(x) #x
+#define STR(x) STR2(x)
+1 VERSIONINFO
+FILEVERSION VENERA_VERSION_RC
+PRODUCTVERSION VENERA_VERSION_RC
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "Venera project"
+      VALUE "FileDescription", "Venera Display Control Panel"
+      VALUE "FileVersion", STR(VENERA_VERSION)
+      VALUE "ProductName", "Venera"
+      VALUE "ProductVersion", STR(VENERA_VERSION)
+      VALUE "OriginalFilename", "venera-panel.exe"
+      VALUE "LegalCopyright", "MIT License"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

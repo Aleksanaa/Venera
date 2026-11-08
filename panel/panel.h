@@ -186,6 +186,7 @@ std::unique_ptr<Page> makeSettings(HWND window);
 std::unique_ptr<Page> makeLogs(HWND window);
 std::unique_ptr<Page> makeTests(HWND window);
 std::unique_ptr<Page> makeTools(HWND window);
+std::unique_ptr<Page> makeAbout(HWND window);
 
 // ---- what the panel reads about the system (sysinfo.cpp) ----------------------------------------------------------
 
@@ -216,6 +217,8 @@ struct SystemInfo {
     std::vector<Display> displays;
 };
 SystemInfo readSystemInfo();
+// Venera's version as Apps & features lists it ("0.1.0.121.9e11c1e"), empty when it is not installed.
+std::wstring installedVersion();
 std::vector<Display> readDisplays(const std::wstring& adapterName);
 // The VirtIO GPU's driver key (where pkg/venera.inf puts the KMD's settings) when it runs Venera's driver, else null.
 HKEY openDriverKey(REGSAM access);
@@ -347,7 +350,40 @@ bool anyProblem(const std::vector<InfoSection>& sections);
 // The host GPU and its Vulkan driver from Venus' device name, "Virtio-GPU Venus (<GPU> (<driver>))".
 void hostGpu(const ProbeResult* probe, std::wstring& gpu, std::wstring& driver);
 
-// ---- the command line (cli.cpp) -------------------------------------------------------------------------------------
+// ---- updates from GitHub (update.cpp) -------------------------------------------------------------------------------
+
+// Release: the newest tagged release. Develop: the newest build of main that worked.
+enum class Channel { kRelease, kDevelop };
+const wchar_t* channelName(Channel c);  // "release", "develop": /update's argument
+Channel savedChannel();                 // the About page's choice, per user
+void saveChannel(Channel c);
+// Compares the four numbers of versions ("0.1.0.121.9e11c1e"); the commit hash after them does not rank.
+int compareVersions(const std::wstring& a, const std::wstring& b);
+
+struct Update {
+    std::wstring version;  // the newest on the channel
+    std::wstring name;     // the file: venera-setup-<version>.exe, or a build of main's venera-setup-<version>.zip
+    std::wstring url;      // where it downloads from
+    std::string sha256;    // GitHub's checksum of the file, in hex
+    ULONGLONG size = 0;
+    std::wstring note;     // Develop: why it is not the build of main's newest commit
+    std::wstring error;    // why there is none
+};
+// Asks GitHub; takes seconds.
+Update findUpdate(Channel c);
+// Where the window downloads an update to: the user's %TEMP%\venera-update.
+std::wstring downloadPath(const Update& u);
+// Downloads it to `path` (unless it is there already) and checks it against GitHub's checksum; `progress` gets the
+// bytes so far and all of them (0 when unknown) and returns false to cancel. Returns why it failed, else empty.
+std::wstring downloadUpdate(const Update& u, const std::wstring& path,
+                            const std::function<bool(ULONGLONG, ULONGLONG)>& progress);
+// As administrator: finds the newest on channel `c` again and, when it is newer than what is installed, checks it,
+// taking the file `downloaded` when it matches GitHub's checksum, and starts its installer (*started). `say` gets each
+// step. Returns why it failed, else empty.
+std::wstring installUpdate(Channel c, const std::wstring& downloaded,
+                           const std::function<void(const std::wstring&)>& say, bool* started);
+
+// ---- the command line (cli.cpp)-------------------------------------------------------------------------------------
 // Runs the command in argv when there is one, and returns its exit code; returns -1 when there is none (the window),
 // with *page set from /page.
 int runCommandLine(int argc, wchar_t** argv, int* page);
