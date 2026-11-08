@@ -43,10 +43,15 @@ fi
 # GCC from nixpkgs uses the mcfgthread model; link it and the GCC runtime statically, as the UMD does.
 # d3dkmthk.h and friends, which MinGW lacks, from the SDK after MinGW's own headers (as for the UMD).
 sdk_shared=$root/refs/winkits/sdk/c/Include/10.0.26100.0/shared
+# meson adds ccache itself only for native compilers: name it in the cross file.
+launcher=
+if command -v ccache >/dev/null; then
+    launcher="'ccache', "
+fi
 cat > "$out/cross.ini" <<EOF
 [binaries]
-c = 'x86_64-w64-mingw32-gcc'
-cpp = 'x86_64-w64-mingw32-g++'
+c = [${launcher}'x86_64-w64-mingw32-gcc']
+cpp = [${launcher}'x86_64-w64-mingw32-g++']
 ar = 'x86_64-w64-mingw32-ar'
 strip = 'x86_64-w64-mingw32-strip'
 windres = 'x86_64-w64-mingw32-windres'

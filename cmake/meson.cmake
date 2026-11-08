@@ -18,10 +18,15 @@ function(venera_meson_cross_file path)
   if(DEFINED ENV{VENERA_MINGW_MCFG_LIB})
     set(link_args "'-L$ENV{VENERA_MINGW_MCFG_LIB}'")
   endif()
+  # meson adds ccache itself only for native compilers: name it in the cross file (VENERA_CCACHE: CMakeLists.txt).
+  set(launcher "")
+  if(VENERA_CCACHE)
+    set(launcher "'${VENERA_CCACHE}', ")
+  endif()
   file(CONFIGURE OUTPUT "${path}" @ONLY CONTENT "\
 [binaries]
-c = '${CMAKE_C_COMPILER}'
-cpp = '${CMAKE_CXX_COMPILER}'
+c = [@launcher@'${CMAKE_C_COMPILER}']
+cpp = [@launcher@'${CMAKE_CXX_COMPILER}']
 ar = 'x86_64-w64-mingw32-ar'
 strip = 'x86_64-w64-mingw32-strip'
 windres = 'x86_64-w64-mingw32-windres'

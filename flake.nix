@@ -27,7 +27,13 @@
           widl glslang
           mingw.buildPackages.gcc
           mingw.buildPackages.binutils
+          # Wraps the MinGW compilers when on PATH (icd/build.sh, CMakeLists.txt, cmake/meson.cmake).
+          ccache
         ];
+
+        # Every store path has the same mtime, so ccache's default check would miss a compiler update: hash the
+        # compiler (the wrapper script, which names the GCC it runs) instead.
+        CCACHE_COMPILERCHECK = "content";
 
         # Read by cmake/mingw-w64.cmake: GCC from nixpkgs uses the mcfgthread model,
         # whose headers and static library live outside the wrapper's default paths.

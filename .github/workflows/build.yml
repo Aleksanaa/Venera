@@ -17,6 +17,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    env:
+      CCACHE_MAXSIZE: 2G
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,8 +36,17 @@ jobs:
       - name: Fetch the WDK and SDK headers
         run: cmake/fetch-winkits.sh
 
+      # The dev shell's ccache wraps the MinGW compilers (Mesa, DXVK, vkd3d-proton, the UMDs). A cache is saved per
+      # commit and the newest one restored, so pull requests start from main's.
+      - name: Cache the compiler output
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ github.sha }}
+          restore-keys: ccache-
+
       - name: Prepare the dev shell
-        run: nix develop -c true
+        run: nix develop -c ccache -z
 
       - name: Build the Venus ICD and the OpenGL driver
         run: nix develop -c icd/build.sh
@@ -57,6 +68,10 @@ jobs:
           version=$(cat build/win/setup/version.txt)
           echo "VERSION=$version" >> "$GITHUB_ENV"
           cp build/win/setup/venera-setup.exe "venera-setup-$version.exe"
+
+      - name: Compiler cache statistics
+        if: always()
+        run: nix develop -c ccache -s
 
       - uses: actions/upload-artifact@v4
         with:

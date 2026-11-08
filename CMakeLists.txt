@@ -11,6 +11,13 @@ if(NOT WIN32)
   message(FATAL_ERROR "Venera builds for the Windows guest only: configure with -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake")
 endif()
 
+# ccache, from the dev shell, for our targets and the meson builds below (cmake/meson.cmake).
+find_program(VENERA_CCACHE ccache)
+if(VENERA_CCACHE)
+  set(CMAKE_C_COMPILER_LAUNCHER "${VENERA_CCACHE}")
+  set(CMAKE_CXX_COMPILER_LAUNCHER "${VENERA_CCACHE}")
+endif()
+
 set(VENERA_WINKITS_DIR "${CMAKE_SOURCE_DIR}/refs/winkits" CACHE PATH
     "WDK/SDK headers extracted from the Microsoft.Windows.WDK.x64 / SDK.CPP NuGet packages (umd only)")
 
