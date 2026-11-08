@@ -141,6 +141,10 @@ bool msaa_sample_count(UINT n)
 // DXVK's quality levels for `samples` of `format`, at most one.
 UINT msaa_levels(Device& d, DXGI_FORMAT format, UINT samples)
 {
+    // Keep RGB32 typed views within the typeless storage family's MSAA support.
+    if (format == DXGI_FORMAT_R32G32B32_FLOAT || format == DXGI_FORMAT_R32G32B32_UINT ||
+        format == DXGI_FORMAT_R32G32B32_SINT)
+        format = DXGI_FORMAT_R32G32B32_TYPELESS;
     UINT levels = 0;
     if (!msaa_sample_count(samples) || depth_load_only(format) ||
         FAILED(d.d3d->CheckMultisampleQualityLevels(format, samples, &levels)))
