@@ -62,6 +62,7 @@ typedef struct _VIOGPU_ADAPTERINFO
         UINT Reserved : 24;
     } Flags;
     ULONGLONG SupportedCapsetIDs;
+    LUID AdapterLuid; // Filled only for callers whose buffer reaches it (Mesa's copy ends before it)
 } VIOGPU_ADAPTERINFO;
 
 // ================= ESCAPES

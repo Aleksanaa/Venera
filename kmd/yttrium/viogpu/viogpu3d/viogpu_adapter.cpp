@@ -171,6 +171,7 @@ VioGpuAdapter::VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     InitializeListHead(&m_ctrlStageReadyList);
 
     RtlZeroMemory(&m_VioDev, sizeof(m_VioDev));
+    RtlZeroMemory(&m_AdapterLuid, sizeof(m_AdapterLuid));
     m_Id = g_InstanceId++;
     m_shmem_allocator.Init(0);
     m_PendingWorks = 0;
@@ -349,6 +350,7 @@ NTSTATUS VioGpuAdapter::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
     VIOGPU_ASSERT(pNumberOfViews != NULL);
     VIOGPU_ASSERT(pNumberOfChildren != NULL);
     RtlCopyMemory(&m_DxgkInterface, pDxgkInterface, sizeof(m_DxgkInterface));
+    m_AdapterLuid = pDxgkStartInfo->AdapterLuid;
 
     Status = m_DxgkInterface.DxgkCbGetDeviceInformation(m_DxgkInterface.DeviceHandle, &m_DeviceInfo);
     if (!NT_SUCCESS(Status))
@@ -685,13 +687,13 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
     {
         case DXGKQAITYPE_UMDRIVERPRIVATE:
             {
-                if (pQueryAdapterInfo->OutputDataSize < sizeof(VIOGPU_ADAPTERINFO))
+                if (pQueryAdapterInfo->OutputDataSize < FIELD_OFFSET(VIOGPU_ADAPTERINFO, AdapterLuid))
                 {
                     DbgPrint(TRACE_LEVEL_ERROR,
-                             ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(VIOGPU_ADAPTERINFO) "
-                              "(0x%u)\n",
+                             ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than VIOGPU_ADAPTERINFO "
+                              "without AdapterLuid (0x%u)\n",
                               pQueryAdapterInfo->OutputDataSize,
-                              sizeof(VIOGPU_ADAPTERINFO)));
+                              FIELD_OFFSET(VIOGPU_ADAPTERINFO, AdapterLuid)));
                     return STATUS_BUFFER_TOO_SMALL;
                 }
                 VIOGPU_ADAPTERINFO *info = (VIOGPU_ADAPTERINFO *)pQueryAdapterInfo->pOutputData;
@@ -712,6 +714,8 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 info->Flags.Reserved = 0;
                 info->Flags.requires_explicit_residency = VIOGPU_WDDM2 ? 1 : 0;
                 info->SupportedCapsetIDs = m_supportedCapsetIDs;
+                if (pQueryAdapterInfo->OutputDataSize >= sizeof(VIOGPU_ADAPTERINFO))
+                    info->AdapterLuid = m_AdapterLuid;
                 return STATUS_SUCCESS;
             }
         case DXGKQAITYPE_DRIVERCAPS:
