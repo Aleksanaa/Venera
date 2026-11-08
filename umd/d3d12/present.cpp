@@ -37,7 +37,7 @@ namespace {
 KmtDevice* kmt_device(Device& d)
 {
     if (!d.kmt)
-        d.kmt = KmtDevice::open();
+        d.kmt = KmtDevice::open(d.adapter_luid);
     return d.kmt.get();
 }
 

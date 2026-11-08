@@ -109,6 +109,7 @@ HRESULT create_device(D3D10DDIARG_CREATEDEVICE& args, const viogpu::AdapterInfo&
     d->um = *args.p11UMCallbacks;
     d->dxgi = args.DXGIBaseDDI.pDXGIBaseCallbacks;
     d->allocation_alias = info.Flags.supports_allocation_alias;
+    d->adapter_luid = info.AdapterLuid;
     d->d3d = std::move(d3d);
     Com<ID3D11DeviceContext> ctx;
     d->d3d->GetImmediateContext(ctx.put());

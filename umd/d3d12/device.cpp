@@ -76,6 +76,7 @@ HRESULT create_device(const D3D12DDIARG_CREATEDEVICE_0003& args, const CommandLi
     d->kt_callbacks = args.pKTCallbacks;
     d->um_callbacks = args.p12UMCallbacks_0062;
     d->allocation_alias = info.Flags.supports_allocation_alias;
+    d->adapter_luid = info.AdapterLuid;
     d->engine = std::move(engine);
     d->d3d = d->engine->device.get();
     d->d3d2 = d->engine->device.as<ID3D12Device2>();

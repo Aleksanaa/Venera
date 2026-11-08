@@ -32,6 +32,8 @@ struct Device {
     Com<ID3D12Device8> d3d8;
     // The KMD understands viogpu::AllocationAlias (our patch): swapchain buffers can be presented.
     bool allocation_alias = false;
+    // The runtime's adapter, where our own kernel device goes.
+    LUID adapter_luid{};
     // Our own kernel device, for opening shared handles (present.cpp); created on first use.
     std::unique_ptr<KmtDevice> kmt;
 

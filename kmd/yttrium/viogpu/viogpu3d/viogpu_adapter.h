@@ -80,6 +80,7 @@ class VioGpuAdapter : IVioGpuPCI, public IVioGpuQueueSync
     UINT32 m_u32NumCapsets;
     UINT32 m_u32NumScanouts;
     UINT64 m_supportedCapsetIDs;
+    LUID m_AdapterLuid;
 
   private:
     DEVICE_OBJECT *m_pPhysicalDevice;

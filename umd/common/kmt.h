@@ -15,8 +15,9 @@ namespace venera::umd {
 
 class KmtDevice {
 public:
-    // The viogpu adapter's device, or null (logged) if there is none or gdi32 lacks the entry points.
-    static std::unique_ptr<KmtDevice> open();
+    // A device on the adapter `adapter` (viogpu::AdapterInfo::AdapterLuid of the runtime's adapter), or null (logged)
+    // if it cannot be opened or gdi32 lacks the entry points.
+    static std::unique_ptr<KmtDevice> open(const LUID& adapter);
     ~KmtDevice();
 
     // Opens a shared NT handle of one allocation: `resource` holds it open until close().
@@ -34,8 +35,7 @@ public:
 private:
     KmtDevice() = default;
 
-    PFND3DKMT_ENUMADAPTERS2 enum_adapters_ = nullptr;
-    PFND3DKMT_QUERYADAPTERINFO query_adapter_info_ = nullptr;
+    PFND3DKMT_OPENADAPTERFROMLUID open_adapter_ = nullptr;
     PFND3DKMT_CLOSEADAPTER close_adapter_ = nullptr;
     PFND3DKMT_CREATEDEVICE create_device_ = nullptr;
     PFND3DKMT_DESTROYDEVICE destroy_device_ = nullptr;

@@ -30,6 +30,7 @@ struct Device {
     VulkanDevice vulkan;                              // DXVK's device, for images on shared memory
     // The KMD understands viogpu::AllocationAlias (our patch): shared surfaces and primaries can be created.
     bool allocation_alias = false;
+    LUID adapter_luid{};                              // the runtime's adapter, where kmt goes
     std::unique_ptr<KmtDevice> kmt;                   // created on first use (kmt.h)
     HANDLE present_context = nullptr;                 // a kernel context of the runtime's: presents, keyed mutexes
     D3DKMT_HANDLE paging_queue = 0, paging_fence = 0; // for making presentable surfaces resident
@@ -62,7 +63,7 @@ struct Device {
     KmtDevice* kernel()
     {
         if (!kmt)
-            kmt = KmtDevice::open();
+            kmt = KmtDevice::open(adapter_luid);
         return kmt.get();
     }
     // Runs the clears DXVK still holds back, before a shared surface leaves this device.

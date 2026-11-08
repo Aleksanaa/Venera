@@ -44,10 +44,11 @@ struct AdapterInfo {
         UINT Reserved : 24;
     } Flags;
     ULONGLONG SupportedCapsetIDs;   // bit n set: capset id n is supported
+    LUID AdapterLuid;               // our KMD patch (kmd/): the adapter the runtime opened us on
 };
 
-// Natural alignment: viogpum.h's pack(1) blocks do not cover this struct (8 + 4 + 4 padding + 8).
-static_assert(sizeof(AdapterInfo) == 24, "must match viogpum.h VIOGPU_ADAPTERINFO");
+// Natural alignment: viogpum.h's pack(1) blocks do not cover this struct (8 + 4 + 4 padding + 8 + 8).
+static_assert(sizeof(AdapterInfo) == 32, "must match viogpum.h VIOGPU_ADAPTERINFO");
 
 #pragma pack(push, 1)
 // viogpum.h VIOGPU_RESOURCE_OPTIONS: a virgl resource description.
