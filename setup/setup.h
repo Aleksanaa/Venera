@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // venera-setup.exe: installs, updates and uninstalls the driver package (pkg/venera.inf) and the control panel, which
-// the build packs into the executable as a cabinet (setup/payload.cmake). See main.cpp for the flow.
+// the build packs into the executable as a WIM (setup/payload.cmake). See main.cpp for the flow.
 #pragma once
 
 #include <windows.h>

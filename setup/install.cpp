@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Installs and uninstalls the driver package.
 //
-// Install: unpack the package (the cabinet in our resources) into %ProgramData%\Venera\staging; catalog it and sign the
+// Install: unpack the package (the WIM in our resources) into %ProgramData%\Venera\staging; catalog it and sign the
 // catalog with a certificate made on this computer and trusted there (so PnP installs it without asking); install it
 // on the VirtIO GPU from the next boot, in place of whatever drives it now (install_on_devices); install the control
 // panel in Program Files, with a Start menu shortcut and a desktop context-menu entry; and register in Apps & features
@@ -60,17 +60,40 @@ std::wstring install_dir()
 
 // --- The payload
 
-UINT CALLBACK on_cab_file(PVOID context, UINT notification, UINT_PTR param1, UINT_PTR)
+// Applies image 1 of the WIM at `wim` into `dir` with Windows' WIMGAPI (wimgapi.dll in System32), which reads the solid
+// LZMS WIMs (ESD files) the build makes; `temp` is its scratch directory. MinGW has neither its header nor an import
+// library. Returns the error, 0 on success.
+DWORD apply_wim(const std::wstring& wim, const std::wstring& dir, const std::wstring& temp)
 {
-    if (notification != SPFILENOTIFY_FILEINCABINET)
-        return NO_ERROR;
-    auto dir = static_cast<const std::wstring*>(context);
-    auto info = reinterpret_cast<FILE_IN_CABINET_INFO_W*>(param1);
-    std::wstring target = *dir + L"\\" + info->NameInCabinet;
-    if (target.size() >= MAX_PATH)
-        return FILEOP_ABORT;
-    wcscpy(info->FullTargetName, target.c_str());
-    return FILEOP_DOIT;
+    using WimCreateFile = HANDLE(WINAPI*)(PCWSTR, DWORD, DWORD, DWORD, DWORD, PDWORD);
+    using WimSetTemporaryPath = BOOL(WINAPI*)(HANDLE, PCWSTR);
+    using WimLoadImage = HANDLE(WINAPI*)(HANDLE, DWORD);
+    using WimApplyImage = BOOL(WINAPI*)(HANDLE, PCWSTR, DWORD);
+    using WimCloseHandle = BOOL(WINAPI*)(HANDLE);
+    HMODULE lib = LoadLibraryExW(L"wimgapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!lib)
+        return GetLastError();
+    auto create_file = reinterpret_cast<WimCreateFile>(GetProcAddress(lib, "WIMCreateFile"));
+    auto set_temporary_path = reinterpret_cast<WimSetTemporaryPath>(GetProcAddress(lib, "WIMSetTemporaryPath"));
+    auto load_image = reinterpret_cast<WimLoadImage>(GetProcAddress(lib, "WIMLoadImage"));
+    auto apply_image = reinterpret_cast<WimApplyImage>(GetProcAddress(lib, "WIMApplyImage"));
+    auto close_handle = reinterpret_cast<WimCloseHandle>(GetProcAddress(lib, "WIMCloseHandle"));
+    DWORD error = ERROR_PROC_NOT_FOUND;
+    if (create_file && set_temporary_path && load_image && apply_image && close_handle) {
+        error = 0;
+        DWORD created = 0;
+        HANDLE h = create_file(wim.c_str(), GENERIC_READ, OPEN_EXISTING, 0, 0, &created);
+        HANDLE image = nullptr;
+        if (!h || !set_temporary_path(h, temp.c_str()) || !(image = load_image(h, 1)) ||
+            !apply_image(image, dir.c_str(), 0))
+            error = GetLastError();
+        if (image)
+            close_handle(image);
+        if (h)
+            close_handle(h);
+    }
+    FreeLibrary(lib);
+    return error;
 }
 
 // Unpacks the package into a fresh `dir` and returns the names of its files.
@@ -86,16 +109,18 @@ std::vector<std::wstring> unpack(const std::wstring& dir)
     HGLOBAL data = res ? LoadResource(nullptr, res) : nullptr;
     if (!data)
         fail(L"This installer carries no driver package");
-    std::wstring cab = dir + L"\\payload.cab";
+    // Next to `dir`, which the image fills.
+    const std::wstring wim = dir + L".wim";
     {
-        std::ofstream f(fs::path(cab), std::ios::binary);
+        std::ofstream f(fs::path(wim), std::ios::binary);
         f.write(static_cast<const char*>(LockResource(data)), SizeofResource(nullptr, res));
         if (!f)
-            fail(L"Writing " + cab + L" failed", ERROR_WRITE_FAULT);
+            fail(L"Writing " + wim + L" failed", ERROR_WRITE_FAULT);
     }
-    if (!SetupIterateCabinetW(cab.c_str(), 0, on_cab_file, const_cast<std::wstring*>(&dir)))
-        fail(L"Unpacking the driver package failed");
-    fs::remove(cab, ec);
+    const DWORD error = apply_wim(wim, dir, fs::path(dir).parent_path().wstring());
+    fs::remove(wim, ec);
+    if (error)
+        fail(L"Unpacking the driver package failed", error);
 
     std::vector<std::wstring> files;
     for (const auto& entry : fs::directory_iterator(dir))
