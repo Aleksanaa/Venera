@@ -7,6 +7,7 @@
 #include "objects.h"
 #include "vkd3d_bridge.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <new>
 
@@ -68,12 +69,6 @@ UINT format_support(ID3D12Device* d, DXGI_FORMAT format)
     return s;
 }
 
-void APIENTRY check_format_support(D3D12DDI_HDEVICE h, DXGI_FORMAT format, UINT* support)
-{
-    *support = format_support(Device::from(h)->d3d, format);
-    VENERA_VERBOSE("CheckFormatSupport format=%d -> 0x%x", static_cast<int>(format), *support);
-}
-
 // The plane views of depth/stencil formats: sampled, never attachments.
 bool depth_stencil_view(DXGI_FORMAT f)
 {
@@ -110,16 +105,65 @@ bool known_format(DXGI_FORMAT f)
 // The depth/stencil plane views report MULTISAMPLE_LOAD but must answer 0 levels above one sample, which the runtime
 // checks at device creation (the API's CheckFeatureSupport, which vkd3d-proton answers, allows them). Every other
 // format keeps the API's answer: the runtime also checks that a typeless format agrees with its typed members.
+UINT api_quality_levels(ID3D12Device* d, DXGI_FORMAT format, UINT samples, D3D12_MULTISAMPLE_QUALITY_LEVEL_FLAGS flags)
+{
+    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q{format, samples, flags, 0};
+    if ((format != DXGI_FORMAT_UNKNOWN && !known_format(format)) ||
+        FAILED(d->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &q, sizeof(q))) ||
+        (samples > 1 && depth_stencil_view(format)))
+        return 0;
+    return q.NumQualityLevels;
+}
+
+bool rgb32(DXGI_FORMAT f)
+{
+    switch (f) {
+    case DXGI_FORMAT_R32G32B32_TYPELESS:
+    case DXGI_FORMAT_R32G32B32_FLOAT:
+    case DXGI_FORMAT_R32G32B32_UINT:
+    case DXGI_FORMAT_R32G32B32_SINT: return true;
+    default: return false;
+    }
+}
+
+// RGB32 answers what all its typed members can, which keeps the typeless format agreeing with them. Intel hosts
+// most likely break that otherwise: ANV multisamples RGB32 SFLOAT (stored as RGBX) but not UINT or SINT (stored as
+// RGBA, never a render target), and vkd3d-proton asks Vulkan about SFLOAT for the typeless format. The D3D11 UMD
+// broke on this on Intel (Aleksanaa/Venera#9, fixed there by answering as the typeless format, which DXVK asks about
+// as UINT); here the typeless answer is SFLOAT's, so each member is asked instead. Found by reading the code; not yet
+// run on an Intel host.
+UINT quality_levels(ID3D12Device* d, DXGI_FORMAT format, UINT samples, D3D12_MULTISAMPLE_QUALITY_LEVEL_FLAGS flags)
+{
+    if (!rgb32(format))
+        return api_quality_levels(d, format, samples, flags);
+    return std::min({api_quality_levels(d, DXGI_FORMAT_R32G32B32_FLOAT, samples, flags),
+                     api_quality_levels(d, DXGI_FORMAT_R32G32B32_UINT, samples, flags),
+                     api_quality_levels(d, DXGI_FORMAT_R32G32B32_SINT, samples, flags)});
+}
+
+bool multisamples(ID3D12Device* d, DXGI_FORMAT format)
+{
+    for (UINT samples : {2u, 4u, 8u})
+        if (quality_levels(d, format, samples, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE))
+            return true;
+    return false;
+}
+
+// RGB32's multisample bits follow its quality levels.
+void APIENTRY check_format_support(D3D12DDI_HDEVICE h, DXGI_FORMAT format, UINT* support)
+{
+    ID3D12Device* d = Device::from(h)->d3d;
+    *support = format_support(d, format);
+    if (rgb32(format) && !multisamples(d, format))
+        *support &= ~(D3D12DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET | D3D12DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD);
+    VENERA_VERBOSE("CheckFormatSupport format=%d -> 0x%x", static_cast<int>(format), *support);
+}
+
 void APIENTRY check_multisample_quality_levels(D3D12DDI_HDEVICE h, DXGI_FORMAT format, UINT samples,
                                                D3D12DDI_MULTISAMPLE_QUALITY_LEVEL_FLAGS flags, UINT* levels)
 {
-    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q{format, samples,
-                                                    static_cast<D3D12_MULTISAMPLE_QUALITY_LEVEL_FLAGS>(flags), 0};
-    if ((format != DXGI_FORMAT_UNKNOWN && !known_format(format)) ||
-        FAILED(Device::from(h)->d3d->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &q, sizeof(q))) ||
-        (samples > 1 && depth_stencil_view(format)))
-        q.NumQualityLevels = 0;
-    *levels = q.NumQualityLevels;
+    *levels = quality_levels(Device::from(h)->d3d, format, samples,
+                             static_cast<D3D12_MULTISAMPLE_QUALITY_LEVEL_FLAGS>(flags));
     VENERA_VERBOSE("CheckMultisampleQualityLevels format=%d samples=%u flags=%d -> %u", static_cast<int>(format),
                    samples, static_cast<int>(flags), *levels);
 }
