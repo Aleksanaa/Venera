@@ -425,7 +425,7 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
     };
     const Row rows[] = {
         {L"Developer", L"Aleksana"},
-        {L"Contributors", L"MiRinChan"},
+        {L"Contributors", L"MiRinChan, gjz010, xddxdd"},
         {L"License", L"MIT"},
     };
     constexpr int kRows = sizeof(rows) / sizeof(rows[0]);
