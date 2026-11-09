@@ -92,8 +92,9 @@ powershell -ExecutionPolicy Bypass -File .\venera-test.ps1 Install
 Work in progress. GravityMark's D3D12, OpenGL and Vulkan benchmarks work, D3D11 lacks a rasterization feature in DXVK. WebGL examples in Edge browser should work. UI should be flawless most of the time (unless you are using spice display).
 
 AMD iGPU hosts should work flawlessly as development happens on it. AMD dGPU hosts mostly work, but a memory leak
-has been spotted there. NVIDIA dGPU hosts need some host patches. A report from an Intel iGPU host didn't succeed for
-unknown reasons. See [#7](https://github.com/Aleksanaa/Venera/issues/7) for known problems.
+has been spotted there. NVIDIA dGPU hosts need some host patches. Intel iGPU hosts work with 11th gen Core (aka.
+Tiger Lake) as of #9, and 12th–14th gen should behave the same.
+See [#7](https://github.com/Aleksanaa/Venera/issues/7) for known problems.
 
 3DMark Steal Nomad Light benchmark (D3D12) shows score of 6500. Bare metal Windows11 on Strix Halo should show 9000~10000.
  
