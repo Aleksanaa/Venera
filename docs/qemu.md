@@ -15,6 +15,16 @@ memfd:
 -display sdl,gl=on            # or gtk,gl=on
 ```
 
+Give the guest at least 4 logical CPUs, as cores of one socket:
+
+```
+-smp 4,sockets=1,cores=4,threads=1
+```
+
+The guest does all the translation on its own CPUs. With fewer CPUs, applications fall behind their own
+GPU work, and VRAM leak may be observed. Windows client editions also use only some sockets
+(Home 1, Pro 2). Task Manager shows how many it uses ("Logical processors").
+
 On an Intel CPU host, `-accel kvm,honor-guest-pat=on` is needed. Without it, KVM on Intel ignores the guest's page
 attributes and maps the `hostmem` window write-back, so the guest's write-combined views of host GPU memory are not
 coherent with the GPU. KVM on AMD always honors them, so AMD hosts don't need it.

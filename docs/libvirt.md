@@ -43,6 +43,19 @@ element is for lower SPICE latency, by disabling image, audio, video compression
 </qemu:override>
 ```
 
+Give the guest at least 4 vCPUs, as cores of one socket, as the guest does all the translation on its own CPUs.
+With fewer CPUs, applications fall behind their own GPU work, and VRAM leak may be observed.
+Without a `<topology>`, libvirt gives each vCPU its own socket, and Windows can only utilize 1 or 2. Task Manager
+shows how many it uses ("Logical processors"). Add config like this:
+
+```xml
+<vcpu placement='static'>4</vcpu>
+...
+<cpu mode='host-passthrough' check='none' migratable='on'>
+  <topology sockets='1' dies='1' clusters='1' cores='4' threads='1'/>
+</cpu>
+```
+
 libvirt starts QEMU with a `-sandbox` whose seccomp filter kills virglrenderer's render server (see
 [qemu.md](qemu.md)), so set `seccomp_sandbox = 0` in libvirt's `qemu.conf` and restart libvirtd.
 
