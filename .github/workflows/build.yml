@@ -95,5 +95,7 @@ jobs:
         run: |
           case "$VERSION" in "${GITHUB_REF_NAME#v}".*) ;; *)
             echo "Tag $GITHUB_REF_NAME does not match the version $VERSION"; exit 1 ;; esac
+          # The notes are the body of the tagged commit's message (everything after the subject line).
+          git log -1 --format=%b HEAD > notes.md
           gh release create "$GITHUB_REF_NAME" "venera-setup-$VERSION.exe" "venera-setup-$VERSION.iso" \
-            --title "Venera $VERSION" --generate-notes
+            --title "Venera $VERSION" --notes-file notes.md
