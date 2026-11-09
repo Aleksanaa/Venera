@@ -9,6 +9,7 @@
 #include "module.h"
 #include "viogpu_abi.h"
 
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -18,6 +19,23 @@ namespace {
 
 // Proven against the Windows 11 runtime by other UMDs; newer versions only add tables we would stub anyway.
 constexpr UINT64 kSupportedVersions[] = {D3D12DDI_SUPPORTED_0092};
+
+// vkd3d-proton's shader cache goes to the working directory unless VKD3D_SHADER_CACHE_PATH names a folder: into
+// %LOCALAPPDATA%\Venera\D3D12Cache instead, one file per program, as native drivers keep theirs.
+void default_shader_cache()
+{
+    char base[MAX_PATH], dir[MAX_PATH];
+    if (GetEnvironmentVariableA("VKD3D_SHADER_CACHE_PATH", nullptr, 0))
+        return;
+    const DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof(base));
+    if (!n || n >= sizeof(base) || std::snprintf(dir, sizeof(dir), "%s\\Venera", base) >= int(sizeof(dir)))
+        return;
+    CreateDirectoryA(dir, nullptr);
+    if (std::snprintf(dir, sizeof(dir), "%s\\Venera\\D3D12Cache", base) >= int(sizeof(dir)))
+        return;
+    CreateDirectoryA(dir, nullptr);
+    SetEnvironmentVariableA("VKD3D_SHADER_CACHE_PATH", dir);
+}
 
 struct Adapter {
     D3D12DDI_HRTADAPTER rt_adapter{};
@@ -115,9 +133,10 @@ extern "C" __declspec(dllexport) HRESULT APIENTRY OpenAdapter12(D3D12DDIARG_OPEN
     using namespace venera::umd;
     log_init("venera_d3d12");
     forward_settings({"VKD3D_DEBUG", "VKD3D_SHADER_DEBUG", "VKD3D_LOG_FILE", "VKD3D_CONFIG", "VKD3D_FEATURE_LEVEL",
-                      "VN_DEBUG", "VN_PERF", "MESA_LOG_LEVEL"});
+                      "VKD3D_SHADER_CACHE_PATH", "VN_DEBUG", "VN_PERF", "MESA_LOG_LEVEL"});
     // vkd3d-proton's FIXMEs name what it does not do (ForcedSampleCount, formats, features).
     log_file_beside("VKD3D_LOG_FILE", "venera_d3d12");
+    default_shader_cache();
     if (!args || !args->pAdapterCallbacks || !args->pAdapterFuncs)
         return E_INVALIDARG;
 
