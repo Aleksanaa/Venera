@@ -48,6 +48,10 @@ UINT api_misc_flags(const D3D11DDIARG_CREATERESOURCE& a)
                               D3D11_DDI_RESOURCE_MISC_BUFFER_STRUCTURED | D3D11_DDI_RESOURCE_MISC_RESOURCE_CLAMP);
     if (a.ResourceDimension == D3D10DDIRESOURCE_TEXTURECUBE)
         out |= D3D11_RESOURCE_MISC_TEXTURECUBE;
+    if (a.MiscFlags & D3DWDDM1_3DDI_RESOURCE_MISC_TILED)
+        out |= D3D11_RESOURCE_MISC_TILED;
+    if (a.MiscFlags & D3DWDDM1_3DDI_RESOURCE_MISC_TILE_POOL)
+        out |= D3D11_RESOURCE_MISC_TILE_POOL;
     return out;
 }
 
@@ -263,7 +267,7 @@ void APIENTRY discard(D3D10DDI_HDEVICE h, D3D11DDI_HANDLETYPE type, void* handle
 
 } // namespace
 
-void fill_resource_ddi(D3D11_1DDI_DEVICEFUNCS& t)
+void fill_resource_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t)
 {
     t.pfnCalcPrivateResourceSize = calc_private_resource_size;
     t.pfnCalcPrivateOpenedResourceSize = calc_private_opened_resource_size;

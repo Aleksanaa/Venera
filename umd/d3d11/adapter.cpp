@@ -15,8 +15,9 @@ namespace venera::umd {
 
 namespace {
 
-// The D3D11.1 DDI only. D3D10/10.1 applications on this adapter fail to create a device.
-constexpr UINT64 kSupportedVersions[] = {D3D11_1_DDI_SUPPORTED};
+// The WDDM 2.0 DDI only: the D3D11.3 caps (typed UAV loads, tiled resources, ...) and feature levels 12_0/12_1 come
+// with it. D3D10/10.1 applications on this adapter fail to create a device.
+constexpr UINT64 kSupportedVersions[] = {D3DWDDM2_0_DDI_SUPPORTED};
 
 struct Adapter {
     D3D10DDI_HRTADAPTER rt_adapter{};
@@ -30,6 +31,9 @@ struct Adapter {
     D3D11_FEATURE_DATA_D3D10_X_HARDWARE_OPTIONS compute_4x{};
     D3D11_FEATURE_DATA_D3D11_OPTIONS options{};
     D3D11_FEATURE_DATA_SHADER_MIN_PRECISION_SUPPORT min_precision{};
+    D3D11_FEATURE_DATA_D3D11_OPTIONS2 options2{};
+    D3D11_FEATURE_DATA_D3D11_OPTIONS3 options3{};
+    D3D11_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT gpuva{};
 
     static Adapter* from(D3D10DDI_HADAPTER h) { return static_cast<Adapter*>(h.pDrvPrivate); }
 
@@ -49,7 +53,14 @@ struct Adapter {
         probe->CheckFeatureSupport(D3D11_FEATURE_D3D10_X_HARDWARE_OPTIONS, &compute_4x, sizeof(compute_4x));
         probe->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS, &options, sizeof(options));
         probe->CheckFeatureSupport(D3D11_FEATURE_SHADER_MIN_PRECISION_SUPPORT, &min_precision, sizeof(min_precision));
-        VENERA_TRACE("adapter: DXVK on %s, feature level 0x%x", probe_handles.name, max_level);
+        probe->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &options2, sizeof(options2));
+        probe->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS3, &options3, sizeof(options3));
+        probe->CheckFeatureSupport(D3D11_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT, &gpuva, sizeof(gpuva));
+        VENERA_TRACE("adapter: DXVK on %s, feature level 0x%x; typed UAV loads %d, ROVs %d, stencil ref %d, "
+                     "conservative rasterization tier %d, tiled resources tier %d",
+                     probe_handles.name, max_level, options2.TypedUAVLoadAdditionalFormats, options2.ROVsSupported,
+                     options2.PSSpecifiedStencilRefSupported, options2.ConservativeRasterizationTier,
+                     options2.TiledResourcesTier);
         return S_OK;
     }
 };
@@ -65,6 +76,8 @@ D3D_FEATURE_LEVEL feature_level(D3D11DDI_3DPIPELINELEVEL level)
     case D3D11_1DDI_3DPIPELINELEVEL_9_1: return D3D_FEATURE_LEVEL_9_1;
     case D3D11_1DDI_3DPIPELINELEVEL_9_2: return D3D_FEATURE_LEVEL_9_2;
     case D3D11_1DDI_3DPIPELINELEVEL_9_3: return D3D_FEATURE_LEVEL_9_3;
+    case D3DWDDM2_0DDI_3DPIPELINELEVEL_12_0: return D3D_FEATURE_LEVEL_12_0;
+    case D3DWDDM2_0DDI_3DPIPELINELEVEL_12_1: return D3D_FEATURE_LEVEL_12_1;
     default: return D3D_FEATURE_LEVEL(0);
     }
 }
@@ -85,7 +98,7 @@ HRESULT APIENTRY create_device_ddi(D3D10DDI_HADAPTER h, D3D10DDIARG_CREATEDEVICE
     const D3D_FEATURE_LEVEL level = feature_level(D3D11DDI_EXTRACT_3DPIPELINELEVEL_FROM_FLAGS(args->Flags));
     VENERA_TRACE("CreateDevice interface=0x%x version=0x%x flags=0x%x: feature level 0x%x", args->Interface,
                  args->Version, args->Flags, level);
-    if (args->Interface != D3D11_1_DDI_INTERFACE_VERSION || !level || level > a->max_level) {
+    if (args->Interface != D3DWDDM2_0_DDI_INTERFACE_VERSION || !level || level > a->max_level) {
         VENERA_WARN("CreateDevice: interface 0x%x at feature level 0x%x not offered", args->Interface, level);
         return E_INVALIDARG;
     }
@@ -146,6 +159,13 @@ HRESULT APIENTRY get_caps(D3D10DDI_HADAPTER h, const D3D10_2DDIARG_GETCAPS* args
                 caps |= D3D11DDICAPS_SHADER_DOUBLES;
             if (a->compute_4x.ComputeShaders_Plus_RawAndStructuredBuffers_Via_Shader_4_x)
                 caps |= D3D11DDICAPS_SHADER_COMPUTE_PLUS_RAW_AND_STRUCTURED_BUFFERS_IN_SHADER_4_X;
+            // The runtime takes D3D11_OPTIONS2's stencil ref, typed UAV loads and ROVs from these.
+            if (a->options2.PSSpecifiedStencilRefSupported)
+                caps |= D3D11DDICAPS_SHADER_SPECIFIED_STENCIL_REF;
+            if (a->options2.TypedUAVLoadAdditionalFormats)
+                caps |= D3D11DDICAPS_SHADER_TYPED_UAV_LOAD_ADDITIONAL_FORMATS;
+            if (a->options2.ROVsSupported)
+                caps |= D3D11DDICAPS_SHADER_ROVS;
             static_cast<D3D11DDI_SHADER_CAPS*>(args->pData)->Caps = caps;
         }
         break;
@@ -155,7 +175,8 @@ HRESULT APIENTRY get_caps(D3D10DDI_HADAPTER h, const D3D10_2DDIARG_GETCAPS* args
             for (auto level : {D3D11_1DDI_3DPIPELINELEVEL_9_1, D3D11_1DDI_3DPIPELINELEVEL_9_2,
                                D3D11_1DDI_3DPIPELINELEVEL_9_3, D3D11DDI_3DPIPELINELEVEL_10_0,
                                D3D11DDI_3DPIPELINELEVEL_10_1, D3D11DDI_3DPIPELINELEVEL_11_0,
-                               D3D11_1DDI_3DPIPELINELEVEL_11_1})
+                               D3D11_1DDI_3DPIPELINELEVEL_11_1, D3DWDDM2_0DDI_3DPIPELINELEVEL_12_0,
+                               D3DWDDM2_0DDI_3DPIPELINELEVEL_12_1})
                 if (feature_level(level) <= a->max_level)
                     caps |= D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(level);
             static_cast<D3D11DDI_3DPIPELINESUPPORT_CAPS*>(args->pData)->Caps = caps;
@@ -175,6 +196,46 @@ HRESULT APIENTRY get_caps(D3D10DDI_HADAPTER h, const D3D10_2DDIARG_GETCAPS* args
             p->PixelShaderMinPrecision = a->min_precision.PixelShaderMinPrecision;
             p->AllOtherStagesMinPrecision = a->min_precision.AllOtherShaderStagesMinPrecision;
         }
+        break;
+    case D3DWDDM1_3DDICAPS_D3D11_OPTIONS1:
+        if (fits(sizeof(D3DWDDM1_3DDI_D3D11_OPTIONS_DATA1))) {
+            // A tier stands for every tier below it too.
+            const D3D11_TILED_RESOURCES_TIER tier = a->options2.TiledResourcesTier;
+            UINT flags = 0;
+            if (tier >= D3D11_TILED_RESOURCES_TIER_1)
+                flags |= D3DWDDM1_3DDI_TILED_RESOURCES_TIER_1_SUPPORTED;
+            if (tier >= D3D11_TILED_RESOURCES_TIER_2)
+                flags |= D3DWDDM1_3DDI_TILED_RESOURCES_TIER_2_SUPPORTED;
+            if (tier >= D3D11_TILED_RESOURCES_TIER_3)
+                flags |= D3DWDDM2_0DDI_TILED_RESOURCES_TIER_3_SUPPORTED;
+            static_cast<D3DWDDM1_3DDI_D3D11_OPTIONS_DATA1*>(args->pData)->TiledResourcesSupportFlags = flags;
+        }
+        break;
+    case D3DWDDM2_0DDICAPS_D3D11_OPTIONS2:
+        // Also the older layout with an ASTC word after the tier (no ASTC): the tier comes first in both.
+        if (fits(sizeof(D3DWDDM2_0DDI_D3D11_OPTIONS2_DATA)))
+            static_cast<D3DWDDM2_0DDI_D3D11_OPTIONS2_DATA*>(args->pData)->ConservativeRasterizationTier =
+                static_cast<D3DWDDM2_0DDI_CONSERVATIVE_RASTERIZATION_TIER>(a->options2.ConservativeRasterizationTier);
+        break;
+    case D3DWDDM2_0DDICAPS_D3D11_OPTIONS3:
+        if (fits(sizeof(D3DWDDM2_0DDI_D3D11_OPTIONS3_DATA))) {
+            auto* p = static_cast<D3DWDDM2_0DDI_D3D11_OPTIONS3_DATA*>(args->pData);
+            p->VPAndRTArrayIndexFromAnyShaderFeedingRasterizer = a->options3.VPAndRTArrayIndexFromAnyShaderFeedingRasterizer;
+        }
+        break;
+    case D3DWDDM2_0DDICAPS_GPUVA_CAPS:
+        if (fits(sizeof(D3DWDDM2_0DDI_GPUVA_CAPS_DATA)))
+            static_cast<D3DWDDM2_0DDI_GPUVA_CAPS_DATA*>(args->pData)->MaxGPUVirtualAddressBitsPerResource =
+                a->gpuva.MaxGPUVirtualAddressBitsPerResource;
+        break;
+    case D3DWDDM1_3DDICAPS_MARKER:              // no marker type: the runtime records no markers
+    case D3DWDDM2_0DDICAPS_MEMORY_ARCHITECTURE: // not UMA, as DXVK says
+    case D3DWDDM2_0DDICAPS_TEXTURE_LAYOUT:      // no device-dependent or standard swizzle layouts
+    case D3DWDDM2_0DDICAPS_TEXTURE_LAYOUT1:
+    case D3DWDDM2_0DDICAPS_SWIZZLE_PATTERN:
+    case D3DWDDM2_2DDICAPS_SHADERCACHE:         // DXVK keeps its own cache
+    case D3DWDDM2_2DDICAPS_TEXTURE_LAYOUT:
+    case D3DWDDM2_2DDICAPS_SWIZZLE_PATTERN:
         break;
     default:
         VENERA_TRACE("GetCaps type %d (%u bytes): not ours, answered with zeros", static_cast<int>(args->Type),

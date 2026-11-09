@@ -307,17 +307,18 @@ void APIENTRY create_depth_stencil_state(D3D10DDI_HDEVICE h, const D3D10_DDI_DEP
     }
 }
 
-SIZE_T APIENTRY calc_private_rasterizer_state_size(D3D10DDI_HDEVICE, const D3D11_1_DDI_RASTERIZER_DESC*)
+SIZE_T APIENTRY calc_private_rasterizer_state_size(D3D10DDI_HDEVICE, const D3DWDDM2_0DDI_RASTERIZER_DESC*)
 {
     return sizeof(StateObject<ID3D11RasterizerState1>);
 }
 
-void APIENTRY create_rasterizer_state(D3D10DDI_HDEVICE h, const D3D11_1_DDI_RASTERIZER_DESC* a,
+// Kept as an ID3D11RasterizerState1, which the state-setting DDIs bind; it is an ID3D11RasterizerState2.
+void APIENTRY create_rasterizer_state(D3D10DDI_HDEVICE h, const D3DWDDM2_0DDI_RASTERIZER_DESC* a,
                                       D3D10DDI_HRASTERIZERSTATE hs, D3D10DDI_HRTRASTERIZERSTATE)
 {
     Device* d = Device::from(h);
     auto* obj = new (hs.pDrvPrivate) StateObject<ID3D11RasterizerState1>;
-    D3D11_RASTERIZER_DESC1 desc{static_cast<D3D11_FILL_MODE>(a->FillMode),
+    D3D11_RASTERIZER_DESC2 desc{static_cast<D3D11_FILL_MODE>(a->FillMode),
                                 static_cast<D3D11_CULL_MODE>(a->CullMode),
                                 a->FrontCounterClockwise,
                                 a->DepthBias,
@@ -327,15 +328,18 @@ void APIENTRY create_rasterizer_state(D3D10DDI_HDEVICE h, const D3D11_1_DDI_RAST
                                 a->ScissorEnable,
                                 a->MultisampleEnable,
                                 a->AntialiasedLineEnable,
-                                a->ForcedSampleCount};
+                                a->ForcedSampleCount,
+                                static_cast<D3D11_CONSERVATIVE_RASTERIZATION_MODE>(a->ConservativeRasterizationMode)};
     // Target-independent rasterization if render targets are bound (see process_max_level in dxvk_bridge.cpp).
     static std::atomic<bool> forced_logged{false};
     if (a->ForcedSampleCount && d->d3d->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1 &&
         !forced_logged.exchange(true, std::memory_order_relaxed))
-        VENERA_WARN("CreateRasterizerState: ForcedSampleCount %u at feature level 11_1 (Direct2D %s): "
+        VENERA_WARN("CreateRasterizerState: ForcedSampleCount %u at feature level 0x%x (Direct2D %s): "
                     "target-independent rasterization is not done",
-                    a->ForcedSampleCount, GetModuleHandleW(L"d2d1.dll") ? "loaded since" : "not loaded");
-    HRESULT hr = d->d3d->CreateRasterizerState1(&desc, obj->state.put());
+                    a->ForcedSampleCount, d->d3d->GetFeatureLevel(),
+                    GetModuleHandleW(L"d2d1.dll") ? "loaded since" : "not loaded");
+    HRESULT hr =
+        d->d3d->CreateRasterizerState2(&desc, reinterpret_cast<ID3D11RasterizerState2**>(obj->state.put()));
     if (FAILED(hr)) {
         VENERA_WARN("CreateRasterizerState failed: 0x%08lx", hr);
         d->set_error(E_OUTOFMEMORY);
@@ -371,7 +375,7 @@ void APIENTRY create_sampler(D3D10DDI_HDEVICE h, const D3D10_DDI_SAMPLER_DESC* a
 
 } // namespace
 
-void fill_pipeline_ddi(D3D11_1DDI_DEVICEFUNCS& t)
+void fill_pipeline_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t)
 {
     t.pfnCalcPrivateShaderSize = calc_private_shader_size;
     t.pfnCalcPrivateTessellationShaderSize = calc_private_tessellation_shader_size;

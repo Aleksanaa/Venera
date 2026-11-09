@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 # venera_d3d11.dll: the D3D10/11 UMD, a DDI shell over DXVK.
 venera_generate_ddi_slots(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/ddi_slots.h" TABLES
-    VENERA_SLOTS_D3D11_1_DEVICE  "${WDK_INC}/um/d3d10umddi.h"  D3D11_1DDI_DEVICEFUNCS
-    VENERA_SLOTS_DXGI_1_2        "${SDK_INC}/um/dxgiddi.h"     DXGI1_2_DDI_BASE_FUNCTIONS)
+    VENERA_SLOTS_WDDM2_0_DEVICE  "${WDK_INC}/um/d3d10umddi.h"  D3DWDDM2_0DDI_DEVICEFUNCS
+    VENERA_SLOTS_DXGI_1_4        "${SDK_INC}/um/dxgiddi.h"     DXGI1_4_DDI_BASE_FUNCTIONS)
 
 # The one source that sees DXVK's headers (see dxvk_bridge.cpp), compiled as DXVK compiles its own.
 add_library(venera-dxvk-bridge OBJECT dxvk_bridge.cpp)
@@ -21,6 +21,7 @@ add_library(venera_d3d11 SHARED
     present.cpp
     query.cpp
     resource.cpp
+    tile.cpp
     view.cpp
     $<TARGET_OBJECTS:venera-dxvk-bridge>)
 # Next to venera_d3d12.dll in the build tree's umd/, where venera-test.ps1 finds them.

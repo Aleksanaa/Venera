@@ -57,7 +57,7 @@ SIZE_T APIENTRY calc_view_size(D3D10DDI_HDEVICE, const Args*)
 
 // --- Shader resource views ---------------------------------------------------------------------------------
 
-void APIENTRY create_srv(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATESHADERRESOURCEVIEW* a,
+void APIENTRY create_srv(D3D10DDI_HDEVICE h, const D3DWDDM2_0DDIARG_CREATESHADERRESOURCEVIEW* a,
                          D3D10DDI_HSHADERRESOURCEVIEW hv, D3D10DDI_HRTSHADERRESOURCEVIEW)
 {
     auto* v = new (hv.pDrvPrivate) ViewObject(ViewObject::srv);
@@ -94,10 +94,10 @@ void APIENTRY create_srv(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATESHADERRESOU
         } else if (array) {
             d.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
             d.Texture2DArray = {a->Tex2D.MostDetailedMip, a->Tex2D.MipLevels, a->Tex2D.FirstArraySlice,
-                                a->Tex2D.ArraySize, 0};
+                                a->Tex2D.ArraySize, a->Tex2D.PlaneSlice};
         } else {
             d.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-            d.Texture2D = {a->Tex2D.MostDetailedMip, a->Tex2D.MipLevels, 0};
+            d.Texture2D = {a->Tex2D.MostDetailedMip, a->Tex2D.MipLevels, a->Tex2D.PlaneSlice};
         }
         break;
     case D3D10DDIRESOURCE_TEXTURE3D:
@@ -133,7 +133,7 @@ void APIENTRY gen_mips(D3D10DDI_HDEVICE h, D3D10DDI_HSHADERRESOURCEVIEW hv)
 
 // --- Render target views -----------------------------------------------------------------------------------
 
-void APIENTRY create_rtv(D3D10DDI_HDEVICE h, const D3D10DDIARG_CREATERENDERTARGETVIEW* a,
+void APIENTRY create_rtv(D3D10DDI_HDEVICE h, const D3DWDDM2_0DDIARG_CREATERENDERTARGETVIEW* a,
                          D3D10DDI_HRENDERTARGETVIEW hv, D3D10DDI_HRTRENDERTARGETVIEW)
 {
     auto* v = new (hv.pDrvPrivate) ViewObject(ViewObject::rtv);
@@ -164,10 +164,10 @@ void APIENTRY create_rtv(D3D10DDI_HDEVICE h, const D3D10DDIARG_CREATERENDERTARGE
             d.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
         } else if (array) {
             d.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
-            d.Texture2DArray = {a->Tex2D.MipSlice, a->Tex2D.FirstArraySlice, a->Tex2D.ArraySize, 0};
+            d.Texture2DArray = {a->Tex2D.MipSlice, a->Tex2D.FirstArraySlice, a->Tex2D.ArraySize, a->Tex2D.PlaneSlice};
         } else {
             d.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-            d.Texture2D = {a->Tex2D.MipSlice, 0};
+            d.Texture2D = {a->Tex2D.MipSlice, a->Tex2D.PlaneSlice};
         }
         break;
     case D3D10DDIRESOURCE_TEXTURE3D:
@@ -249,7 +249,7 @@ void APIENTRY clear_dsv(D3D10DDI_HDEVICE h, D3D10DDI_HDEPTHSTENCILVIEW hv, UINT 
 
 // --- Unordered access views --------------------------------------------------------------------------------
 
-void APIENTRY create_uav(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATEUNORDEREDACCESSVIEW* a,
+void APIENTRY create_uav(D3D10DDI_HDEVICE h, const D3DWDDM2_0DDIARG_CREATEUNORDEREDACCESSVIEW* a,
                          D3D11DDI_HUNORDEREDACCESSVIEW hv, D3D11DDI_HRTUNORDEREDACCESSVIEW)
 {
     auto* v = new (hv.pDrvPrivate) ViewObject(ViewObject::uav);
@@ -277,10 +277,10 @@ void APIENTRY create_uav(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATEUNORDEREDAC
     case D3D10DDIRESOURCE_TEXTURECUBE:
         if (array) {
             d.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2DARRAY;
-            d.Texture2DArray = {a->Tex2D.MipSlice, a->Tex2D.FirstArraySlice, a->Tex2D.ArraySize, 0};
+            d.Texture2DArray = {a->Tex2D.MipSlice, a->Tex2D.FirstArraySlice, a->Tex2D.ArraySize, a->Tex2D.PlaneSlice};
         } else {
             d.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-            d.Texture2D = {a->Tex2D.MipSlice, 0};
+            d.Texture2D = {a->Tex2D.MipSlice, a->Tex2D.PlaneSlice};
         }
         break;
     case D3D10DDIRESOURCE_TEXTURE3D:
@@ -325,12 +325,12 @@ void APIENTRY clear_view(D3D10DDI_HDEVICE h, D3D11DDI_HANDLETYPE type, void* vie
 
 } // namespace
 
-void fill_view_ddi(D3D11_1DDI_DEVICEFUNCS& t)
+void fill_view_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t)
 {
-    t.pfnCalcPrivateShaderResourceViewSize = calc_view_size<D3D11DDIARG_CREATESHADERRESOURCEVIEW>;
-    t.pfnCalcPrivateRenderTargetViewSize = calc_view_size<D3D10DDIARG_CREATERENDERTARGETVIEW>;
+    t.pfnCalcPrivateShaderResourceViewSize = calc_view_size<D3DWDDM2_0DDIARG_CREATESHADERRESOURCEVIEW>;
+    t.pfnCalcPrivateRenderTargetViewSize = calc_view_size<D3DWDDM2_0DDIARG_CREATERENDERTARGETVIEW>;
     t.pfnCalcPrivateDepthStencilViewSize = calc_view_size<D3D11DDIARG_CREATEDEPTHSTENCILVIEW>;
-    t.pfnCalcPrivateUnorderedAccessViewSize = calc_view_size<D3D11DDIARG_CREATEUNORDEREDACCESSVIEW>;
+    t.pfnCalcPrivateUnorderedAccessViewSize = calc_view_size<D3DWDDM2_0DDIARG_CREATEUNORDEREDACCESSVIEW>;
     t.pfnCreateShaderResourceView = create_srv;
     t.pfnDestroyShaderResourceView = destroy_srv;
     t.pfnGenMips = gen_mips;

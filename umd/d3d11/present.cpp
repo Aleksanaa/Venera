@@ -405,6 +405,34 @@ HRESULT APIENTRY present(DXGI_DDI_ARG_PRESENT* a)
     return hr;
 }
 
+// DXGI 1.3's present of several surfaces at once (DirectComposition hands over all its updated surfaces in one; dirty
+// rectangles are hints). One present callback for all, with the first surface, as yttrium's d3d10umd does: it waits
+// for all of this device's rendering, so every surface is complete. Refusing several makes DirectComposition drop the
+// device and build it again, endlessly (Explorer's taskbar never shows).
+HRESULT APIENTRY present1(DXGI_DDI_ARG_PRESENT1* a)
+{
+    if (!a->SurfacesToPresent)
+        return E_INVALIDARG;
+    DXGI_DDI_ARG_PRESENT p{};
+    p.hDevice = a->hDevice;
+    p.hSurfaceToPresent = a->phSurfacesToPresent[0].hSurface;
+    p.SrcSubResourceIndex = a->phSurfacesToPresent[0].SubResourceIndex;
+    p.hDstResource = a->hDstResource;
+    p.DstSubResourceIndex = a->DstSubResourceIndex;
+    p.pDXGIContext = a->pDXGIContext;
+    p.Flags = a->Flags;
+    p.FlipInterval = a->FlipInterval;
+    return present(&p);
+}
+
+// No custom present durations.
+HRESULT APIENTRY check_present_duration_support(DXGI_DDI_ARG_CHECKPRESENTDURATIONSUPPORT* a)
+{
+    a->ClosestSmallerDuration = 0;
+    a->ClosestLargerDuration = 0;
+    return S_OK;
+}
+
 // A copy between surfaces of one size and format family; stretching, conversion and rotation are not supported.
 HRESULT blt(Device& d, DXGI_DDI_HRESOURCE dst, UINT dst_sub, UINT dst_left, UINT dst_top, DXGI_DDI_HRESOURCE src,
             UINT src_sub, const D3D11_BOX* src_box, DXGI_DDI_ARG_BLT_FLAGS flags, DXGI_DDI_MODE_ROTATION rotate)
@@ -530,9 +558,19 @@ HRESULT APIENTRY reclaim_resources(DXGI_DDI_ARG_RECLAIMRESOURCES* a)
     return S_OK;
 }
 
+// DXVK's memory is not in a residency set of ours.
+HRESULT APIENTRY trim_residency_set(DXGI_DDI_ARG_TRIMRESIDENCYSET*) { return S_OK; }
+
+// No multiplane overlays.
+template <class Arg>
+HRESULT APIENTRY no_overlays(Arg*)
+{
+    return DXGI_ERROR_UNSUPPORTED;
+}
+
 } // namespace
 
-void fill_dxgi_ddi(DXGI1_2_DDI_BASE_FUNCTIONS& t)
+void fill_dxgi_ddi(DXGI1_4_DDI_BASE_FUNCTIONS& t)
 {
     t.pfnPresent = present;
     t.pfnGetGammaCaps = get_gamma_caps;
@@ -545,11 +583,16 @@ void fill_dxgi_ddi(DXGI1_2_DDI_BASE_FUNCTIONS& t)
     t.pfnBlt1 = blt1;
     t.pfnOfferResources = offer_resources;
     t.pfnReclaimResources = reclaim_resources;
-    // Multiplane overlays: the runtime only uses these from interface builds after the D3D11.1 one we offer.
-    t.pfnGetMultiplaneOverlayCaps = nullptr;
-    t.pfnGetMultiplaneOverlayFilterRange = nullptr;
-    t.pfnCheckMultiplaneOverlaySupport = nullptr;
-    t.pfnPresentMultiplaneOverlay = nullptr;
+    t.pfnPresent1 = present1;
+    t.pfnCheckPresentDurationSupport = check_present_duration_support;
+    t.pfnTrimResidencySet = trim_residency_set;
+    t.pfnGetMultiplaneOverlayCaps = no_overlays<DXGI_DDI_ARG_GETMULTIPLANEOVERLAYCAPS>;
+    t.pfnGetMultiplaneOverlayGroupCaps = no_overlays<DXGI_DDI_ARG_GETMULTIPLANEOVERLAYGROUPCAPS>;
+    t.pfnPresentMultiplaneOverlay = no_overlays<DXGI_DDI_ARG_PRESENTMULTIPLANEOVERLAY>;
+    t.pfnCheckMultiplaneOverlayColorSpaceSupport = no_overlays<DXGI_DDI_ARG_CHECKMULTIPLANEOVERLAYCOLORSPACESUPPORT>;
+    t.pfnPresentMultiplaneOverlay1 = no_overlays<DXGI_DDI_ARG_PRESENTMULTIPLANEOVERLAY1>;
+    t.pfnReserved1 = nullptr;
+    t.pfnReserved2 = nullptr;
 }
 
 } // namespace venera::umd

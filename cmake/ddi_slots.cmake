@@ -20,9 +20,11 @@ function(venera_generate_ddi_slots)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${header}")
 
     file(READ "${header}" text)
-    string(FIND "${text}" "typedef struct ${struct}\n" begin)
+    # The last definition: a header that defines a table once per header version (d3d10umddi.h's
+    # D3DWDDM2_0DDI_DEVICEFUNCS) puts the newest last.
+    string(FIND "${text}" "typedef struct ${struct}\n" begin REVERSE)
     if(begin EQUAL -1)
-      string(FIND "${text}" "typedef struct ${struct}\r\n" begin)
+      string(FIND "${text}" "typedef struct ${struct}\r\n" begin REVERSE)
     endif()
     if(begin EQUAL -1)
       message(FATAL_ERROR "ddi_slots: ${struct} not found in ${header}")

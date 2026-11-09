@@ -169,12 +169,13 @@ struct QueryObject {
 
 // --- Fill functions of the DDI tables, by source ------------------------------------------------------------------
 
-void fill_resource_ddi(D3D11_1DDI_DEVICEFUNCS& t);   // resource.cpp
-void fill_view_ddi(D3D11_1DDI_DEVICEFUNCS& t);       // view.cpp
-void fill_pipeline_ddi(D3D11_1DDI_DEVICEFUNCS& t);   // pipeline.cpp
-void fill_draw_ddi(D3D11_1DDI_DEVICEFUNCS& t);       // draw.cpp
-void fill_query_ddi(D3D11_1DDI_DEVICEFUNCS& t);      // query.cpp
-void fill_dxgi_ddi(DXGI1_2_DDI_BASE_FUNCTIONS& t);   // present.cpp
+void fill_resource_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t);   // resource.cpp
+void fill_view_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t);       // view.cpp
+void fill_pipeline_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t);   // pipeline.cpp
+void fill_draw_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t);       // draw.cpp
+void fill_query_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t);      // query.cpp
+void fill_tile_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t);       // tile.cpp
+void fill_dxgi_ddi(DXGI1_4_DDI_BASE_FUNCTIONS& t);      // present.cpp
 
 // Creating shared surfaces and primaries, and opening those of other processes (present.cpp).
 bool is_shared_surface(const D3D11DDIARG_CREATERESOURCE& args);
@@ -187,7 +188,8 @@ void destroy_render_fence(Device& d);
 
 // Format answers (format.cpp).
 void APIENTRY check_format_support(D3D10DDI_HDEVICE h, DXGI_FORMAT format, UINT* caps);
-void APIENTRY check_multisample_quality_levels(D3D10DDI_HDEVICE h, DXGI_FORMAT format, UINT samples, UINT* levels);
+void APIENTRY check_multisample_quality_levels(D3D10DDI_HDEVICE h, DXGI_FORMAT format, UINT samples, UINT flags,
+                                              UINT* levels);
 
 // Translations of DDI values that differ from the API's (resource.cpp).
 UINT api_bind_flags(UINT ddi_bind);

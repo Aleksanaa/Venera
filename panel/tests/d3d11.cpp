@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <cwchar>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -514,6 +515,264 @@ bool update_test(ID3D11Device* dev, ID3D11DeviceContext* ctx)
     return result(t, ok);
 }
 
+// --- D3D11.3 (the WDDM 2.0 DDI) ------------------------------------------------------------------------------
+
+// The D3D11.3 options as the runtime reports them from the driver's WDDM 2.0 caps, and what the level promises.
+bool features_test(ID3D11Device* dev, ID3D11DeviceContext*)
+{
+    const char* t = "d3d11.3 features";
+    D3D11_FEATURE_DATA_D3D11_OPTIONS2 o2{};
+    D3D11_FEATURE_DATA_D3D11_OPTIONS3 o3{};
+    D3D11_FEATURE_DATA_FORMAT_SUPPORT2 rg32f{DXGI_FORMAT_R32G32_FLOAT, 0};
+    if (!check(t, "CheckFeatureSupport(OPTIONS2)", dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &o2, sizeof(o2))) ||
+        !check(t, "CheckFeatureSupport(OPTIONS3)", dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS3, &o3, sizeof(o3))) ||
+        !check(t, "CheckFeatureSupport(FORMAT_SUPPORT2)",
+               dev->CheckFeatureSupport(D3D11_FEATURE_FORMAT_SUPPORT2, &rg32f, sizeof(rg32f))))
+        return result(t, false);
+    const D3D_FEATURE_LEVEL level = dev->GetFeatureLevel();
+    std::printf("    feature level 0x%x: typed UAV loads %d, ROVs %d, stencil ref %d, conservative rasterization tier %d, "
+                "tiled resources tier %d, VP/RT index from any shader %d; R32G32_FLOAT support2 0x%x\n",
+                level, o2.TypedUAVLoadAdditionalFormats, o2.ROVsSupported, o2.PSSpecifiedStencilRefSupported,
+                o2.ConservativeRasterizationTier, o2.TiledResourcesTier,
+                o3.VPAndRTArrayIndexFromAnyShaderFeedingRasterizer, rg32f.OutFormatSupport2);
+    // GravityMark's need: typed UAV loads, of RG32F among others.
+    bool ok = o2.TypedUAVLoadAdditionalFormats && (rg32f.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD);
+    if (level < D3D_FEATURE_LEVEL_12_0)
+        std::printf("    %s: below 12_0 (DXVK's level on this GPU, or Direct2D in the process)\n", t);
+    // 12_0 promises tiled resources tier 2 and typed UAV loads; 12_1 adds ROVs and conservative rasterization.
+    if (level >= D3D_FEATURE_LEVEL_12_0 && o2.TiledResourcesTier < D3D11_TILED_RESOURCES_TIER_2) {
+        std::printf("    %s: 12_0 without tiled resources tier 2\n", t);
+        ok = false;
+    }
+    if (level >= D3D_FEATURE_LEVEL_12_1 && (!o2.ROVsSupported || !o2.ConservativeRasterizationTier)) {
+        std::printf("    %s: 12_1 without ROVs or conservative rasterization\n", t);
+        ok = false;
+    }
+    return result(t, ok);
+}
+
+// GravityMark's occluder pass, which the runtime rejects without typed UAV loads: a compute shader reading and
+// writing an R32G32_FLOAT texture through one UAV.
+const char* kTypedLoadHlsl = R"(
+RWTexture2D<float2> tex : register(u0);
+[numthreads(8, 8, 1)] void cs(uint3 id : SV_DispatchThreadID) { tex[id.xy] = tex[id.xy] * 2 + float2(1, id.x); }
+)";
+
+bool typed_uav_load_test(ID3D11Device* dev, ID3D11DeviceContext* ctx)
+{
+    const char* t = "typed uav load";
+    constexpr UINT n = 16;
+    std::vector<float> in(n * n * 2);
+    for (UINT i = 0; i < n * n; i++) {
+        in[i * 2] = float(i);
+        in[i * 2 + 1] = 0.5f;
+    }
+    Ref<ID3DBlob> csb;
+    Ref<ID3D11ComputeShader> cs;
+    Ref<ID3D11Texture2D> tex, staging;
+    Ref<ID3D11UnorderedAccessView> uav;
+    D3D11_TEXTURE2D_DESC td{n, n, 1, 1, DXGI_FORMAT_R32G32_FLOAT, {1, 0}, D3D11_USAGE_DEFAULT,
+                            D3D11_BIND_UNORDERED_ACCESS, 0, 0};
+    D3D11_SUBRESOURCE_DATA ti{in.data(), n * 8, 0};
+    D3D11_TEXTURE2D_DESC sd = td;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (!compile(kTypedLoadHlsl, "cs", "cs_5_0", &csb) ||
+        !check(t, "CreateComputeShader", dev->CreateComputeShader(csb->GetBufferPointer(), csb->GetBufferSize(), nullptr, cs.put())) ||
+        !check(t, "CreateTexture2D", dev->CreateTexture2D(&td, &ti, tex.put())) ||
+        !check(t, "CreateTexture2D(staging)", dev->CreateTexture2D(&sd, nullptr, staging.put())) ||
+        !check(t, "CreateUnorderedAccessView", dev->CreateUnorderedAccessView(tex, nullptr, uav.put())))
+        return result(t, false);
+    ctx->CSSetShader(cs, nullptr, 0);
+    ID3D11UnorderedAccessView* uavs[] = {uav};
+    ctx->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+    ctx->Dispatch(n / 8, n / 8, 1);
+    ctx->CopyResource(staging, tex);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    bool ok = check(t, "Map", ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m));
+    for (UINT y = 0; ok && y < n; y++)
+        for (UINT x = 0; ok && x < n; x++) {
+            const float* v = reinterpret_cast<const float*>(static_cast<const uint8_t*>(m.pData) + y * m.RowPitch) + x * 2;
+            const float want0 = float(y * n + x) * 2 + 1, want1 = 0.5f * 2 + float(x);
+            if (v[0] != want0 || v[1] != want1) {
+                std::printf("    %s: texel (%u, %u) is (%g, %g), expected (%g, %g)\n", t, x, y, v[0], v[1], want0,
+                            want1);
+                ok = false;
+            }
+        }
+    if (m.pData)
+        ctx->Unmap(staging, 0);
+    ctx->ClearState();
+    return result(t, ok);
+}
+
+// A 256x256 RGBA8 tiled texture (2x2 tiles of 128x128) on a tile pool: mapped, cleared, one tile written with
+// UpdateTiles and read with CopyTiles, the packed mip count asked for, a tile unmapped (tier 2: it reads as zero),
+// and the pool grown.
+bool tiled_test(ID3D11Device* dev, ID3D11DeviceContext* ctx)
+{
+    const char* t = "tiled resources";
+    D3D11_FEATURE_DATA_D3D11_OPTIONS2 o2{};
+    dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &o2, sizeof(o2));
+    if (!o2.TiledResourcesTier) {
+        std::printf("    %s: no tiled resources at feature level 0x%x\n", t, dev->GetFeatureLevel());
+        return result(t, dev->GetFeatureLevel() < D3D_FEATURE_LEVEL_12_0);
+    }
+    Ref<ID3D11Device2> dev2;
+    Ref<ID3D11DeviceContext2> ctx2;
+    constexpr UINT tile = 64 * 1024, size = 256;
+    Ref<ID3D11Buffer> pool, linear, staging;
+    Ref<ID3D11Texture2D> tex;
+    Ref<ID3D11RenderTargetView> rtv;
+    D3D11_BUFFER_DESC pd{4 * tile, D3D11_USAGE_DEFAULT, 0, 0, D3D11_RESOURCE_MISC_TILE_POOL, 0};
+    D3D11_BUFFER_DESC ld{tile, D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE, 0, 0, 0};
+    D3D11_BUFFER_DESC sd{tile, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
+    D3D11_TEXTURE2D_DESC td{size, size, 1, 1, DXGI_FORMAT_R8G8B8A8_UNORM, {1, 0}, D3D11_USAGE_DEFAULT,
+                            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0, D3D11_RESOURCE_MISC_TILED};
+    if (!check(t, "QueryInterface(ID3D11Device2)", dev->QueryInterface(IID_PPV_ARGS(dev2.put()))) ||
+        !check(t, "QueryInterface(ID3D11DeviceContext2)", ctx->QueryInterface(IID_PPV_ARGS(ctx2.put()))) ||
+        !check(t, "CreateBuffer(tile pool)", dev->CreateBuffer(&pd, nullptr, pool.put())) ||
+        !check(t, "CreateBuffer(linear)", dev->CreateBuffer(&ld, nullptr, linear.put())) ||
+        !check(t, "CreateBuffer(staging)", dev->CreateBuffer(&sd, nullptr, staging.put())) ||
+        !check(t, "CreateTexture2D(tiled)", dev->CreateTexture2D(&td, nullptr, tex.put())) ||
+        !check(t, "CreateRenderTargetView", dev->CreateRenderTargetView(tex, nullptr, rtv.put())))
+        return result(t, false);
+    UINT tiles = 0, subresources = 1;
+    D3D11_PACKED_MIP_DESC packed{};
+    D3D11_TILE_SHAPE shape{};
+    D3D11_SUBRESOURCE_TILING tiling{};
+    dev2->GetResourceTiling(tex, &tiles, &packed, &shape, &subresources, 0, &tiling);
+    std::printf("    %s: %u tiles of %ux%u, %u packed mips in %u tiles\n", t, tiles, shape.WidthInTexels,
+                shape.HeightInTexels, packed.NumPackedMips, packed.NumTilesForPackedMips);
+    bool ok = tiles == 4 && shape.WidthInTexels == 128 && shape.HeightInTexels == 128 && !packed.NumPackedMips;
+
+    const D3D11_TILED_RESOURCE_COORDINATE origin{0, 0, 0, 0}, right{1, 0, 0, 0}, below{0, 1, 0, 0};
+    const D3D11_TILE_REGION_SIZE all{4, FALSE, 0, 0, 0}, one{1, FALSE, 0, 0, 0};
+    const UINT start = 0, count = 4;
+    ok = ok && check(t, "UpdateTileMappings", ctx2->UpdateTileMappings(tex, 1, &origin, &all, pool, 1, nullptr, &start,
+                                                                         &count, 0));
+    const float red[4] = {1, 0, 0, 1};
+    ctx->ClearRenderTargetView(rtv, red);
+    const std::vector<uint32_t> green(tile / 4, 0xff00ff00);
+    ctx2->UpdateTiles(tex, &right, &one, green.data(), 0);
+    ctx2->TiledResourceBarrier(nullptr, tex);
+    std::vector<uint32_t> texels;
+    UINT w;
+    ok = ok && read_back(dev, ctx, tex, &texels, &w) && expect_texel(t, texels, w, 10, 10, 0xff0000ff) &&
+         expect_texel(t, texels, w, 200, 10, 0xff00ff00) && expect_texel(t, texels, w, 10, 200, 0xff0000ff) &&
+         expect_texel(t, texels, w, 200, 200, 0xff0000ff);
+
+    // The written tile back into a buffer, texels in rows.
+    ctx2->CopyTiles(tex, &right, &one, linear, 0, D3D11_TILE_COPY_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+    ctx->CopyResource(staging, linear);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (ok && check(t, "Map", ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
+        const auto* v = static_cast<const uint32_t*>(m.pData);
+        for (UINT i = 0; i < tile / 4 && ok; i++)
+            if (v[i] != 0xff00ff00) {
+                std::printf("    %s: CopyTiles texel %u is 0x%08x, expected 0xff00ff00\n", t, i, v[i]);
+                ok = false;
+            }
+        ctx->Unmap(staging, 0);
+    }
+
+    if (o2.TiledResourcesTier >= D3D11_TILED_RESOURCES_TIER_2) {
+        const UINT null_range = D3D11_TILE_RANGE_NULL;
+        ok = ok && check(t, "UpdateTileMappings(null)", ctx2->UpdateTileMappings(tex, 1, &below, &one, nullptr, 1,
+                                                                                   &null_range, nullptr, nullptr, 0));
+        ok = ok && read_back(dev, ctx, tex, &texels, &w) && expect_texel(t, texels, w, 10, 200, 0) &&
+             expect_texel(t, texels, w, 200, 10, 0xff00ff00);
+    }
+    ok = ok && check(t, "ResizeTilePool", ctx2->ResizeTilePool(pool, 8 * tile));
+    ctx->ClearState();
+    return result(t, ok);
+}
+
+const char* kPointHlsl = R"(
+float4 vs(float2 pos : POSITION) : SV_Position { return float4(pos, 0, 1); }
+float4 ps() : SV_Target { return 1; }
+)";
+
+// A triangle inside pixel (2, 2) of an 8x8 target that misses the pixel's centre: only conservative rasterization
+// (ID3D11RasterizerState2, the WDDM 2.0 rasterizer DDI) draws it.
+bool conservative_test(ID3D11Device* dev, ID3D11DeviceContext* ctx)
+{
+    const char* t = "conservative rasterization";
+    D3D11_FEATURE_DATA_D3D11_OPTIONS2 o2{};
+    dev->CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &o2, sizeof(o2));
+    if (!o2.ConservativeRasterizationTier) {
+        std::printf("    %s: not supported at feature level 0x%x\n", t, dev->GetFeatureLevel());
+        return result(t, dev->GetFeatureLevel() < D3D_FEATURE_LEVEL_12_1);
+    }
+    Ref<ID3D11Device3> dev3;
+    Ref<ID3DBlob> vsb, psb;
+    Ref<ID3D11VertexShader> vs;
+    Ref<ID3D11PixelShader> ps;
+    Ref<ID3D11InputLayout> layout;
+    Ref<ID3D11Buffer> vb;
+    Ref<ID3D11Texture2D> tex;
+    Ref<ID3D11RenderTargetView> rtv;
+    Ref<ID3D11RasterizerState2> plain, conservative;
+    // Pixel (x, y) spans [x, x + 1]: NDC x = px / 4 - 1, y = 1 - py / 4 on 8 pixels.
+    auto ndc = [](float px, float py) { return std::pair<float, float>{px / 4 - 1, 1 - py / 4}; };
+    const auto a = ndc(2.1f, 2.1f), b = ndc(2.4f, 2.1f), c = ndc(2.1f, 2.4f);
+    const float verts[] = {a.first, a.second, b.first, b.second, c.first, c.second};
+    const D3D11_INPUT_ELEMENT_DESC element{"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0};
+    D3D11_BUFFER_DESC vbd{sizeof(verts), D3D11_USAGE_IMMUTABLE, D3D11_BIND_VERTEX_BUFFER, 0, 0, 0};
+    D3D11_SUBRESOURCE_DATA vbi{verts, 0, 0};
+    D3D11_RASTERIZER_DESC2 rd{D3D11_FILL_SOLID, D3D11_CULL_NONE, FALSE, 0, 0, 0, TRUE, FALSE, FALSE, FALSE, 0,
+                              D3D11_CONSERVATIVE_RASTERIZATION_MODE_OFF};
+    D3D11_RASTERIZER_DESC2 cd = rd;
+    cd.ConservativeRaster = D3D11_CONSERVATIVE_RASTERIZATION_MODE_ON;
+    if (!compile(kPointHlsl, "vs", "vs_5_0", &vsb) || !compile(kPointHlsl, "ps", "ps_5_0", &psb) ||
+        !check(t, "QueryInterface(ID3D11Device3)", dev->QueryInterface(IID_PPV_ARGS(dev3.put()))) ||
+        !check(t, "CreateVertexShader", dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, vs.put())) ||
+        !check(t, "CreatePixelShader", dev->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, ps.put())) ||
+        !check(t, "CreateInputLayout", dev->CreateInputLayout(&element, 1, vsb->GetBufferPointer(), vsb->GetBufferSize(), layout.put())) ||
+        !check(t, "CreateBuffer", dev->CreateBuffer(&vbd, &vbi, vb.put())) ||
+        !check(t, "CreateRasterizerState2", dev3->CreateRasterizerState2(&rd, plain.put())) ||
+        !check(t, "CreateRasterizerState2(conservative)", dev3->CreateRasterizerState2(&cd, conservative.put())) ||
+        !make_target(dev, 8, 1, &tex, &rtv))
+        return result(t, false);
+    ID3D11RenderTargetView* rtvs[] = {rtv};
+    UINT stride = 8, offset = 0;
+    ID3D11Buffer* vbs[] = {vb};
+    const float black[4] = {0, 0, 0, 0};
+    bool ok = true;
+    for (ID3D11RasterizerState2* state : {plain.p, conservative.p}) {
+        ctx->ClearRenderTargetView(rtv, black);
+        ctx->OMSetRenderTargets(1, rtvs, nullptr);
+        set_viewport(ctx, 8);
+        ctx->IASetVertexBuffers(0, 1, vbs, &stride, &offset);
+        ctx->IASetInputLayout(layout);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(vs, nullptr, 0);
+        ctx->PSSetShader(ps, nullptr, 0);
+        ctx->RSSetState(state);
+        ctx->Draw(3, 0);
+        std::vector<uint32_t> texels;
+        UINT w;
+        const uint32_t want = state == conservative.p ? 0xffffffff : 0;
+        ok = ok && read_back(dev, ctx, tex, &texels, &w) && expect_texel(t, texels, w, 2, 2, want) &&
+             expect_texel(t, texels, w, 5, 5, 0);
+    }
+    ctx->ClearState();
+    return result(t, ok);
+}
+
+// IDXGIDevice3::Trim (a WDDM 2.0 flush with the trim flag), then rendering goes on.
+bool trim_test(ID3D11Device* dev, ID3D11DeviceContext* ctx)
+{
+    const char* t = "trim";
+    Ref<IDXGIDevice3> dxgi;
+    if (!check(t, "QueryInterface(IDXGIDevice3)", dev->QueryInterface(IID_PPV_ARGS(dxgi.put()))))
+        return result(t, false);
+    ctx->ClearState();
+    dxgi->Trim();
+    return result(t, clear_test(dev, ctx));
+}
+
 bool shared_child(ID3D11Device* dev, ID3D11DeviceContext* ctx, HANDLE handle)
 {
     Ref<ID3D11Texture2D> opened;
@@ -994,8 +1253,11 @@ bool on_device(bool (*test)(ID3D11Device*, ID3D11DeviceContext*, IDXGIAdapter*))
     Ref<ID3D11Device> dev;
     Ref<ID3D11DeviceContext> ctx;
     D3D_FEATURE_LEVEL level{};
-    HRESULT hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
-                                   dev.put(), &level, ctx.put());
+    // Up to 12_1, which a list must name: the default list stops at 11_1.
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_1,
+                                        D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+    HRESULT hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, ARRAYSIZE(levels),
+                                   D3D11_SDK_VERSION, dev.put(), &level, ctx.put());
     std::printf("D3D11CreateDevice: 0x%08lx, feature level 0x%x, venera_d3d11.dll %s: %s\n", hr, level,
                 GetModuleHandleW(L"venera_d3d11.dll") ? "loaded" : "NOT loaded", SUCCEEDED(hr) ? "ok" : "FAIL");
     return SUCCEEDED(hr) && test(dev, ctx, adapter);
@@ -1039,6 +1301,15 @@ TestGroup d3d11Tests()
         {"queries", L"Queries", L"An event, an occlusion query and timestamps", run<queries_test>},
         {"update", L"Updates", L"Dynamic buffers mapped with discard and no-overwrite, UpdateSubresource",
          run<update_test>},
+        {"features", L"D3D11.3 features", L"Feature level and the D3D11.3 options (typed UAV loads and the rest)",
+         run<features_test>},
+        {"typed-uav-load", L"Typed UAV loads", L"A compute shader reading and writing RG32F through a UAV, as GravityMark",
+         run<typed_uav_load_test>},
+        {"tiled", L"Tiled resources", L"Tile mappings on a tile pool, UpdateTiles, CopyTiles, an unmapped tile",
+         run<tiled_test>},
+        {"conservative", L"Conservative rasterization", L"A triangle smaller than a pixel, missing its centre",
+         run<conservative_test>},
+        {"trim", L"Trim", L"IDXGIDevice3::Trim, then a clear", run<trim_test>},
         {"kmt-adapter", L"Kernel adapter",
          L"The KMD reports the DXGI adapter's LUID, where the drivers open shared memory", runAdapter<kmt_adapter_test>},
         {"shared", L"Shared texture", L"A texture opened by another device and process, as DWM does",

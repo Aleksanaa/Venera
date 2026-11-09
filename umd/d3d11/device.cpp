@@ -33,9 +33,10 @@ void APIENTRY destroy_device(D3D10DDI_HDEVICE h)
 }
 
 // The runtime moved the table; we keep no pointers into it.
-void APIENTRY relocate_device_funcs(D3D10DDI_HDEVICE, D3D11_1DDI_DEVICEFUNCS*) {}
+void APIENTRY relocate_device_funcs(D3D10DDI_HDEVICE, D3DWDDM2_0DDI_DEVICEFUNCS*) {}
 
-BOOL APIENTRY flush(D3D10DDI_HDEVICE h, UINT flags)
+// Every context type is the one DXVK context. IDXGIDevice3::Trim adds the trim flag: DXVK keeps nothing to trim.
+BOOL APIENTRY flush(D3D10DDI_HDEVICE h, UINT /*context_type*/, UINT /*flags*/)
 {
     // Another device or process may read a shared surface once this returns, ordered by nothing else: our rendering
     // runs on DXVK's Vulkan queue, which the runtime does not schedule. So complete it.
@@ -134,8 +135,8 @@ HRESULT create_device(D3D10DDIARG_CREATEDEVICE& args, const viogpu::AdapterInfo&
     }
     d->present_context = cc.hContext;
 
-    auto& t = *args.p11_1DeviceFuncs;
-    VENERA_FILL_STUBS(t, "device", VENERA_SLOTS_D3D11_1_DEVICE);
+    auto& t = *args.pWDDM2_0DeviceFuncs;
+    VENERA_FILL_STUBS(t, "device", VENERA_SLOTS_WDDM2_0_DEVICE);
     t.pfnDestroyDevice = destroy_device;
     t.pfnRelocateDeviceFuncs = relocate_device_funcs;
     t.pfnFlush = flush;
@@ -145,14 +146,18 @@ HRESULT create_device(D3D10DDIARG_CREATEDEVICE& args, const viogpu::AdapterInfo&
     t.pfnCheckDeferredContextHandleSizes = check_deferred_context_handle_sizes;
     t.pfnCheckFormatSupport = check_format_support;
     t.pfnCheckMultisampleQualityLevels = check_multisample_quality_levels;
+    // No markers (D3DWDDM1_3DDICAPS_MARKER): nothing to record.
+    set_noop(t.pfnSetMarker);
+    set_noop(t.pfnSetMarkerMode);
     fill_resource_ddi(t);
     fill_view_ddi(t);
     fill_pipeline_ddi(t);
     fill_draw_ddi(t);
     fill_query_ddi(t);
+    fill_tile_ddi(t);
 
-    auto& dxgi = *args.DXGIBaseDDI.pDXGIDDIBaseFunctions3;
-    VENERA_FILL_STUBS(dxgi, "dxgi", VENERA_SLOTS_DXGI_1_2);
+    auto& dxgi = *args.DXGIBaseDDI.pDXGIDDIBaseFunctions5;
+    VENERA_FILL_STUBS(dxgi, "dxgi", VENERA_SLOTS_DXGI_1_4);
     fill_dxgi_ddi(dxgi);
 
     VENERA_TRACE("CreateDevice: ok on %s, feature level 0x%x (external memory %d, drm modifiers %d, alias %d)",

@@ -39,12 +39,13 @@ bool is_predicate(D3D11_QUERY q)
            (q >= D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0 && q <= D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3);
 }
 
-SIZE_T APIENTRY calc_private_query_size(D3D10DDI_HDEVICE, const D3D10DDIARG_CREATEQUERY*)
+SIZE_T APIENTRY calc_private_query_size(D3D10DDI_HDEVICE, const D3DWDDM2_0DDIARG_CREATEQUERY*)
 {
     return sizeof(QueryObject);
 }
 
-void APIENTRY create_query(D3D10DDI_HDEVICE h, const D3D10DDIARG_CREATEQUERY* a, D3D10DDI_HQUERY hq,
+// The context type does not matter: every one is the one DXVK context.
+void APIENTRY create_query(D3D10DDI_HDEVICE h, const D3DWDDM2_0DDIARG_CREATEQUERY* a, D3D10DDI_HQUERY hq,
                            D3D10DDI_HRTQUERY)
 {
     Device* d = Device::from(h);
@@ -119,7 +120,7 @@ void APIENTRY set_predication(D3D10DDI_HDEVICE h, D3D10DDI_HQUERY hq, BOOL value
 
 } // namespace
 
-void fill_query_ddi(D3D11_1DDI_DEVICEFUNCS& t)
+void fill_query_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t)
 {
     t.pfnCalcPrivateQuerySize = calc_private_query_size;
     t.pfnCreateQuery = create_query;

@@ -65,11 +65,11 @@ Rc<DxvkAdapter> gpu(const Rc<DxvkInstance>& inst)
     return nullptr;
 }
 
-// At most 11_1, the highest the D3D11.1 DDI has. DXVK lacks 11_1's target-independent rasterization, which mostly
-// Direct2D uses (DWM included), so processes with d2d1.dll loaded get 11_0.
+// DXVK lacks the target-independent rasterization of 11_1 and later, which mostly Direct2D uses (DWM included), so
+// processes with d2d1.dll loaded get 11_0.
 D3D_FEATURE_LEVEL process_max_level()
 {
-    return GetModuleHandleW(L"d2d1.dll") ? D3D_FEATURE_LEVEL_11_0 : D3D_FEATURE_LEVEL_11_1;
+    return GetModuleHandleW(L"d2d1.dll") ? D3D_FEATURE_LEVEL_11_0 : D3D_FEATURE_LEVEL_12_1;
 }
 
 } // namespace

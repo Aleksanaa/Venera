@@ -209,7 +209,7 @@ void APIENTRY srv_read_after_write_hazard(D3D10DDI_HDEVICE, D3D10DDI_HSHADERRESO
 
 } // namespace
 
-void fill_draw_ddi(D3D11_1DDI_DEVICEFUNCS& t)
+void fill_draw_ddi(D3DWDDM2_0DDI_DEVICEFUNCS& t)
 {
 #define VENERA_FILL_STAGE(Ddi, Name)                                                                                   \
     t.pfn##Name##SetShader = Ddi##_set_shader;                                                                      \

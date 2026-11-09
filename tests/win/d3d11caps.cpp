@@ -37,8 +37,11 @@ int main(int argc, char** argv)
     }
     ID3D11Device* d = nullptr;
     D3D_FEATURE_LEVEL level{};
+    // Up to 12_1, which a list must name: the default list stops at 11_1.
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_1,
+                                        D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                   nullptr, 0, D3D11_SDK_VERSION, &d, &level, nullptr);
+                                   levels, ARRAYSIZE(levels), D3D11_SDK_VERSION, &d, &level, nullptr);
     if (FAILED(hr)) {
         std::fprintf(out, "D3D11CreateDevice: 0x%08lx\n", hr);
         return 1;

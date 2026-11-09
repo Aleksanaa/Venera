@@ -4,7 +4,8 @@
 // (third_party/virtio-win-mesa, frontends/d3d10umd/Device.cpp), which pass the Windows 11 runtime:
 //   - formats the driver has no Vulkan format for are NOT_SUPPORTED; R10G10B10_XR_BIAS_A2 reports nothing (only
 //     creation is needed);
-//   - typeless and depth/stencil formats are no render targets, blend, logic op or typed UAV formats;
+//   - typeless and depth/stencil formats are no render targets, blend, logic op or typed UAV formats, and typed UAV
+//     loads come only with typed UAV stores;
 //   - the formats a feature level requires to be blendable render targets report both, and only those blend;
 //   - logic ops only on the UINT render target formats;
 //   - MSAA at 2, 4 and 8 samples with one quality level; depth plane-only views multisample-load but report no
@@ -138,8 +139,8 @@ bool msaa_sample_count(UINT n)
     return n == 2 || n == 4 || n == 8;
 }
 
-// DXVK's quality levels for `samples` of `format`, at most one.
-UINT msaa_levels(Device& d, DXGI_FORMAT format, UINT samples)
+// DXVK's quality levels for `samples` of `format` (as a tiled resource with the tiled flag), at most one.
+UINT msaa_levels(Device& d, DXGI_FORMAT format, UINT samples, UINT flags = 0)
 {
     // Keep RGB32 typed views within the typeless storage family's MSAA support.
     if (format == DXGI_FORMAT_R32G32B32_FLOAT || format == DXGI_FORMAT_R32G32B32_UINT ||
@@ -147,7 +148,7 @@ UINT msaa_levels(Device& d, DXGI_FORMAT format, UINT samples)
         format = DXGI_FORMAT_R32G32B32_TYPELESS;
     UINT levels = 0;
     if (!msaa_sample_count(samples) || depth_load_only(format) ||
-        FAILED(d.d3d->CheckMultisampleQualityLevels(format, samples, &levels)))
+        FAILED(d.d3d->CheckMultisampleQualityLevels1(format, samples, flags, &levels)))
         return 0;
     return levels ? 1 : 0;
 }
@@ -195,6 +196,9 @@ void APIENTRY check_format_support(D3D10DDI_HDEVICE h, DXGI_FORMAT format, UINT*
             *caps |= D3D11_1DDI_FORMAT_SUPPORT_OUTPUT_MERGER_LOGIC_OP;
         if (api & D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW)
             *caps |= D3D11_1DDI_FORMAT_SUPPORT_UAV_WRITES;
+        if ((*caps & D3D11_1DDI_FORMAT_SUPPORT_UAV_WRITES) &&
+            (s2.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD))
+            *caps |= D3DWDDM2_0DDI_FORMAT_SUPPORT_UAV_READS;
         if (msaa_any(*d, format)) {
             if (*caps & D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET)
                 *caps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_RENDERTARGET;
@@ -208,14 +212,19 @@ void APIENTRY check_format_support(D3D10DDI_HDEVICE h, DXGI_FORMAT format, UINT*
         if (depth_load_only(format) && (api & D3D11_FORMAT_SUPPORT_MULTISAMPLE_LOAD))
             *caps |= D3D10_DDI_FORMAT_SUPPORT_MULTISAMPLE_LOAD;
     }
+    if (s2.OutFormatSupport2 & D3D11_FORMAT_SUPPORT2_TILED)
+        *caps |= D3DWDDM1_3DDI_FORMAT_SUPPORT_TILED;
     VENERA_VERBOSE("CheckFormatSupport(%d): api 0x%x/0x%x -> 0x%x", format, api, s2.OutFormatSupport2, *caps);
 }
 
-void APIENTRY check_multisample_quality_levels(D3D10DDI_HDEVICE h, DXGI_FORMAT format, UINT samples, UINT* levels)
+void APIENTRY check_multisample_quality_levels(D3D10DDI_HDEVICE h, DXGI_FORMAT format, UINT samples, UINT flags,
+                                              UINT* levels)
 {
     Device* d = Device::from(h);
-    *levels = msaa_levels(*d, format, samples);
-    VENERA_VERBOSE("CheckMultisampleQualityLevels(%d, %u) -> %u", format, samples, *levels);
+    // Only the tiled flag (the API's value) is passed on: yttrium's d3d10umd answers the standard and centre pattern
+    // values here as a plain query, and DXVK has no levels for any other flag.
+    *levels = msaa_levels(*d, format, samples, flags & D3D11_CHECK_MULTISAMPLE_QUALITY_LEVELS_TILED_RESOURCE);
+    VENERA_VERBOSE("CheckMultisampleQualityLevels(%d, %u, 0x%x) -> %u", format, samples, flags, *levels);
 }
 
 } // namespace venera::umd
