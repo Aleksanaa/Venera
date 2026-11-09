@@ -7,6 +7,7 @@
 #pragma once
 #include "helper.h"
 #include "viogpum.h"
+#include "viogpu_resource_refs.h"
 
 class VioGpuAdapter;
 class VioGpuAllocation;
@@ -48,6 +49,8 @@ class VioGpuDevice
     }
 
     CtrlQueue *GetCtrlQueue();
+    NTSTATUS AttachResource(VioGpuResourceRefs::Entry *entry, UINT resource_id);
+    void DetachResource(VioGpuResourceRefs::Entry *entry);
     PEPROCESS GetOwnerProcess() const
     {
         return m_owner_process;
@@ -64,6 +67,8 @@ class VioGpuDevice
     bool m_context_created;
     PEPROCESS m_owner_process;
     HANDLE m_owner_pid;
+    FAST_MUTEX m_resource_mutex;
+    VioGpuResourceRefs m_resource_refs;
 };
 
 class VioGpuDeviceAllocation
@@ -71,6 +76,7 @@ class VioGpuDeviceAllocation
   public:
     VioGpuDeviceAllocation(VioGpuDevice *device, VioGpuAllocation *allocation);
     ~VioGpuDeviceAllocation();
+    NTSTATUS Init();
 
     VioGpuAllocation *GetAllocation();
 
@@ -78,4 +84,5 @@ class VioGpuDeviceAllocation
     VioGpuAllocation *m_pAllocation;
     VioGpuDevice *m_pDevice;
     bool m_attached;
+    VioGpuResourceRefs::Entry m_resource_entry;
 };

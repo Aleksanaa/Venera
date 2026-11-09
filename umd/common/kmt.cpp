@@ -12,14 +12,14 @@ namespace venera::umd {
 
 std::unique_ptr<KmtDevice> KmtDevice::open()
 {
-    HMODULE gdi = LoadLibraryW(L"gdi32.dll");
-    if (!gdi)
-        return nullptr;
     std::unique_ptr<KmtDevice> k(new (std::nothrow) KmtDevice);
     if (!k)
         return nullptr;
+    k->gdi_ = LoadLibraryW(L"gdi32.dll");
+    if (!k->gdi_)
+        return nullptr;
     auto get = [&](auto& fn, const char* name) {
-        fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(reinterpret_cast<void*>(GetProcAddress(gdi, name)));
+        fn = reinterpret_cast<std::remove_reference_t<decltype(fn)>>(reinterpret_cast<void*>(GetProcAddress(k->gdi_, name)));
         return fn != nullptr;
     };
     if (!get(k->enum_adapters_, "D3DKMTEnumAdapters2") || !get(k->query_adapter_info_, "D3DKMTQueryAdapterInfo") ||
@@ -51,6 +51,7 @@ std::unique_ptr<KmtDevice> KmtDevice::open()
         const bool ours = !k->adapter_ && k->query_adapter_info_(&q) >= 0 && info.IamVioGPU == viogpu::kIam;
         if (ours) {
             k->adapter_ = adapters[i].hAdapter;
+            k->resource_refs_ = info.Flags.supports_resource_refs;
         } else {
             D3DKMT_CLOSEADAPTER ca{adapters[i].hAdapter};
             if (k->close_adapter_(&ca) < 0)
@@ -85,6 +86,8 @@ KmtDevice::~KmtDevice()
         if (close_adapter_(&ca) < 0)
             VENERA_WARN("kmt: D3DKMTCloseAdapter(0x%x) failed", adapter_);
     }
+    if (gdi_)
+        FreeLibrary(gdi_);
 }
 
 HRESULT KmtDevice::open_shared(HANDLE nt, D3DKMT_HANDLE* resource, D3DKMT_HANDLE* allocation)

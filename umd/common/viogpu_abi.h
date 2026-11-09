@@ -41,7 +41,8 @@ struct AdapterInfo {
         UINT has_context_init : 1;
         UINT requires_explicit_residency : 1;
         UINT supports_allocation_alias : 1;   // our KMD patch (kmd/): AllocationAlias
-        UINT Reserved : 24;
+        UINT supports_resource_refs : 1;     // context attachments are reference counted by host resource id
+        UINT Reserved : 23;
     } Flags;
     ULONGLONG SupportedCapsetIDs;   // bit n set: capset id n is supported
 };

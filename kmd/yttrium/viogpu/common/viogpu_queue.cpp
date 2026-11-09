@@ -1021,7 +1021,7 @@ void CtrlQueue::AttachBacking(UINT res_id, PGPU_MEM_ENTRY ents, UINT nents)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
 
-void CtrlQueue::CtxResource(bool attach, UINT ctx_id, UINT res_id)
+NTSTATUS CtrlQueue::CtxResource(bool attach, UINT ctx_id, UINT res_id)
 {
     PAGED_CODE();
 
@@ -1030,15 +1030,22 @@ void CtrlQueue::CtxResource(bool attach, UINT ctx_id, UINT res_id)
     PGPU_CMD_CTX_RESOURCE cmd;
     PGPU_VBUFFER vbuf;
     cmd = (PGPU_CMD_CTX_RESOURCE)AllocCmd(&vbuf, sizeof(*cmd));
+    if (!cmd || !vbuf)
+        return STATUS_INSUFFICIENT_RESOURCES;
     RtlZeroMemory(cmd, sizeof(*cmd));
 
     cmd->hdr.type = attach ? VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE : VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE;
     cmd->hdr.ctx_id = ctx_id;
     cmd->resource_id = res_id;
 
-    QueueBuffer(vbuf);
+    if (QueueBuffer(vbuf))
+    {
+        ReleaseBuffer(vbuf);
+        return STATUS_UNSUCCESSFUL;
+    }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS CtrlQueue::CtxResourceWait(UINT ctx_id, UINT res_id)

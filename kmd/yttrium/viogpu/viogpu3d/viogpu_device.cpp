@@ -24,6 +24,7 @@ VioGpuDevice::VioGpuDevice(VioGpuAdapter *pAdapter)
     m_id = pAdapter->ctxIdr.GetId();
     m_capset_id = 0;
     m_context_created = false;
+    ExInitializeFastMutex(&m_resource_mutex);
 }
 
 VioGpuDevice::~VioGpuDevice()
@@ -681,6 +682,13 @@ NTSTATUS VioGpuDevice::OpenAllocation(_In_ CONST DXGKARG_OPENALLOCATION *pOpenAl
             goto fail;
         }
 
+        status = devAlloc->Init();
+        if (!NT_SUCCESS(status))
+        {
+            delete devAlloc;
+            goto fail;
+        }
+
         openAllocationInfo->hDeviceSpecificAllocation = devAlloc;
     }
 
@@ -708,6 +716,34 @@ CtrlQueue *VioGpuDevice::GetCtrlQueue()
     return &m_pAdapter->ctrlQueue;
 }
 
+NTSTATUS VioGpuDevice::AttachResource(VioGpuResourceRefs::Entry *entry, UINT resource_id)
+{
+    PAGED_CODE();
+    ExAcquireFastMutex(&m_resource_mutex);
+    NTSTATUS status = STATUS_SUCCESS;
+    if (m_resource_refs.Acquire(entry, resource_id))
+        status = GetCtrlQueue()->CtxResource(true, GetId(), resource_id);
+    if (!NT_SUCCESS(status))
+        m_resource_refs.Release(entry);
+    ExReleaseFastMutex(&m_resource_mutex);
+    return status;
+}
+
+void VioGpuDevice::DetachResource(VioGpuResourceRefs::Entry *entry)
+{
+    PAGED_CODE();
+    ExAcquireFastMutex(&m_resource_mutex);
+    if (m_resource_refs.Release(entry))
+    {
+        NTSTATUS status = GetCtrlQueue()->CtxResource(false, GetId(), entry->id);
+        if (!NT_SUCCESS(status))
+            DbgPrint(TRACE_LEVEL_ERROR,
+                     ("%s detach failed ctx_id=0x%x res_id=0x%x status=0x%x\n",
+                      __FUNCTION__, GetId(), entry->id, status));
+    }
+    ExReleaseFastMutex(&m_resource_mutex);
+}
+
 VioGpuDeviceAllocation::VioGpuDeviceAllocation(VioGpuDevice *device, VioGpuAllocation *allocation)
 {
     PAGED_CODE();
@@ -718,12 +754,19 @@ VioGpuDeviceAllocation::VioGpuDeviceAllocation(VioGpuDevice *device, VioGpuAlloc
     m_pAllocation = allocation;
     m_pDevice = device;
     m_attached = false;
+}
 
+NTSTATUS VioGpuDeviceAllocation::Init()
+{
+    PAGED_CODE();
     if (m_pAllocation->IsBlob() || !m_pDevice->IsVenusContext())
     {
-        m_pDevice->GetCtrlQueue()->CtxResource(true, m_pDevice->GetId(), m_pAllocation->GetId());
+        NTSTATUS status = m_pDevice->AttachResource(&m_resource_entry, m_pAllocation->GetId());
+        if (!NT_SUCCESS(status))
+            return status;
         m_attached = true;
     }
+    return STATUS_SUCCESS;
 }
 
 VioGpuDeviceAllocation::~VioGpuDeviceAllocation()
@@ -734,7 +777,7 @@ VioGpuDeviceAllocation::~VioGpuDeviceAllocation()
 
     if (m_attached)
     {
-        m_pDevice->GetCtrlQueue()->CtxResource(false, m_pDevice->GetId(), m_pAllocation->GetId());
+        m_pDevice->DetachResource(&m_resource_entry);
         m_attached = false;
     }
 }

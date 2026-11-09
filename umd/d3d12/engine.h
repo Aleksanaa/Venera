@@ -32,7 +32,9 @@ private:
     std::mutex lock_;
     Com<ID3D12CommandQueue> queue_;   // for run(): a vkd3d-proton queue, borrowed through its interop interface
     VkCommandPool pool_ = VK_NULL_HANDLE;
+    VkCommandBuffer command_ = VK_NULL_HANDLE;
     VkFence fence_ = VK_NULL_HANDLE;
+    bool submission_failed_ = false;
 };
 
 } // namespace venera::umd

@@ -59,7 +59,8 @@ typedef struct _VIOGPU_ADAPTERINFO
         UINT has_context_init : 1;
         UINT requires_explicit_residency : 1;
         UINT supports_allocation_alias : 1; // VIOGPU_CREATE_ALLOCATION_ALIAS is understood
-        UINT Reserved : 24;
+        UINT supports_resource_refs : 1; // context attachments survive other opens of the same resource
+        UINT Reserved : 23;
     } Flags;
     ULONGLONG SupportedCapsetIDs;
 } VIOGPU_ADAPTERINFO;

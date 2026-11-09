@@ -18,6 +18,8 @@ public:
     // The viogpu adapter's device, or null (logged) if there is none or gdi32 lacks the entry points.
     static std::unique_ptr<KmtDevice> open();
     ~KmtDevice();
+    KmtDevice(const KmtDevice&) = delete;
+    KmtDevice& operator=(const KmtDevice&) = delete;
 
     // Opens a shared NT handle of one allocation: `resource` holds it open until close().
     HRESULT open_shared(HANDLE nt, D3DKMT_HANDLE* resource, D3DKMT_HANDLE* allocation);
@@ -30,10 +32,13 @@ public:
     HRESULT share_surface(D3DKMT_HANDLE allocation, const viogpu::AllocationExchange& surface, HANDLE* nt);
     // The host (virtio-gpu) resource id that `allocation`, an allocation of this device, names; 0 if the KMD says none.
     UINT resource_id(D3DKMT_HANDLE allocation);
+    bool supports_resource_refs() const { return resource_refs_; }
 
 private:
     KmtDevice() = default;
 
+    HMODULE gdi_ = nullptr;
+    bool resource_refs_ = false;
     PFND3DKMT_ENUMADAPTERS2 enum_adapters_ = nullptr;
     PFND3DKMT_QUERYADAPTERINFO query_adapter_info_ = nullptr;
     PFND3DKMT_CLOSEADAPTER close_adapter_ = nullptr;

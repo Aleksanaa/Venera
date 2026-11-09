@@ -261,15 +261,22 @@ HRESULT LinearImage::create_imported(const VulkanDevice& d, const LinearImageDes
     import_info.fd = fd;
     VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &import_info};
     mai.allocationSize = size;
-    // The image's types, not vkGetMemoryFdPropertiesKHR's: Venus answers that by importing the handle for a moment,
-    // and closing that import detaches the resource from this context (yttrium's KMD does not count attaches), which
-    // can land after the import below has attached it: the host then fails the import and kills the context.
-    mai.memoryTypeIndex = memory_type(d, req.memoryRequirements.memoryTypeBits);
-    if (mai.memoryTypeIndex == UINT32_MAX) {
-        VENERA_WARN("imported image: no memory type in image bits 0x%x", req.memoryRequirements.memoryTypeBits);
+    // An external allocation can belong to a different heap from the preferred
+    // image type, especially on a discrete GPU. The KMD counts resource opens so
+    // the temporary import used by this query cannot detach another live import.
+    VkMemoryFdPropertiesKHR fd_props{VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
+    VkResult r = d.vk.vkGetMemoryFdPropertiesKHR(d.device, import_info.handleType, fd, &fd_props);
+    if (r != VK_SUCCESS) {
+        VENERA_WARN("imported image: vkGetMemoryFdPropertiesKHR failed: %d", r);
         return E_INVALIDARG;
     }
-    VkResult r = d.vk.vkAllocateMemory(d.device, &mai, nullptr, &s->memory_);
+    mai.memoryTypeIndex = memory_type(d, req.memoryRequirements.memoryTypeBits & fd_props.memoryTypeBits);
+    if (mai.memoryTypeIndex == UINT32_MAX) {
+        VENERA_WARN("imported image: no common memory type (image 0x%x, external 0x%x)",
+                    req.memoryRequirements.memoryTypeBits, fd_props.memoryTypeBits);
+        return E_INVALIDARG;
+    }
+    r = d.vk.vkAllocateMemory(d.device, &mai, nullptr, &s->memory_);
     if (r != VK_SUCCESS) {
         VENERA_WARN("imported image: vkAllocateMemory (import of %llu bytes) failed: %d",
                     static_cast<unsigned long long>(size), r);

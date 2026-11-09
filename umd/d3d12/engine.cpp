@@ -66,6 +66,9 @@ HRESULT Engine::run(const std::function<void(VkCommandBuffer)>& record)
     const auto& vk = vulkan.vk;
     const VkDevice vk_device = vulkan.device;
     std::lock_guard g(lock_);
+    // A failed wait can leave work pending. Do not reset its pool or fence.
+    if (submission_failed_)
+        return E_FAIL;
     if (!queue_) {
         D3D12_COMMAND_QUEUE_DESC desc{};
         desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -83,38 +86,42 @@ HRESULT Engine::run(const std::function<void(VkCommandBuffer)>& record)
         VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         pci.queueFamilyIndex = family;
         r = vk.vkCreateCommandPool(vk_device, &pci, nullptr, &pool_);
-        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        if (r == VK_SUCCESS)
-            r = vk.vkCreateFence(vk_device, &fci, nullptr, &fence_);
     }
-    VkCommandBuffer cmd = VK_NULL_HANDLE;
-    if (r == VK_SUCCESS) {
+    if (r == VK_SUCCESS && !fence_) {
+        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        r = vk.vkCreateFence(vk_device, &fci, nullptr, &fence_);
+    }
+    if (r == VK_SUCCESS && !command_) {
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         ai.commandPool = pool_;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         ai.commandBufferCount = 1;
-        r = vk.vkAllocateCommandBuffers(vk_device, &ai, &cmd);
+        r = vk.vkAllocateCommandBuffers(vk_device, &ai, &command_);
     }
+    // Reset preserves command buffer objects. Keep and reuse the one we allocated.
+    if (r == VK_SUCCESS)
+        r = vk.vkResetCommandPool(vk_device, pool_, 0);
+    if (r == VK_SUCCESS)
+        r = vk.vkResetFences(vk_device, 1, &fence_);
     if (r == VK_SUCCESS) {
         VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vk.vkBeginCommandBuffer(cmd, &bi);
-        record(cmd);
-        r = vk.vkEndCommandBuffer(cmd);
+        r = vk.vkBeginCommandBuffer(command_, &bi);
+        if (r == VK_SUCCESS) {
+            record(command_);
+            r = vk.vkEndCommandBuffer(command_);
+        }
     }
     if (r == VK_SUCCESS) {
         VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         si.commandBufferCount = 1;
-        si.pCommandBuffers = &cmd;
+        si.pCommandBuffers = &command_;
         r = vk.vkQueueSubmit(queue, 1, &si, fence_);
+        if (r == VK_SUCCESS)
+            r = vk.vkWaitForFences(vk_device, 1, &fence_, VK_TRUE, UINT64_MAX);
+        submission_failed_ = r != VK_SUCCESS;
     }
-    if (r == VK_SUCCESS)
-        r = vk.vkWaitForFences(vk_device, 1, &fence_, VK_TRUE, UINT64_MAX);
     venera_vkd3d_unlock_queue(device.get(), queue_.get());
-    if (fence_)
-        vk.vkResetFences(vk_device, 1, &fence_);
-    if (pool_)
-        vk.vkResetCommandPool(vk_device, pool_, 0);
     if (r != VK_SUCCESS) {
         VENERA_WARN("engine: one-off submission failed: %d", r);
         return E_FAIL;

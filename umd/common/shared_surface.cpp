@@ -70,8 +70,14 @@ const viogpu::AllocationExchange* importable_surface(const char* what, UINT allo
 int import_fd(const char* what, KmtDevice* kmt, D3DKMT_HANDLE allocation,
               const viogpu::AllocationExchange& surface)
 {
+    // The memory-type query temporarily opens this resource in the Venus context.
+    // Check the kernel device used for this import, not a newly enumerated adapter.
+    if (!kmt || !kmt->supports_resource_refs()) {
+        VENERA_WARN("%s: install the matching KMD with resource reference support", what);
+        return -1;
+    }
     HANDLE nt = nullptr;
-    if (!kmt || FAILED(kmt->share_surface(allocation, surface, &nt))) {
+    if (FAILED(kmt->share_surface(allocation, surface, &nt))) {
         VENERA_WARN("%s: could not export allocation 0x%x", what, allocation);
         return -1;
     }

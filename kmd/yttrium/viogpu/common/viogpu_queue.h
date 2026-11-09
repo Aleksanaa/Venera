@@ -308,7 +308,7 @@ class CtrlQueue : public VioGpuQueue
     BOOLEAN ResourceMapBlob(UINT res_id, ULONGLONG offset, ULONG *map_info);
     void ResourceUnmapBlob(UINT res_id);
     void DestroyResource(UINT id);
-    void CtxResource(bool attach, UINT ctx_id, UINT res_id);
+    NTSTATUS CtxResource(bool attach, UINT ctx_id, UINT res_id);
     NTSTATUS CtxResourceWait(UINT ctx_id, UINT res_id);
 
     UINT SubmitCommand(void *cmdbuf,

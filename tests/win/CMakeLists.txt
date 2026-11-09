@@ -23,3 +23,19 @@ target_link_options(d3d11caps PRIVATE -static -static-libgcc -static-libstdc++)
 add_executable(uibench uibench.cpp)
 target_link_libraries(uibench PRIVATE dwmapi winmm user32 gdi32)
 target_link_options(uibench PRIVATE -static -static-libgcc -static-libstdc++)
+
+add_executable(memorytest memorytest.cpp)
+target_include_directories(memorytest PRIVATE "${PROJECT_SOURCE_DIR}/kmd/yttrium/viogpu/shared")
+target_link_libraries(memorytest PRIVATE venera-umd-common)
+target_link_options(memorytest PRIVATE -static -static-libgcc -static-libstdc++)
+
+add_executable(engineprobe engineprobe.cpp "${PROJECT_SOURCE_DIR}/umd/d3d12/engine.cpp"
+    $<TARGET_OBJECTS:venera-vkd3d-bridge>)
+target_include_directories(engineprobe PRIVATE "${PROJECT_SOURCE_DIR}/umd/d3d12")
+target_compile_options(engineprobe PRIVATE
+    "SHELL:-idirafter ${VENERA_WINKITS_DIR}/wdk/c/Include/10.0.26100.0/um"
+    "SHELL:-idirafter ${VENERA_WINKITS_DIR}/wdk/c/Include/10.0.26100.0/shared"
+    "SHELL:-idirafter ${VENERA_WINKITS_DIR}/sdk/c/Include/10.0.26100.0/shared"
+    "SHELL:-idirafter ${VENERA_WINKITS_DIR}/sdk/c/Include/10.0.26100.0/um")
+target_link_libraries(engineprobe PRIVATE venera-umd-common venera-directx-headers venera-vkd3d-proton)
+target_link_options(engineprobe PRIVATE -static -static-libgcc -static-libstdc++)
