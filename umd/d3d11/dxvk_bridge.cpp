@@ -65,6 +65,13 @@ Rc<DxvkAdapter> gpu(const Rc<DxvkInstance>& inst)
     return nullptr;
 }
 
+// At most 11_1, the highest the D3D11.1 DDI has. DXVK lacks 11_1's target-independent rasterization, which mostly
+// Direct2D uses (DWM included), so processes with d2d1.dll loaded get 11_0.
+D3D_FEATURE_LEVEL process_max_level()
+{
+    return GetModuleHandleW(L"d2d1.dll") ? D3D_FEATURE_LEVEL_11_0 : D3D_FEATURE_LEVEL_11_1;
+}
+
 } // namespace
 
 void init_settings()
@@ -101,10 +108,7 @@ HRESULT create_device(PFN_vkGetInstanceProcAddr gipa, D3D_FEATURE_LEVEL level, c
         adapter->enableExtensions(extra);
 
         Rc<DxvkDevice> device = adapter->createDevice();
-        // At most 11_0: 11_1 promises target-independent rasterization (ForcedSampleCount with render targets
-        // bound), which DXVK does not do: it rasterizes at the targets' sample count. DWM cuts the windows out of
-        // their shadows with it at 11_1, and the shadows come out erased.
-        const D3D_FEATURE_LEVEL max = std::min(D3D11Device::GetMaxFeatureLevel(*device), D3D_FEATURE_LEVEL_11_0);
+        const D3D_FEATURE_LEVEL max = std::min(D3D11Device::GetMaxFeatureLevel(*device), process_max_level());
         if (!level)
             level = max;
         if (level > max) {

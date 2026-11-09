@@ -4,6 +4,8 @@
 #include "device.h"
 #include "shader_container.h"
 
+#include <atomic>
+
 namespace venera::umd {
 
 namespace {
@@ -326,6 +328,13 @@ void APIENTRY create_rasterizer_state(D3D10DDI_HDEVICE h, const D3D11_1_DDI_RAST
                                 a->MultisampleEnable,
                                 a->AntialiasedLineEnable,
                                 a->ForcedSampleCount};
+    // Target-independent rasterization if render targets are bound (see process_max_level in dxvk_bridge.cpp).
+    static std::atomic<bool> forced_logged{false};
+    if (a->ForcedSampleCount && d->d3d->GetFeatureLevel() >= D3D_FEATURE_LEVEL_11_1 &&
+        !forced_logged.exchange(true, std::memory_order_relaxed))
+        VENERA_WARN("CreateRasterizerState: ForcedSampleCount %u at feature level 11_1 (Direct2D %s): "
+                    "target-independent rasterization is not done",
+                    a->ForcedSampleCount, GetModuleHandleW(L"d2d1.dll") ? "loaded since" : "not loaded");
     HRESULT hr = d->d3d->CreateRasterizerState1(&desc, obj->state.put());
     if (FAILED(hr)) {
         VENERA_WARN("CreateRasterizerState failed: 0x%08lx", hr);
