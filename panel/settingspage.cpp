@@ -67,7 +67,7 @@ const Level kLevels[] = {
     {L"dxvk-log", L"DXVK_LOG_LEVEL", L"\uE7F4", L"D3D11 messages", L"",  // the description follows the log file
      {{L"Default", L""}, {L"None", L"none"}, {L"Errors", L"error"}, {L"Warnings", L"warn"}, {L"Information", L"info"},
       {L"Debug", L"debug"}}},
-    {L"vkd3d-log", L"VKD3D_DEBUG", L"\uE7F4", L"D3D12 messages", L"What vkd3d-proton prints, on a program's console (the tests show it)",
+    {L"vkd3d-log", L"VKD3D_DEBUG", L"\uE7F4", L"D3D12 messages", L"",  // likewise
      {{L"Default", L""}, {L"None", L"none"}, {L"Errors", L"err"}, {L"Fixmes", L"fixme"}, {L"Warnings", L"warn"},
       {L"Information", L"info"}, {L"Trace", L"trace"}}},
 };
@@ -201,10 +201,14 @@ void Settings::draw(Ui& ui, float x, float w, float& y)
     for (int i = 0; i < kLevelCount; i++) {
         const Level& l = kLevels[i];
         std::wstring desc = l.desc;
-        if (desc.empty())  // DXVK writes a file per program, beside the driver's log file or in the program's folder
-            desc = L"What DXVK prints, to <program>_d3d11.log in " +
-                   (logFile_.empty() ? std::wstring(L"the program's folder")
-                                     : logFile_.substr(0, logFile_.find_last_of(L'\\')));
+        // DXVK and vkd3d-proton write a file per program beside the driver's log file, and nothing without one.
+        if (desc.empty())
+            desc = logFile_.empty()
+                       ? std::wstring(L"Needs the log file")
+                       : std::wstring(!wcscmp(l.name, L"DXVK_LOG_LEVEL")
+                                          ? L"What DXVK prints, to <program>_venera_d3d11.log in "
+                                          : L"What vkd3d-proton prints, to <program>_venera_d3d12.log in ") +
+                             logFile_.substr(0, logFile_.find_last_of(L'\\'));
         std::vector<std::wstring> labels;
         for (const auto& c : l.choices)
             labels.push_back(c.first);

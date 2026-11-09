@@ -14,6 +14,9 @@ void log_init(const char* component);
 // Copies each named setting from HKLM\SOFTWARE\Venera into the process environment unless the environment has it:
 // the engines (vkd3d-proton, DXVK) and the Venus ICD read their options with GetEnvironmentVariable.
 void forward_settings(std::initializer_list<const char*> names);
+// For an engine that prints to stderr, which GUI programs do not have: unless the environment names its file, sets
+// the variable `name` to <program>_<suffix>.log beside the log file (VENERA_LOG), when there is one.
+void log_file_beside(const char* name, const char* suffix);
 // The setting `name` from the environment or else the registry (as above); false if neither has it. A REG_DWORD
 // value reads as its decimal digits.
 bool setting(const char* name, char* out, unsigned long size);

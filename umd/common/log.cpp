@@ -46,6 +46,25 @@ void forward_settings(std::initializer_list<const char*> names)
     }
 }
 
+void log_file_beside(const char* name, const char* suffix)
+{
+    char dir[MAX_PATH], exe[MAX_PATH];
+    if (GetEnvironmentVariableA(name, nullptr, 0) || !setting("VENERA_LOG", dir, sizeof(dir)))
+        return;
+    char* slash = std::strrchr(dir, '\\');
+    const DWORD n = GetModuleFileNameA(nullptr, exe, sizeof(exe));
+    if (!slash || !n || n >= sizeof(exe))
+        return;
+    *slash = 0;
+    const char* program = std::strrchr(exe, '\\');
+    program = program ? program + 1 : exe;
+    if (char* dot = std::strrchr(exe, '.'); dot && dot > program)
+        *dot = 0;
+    char path[MAX_PATH];
+    if (std::snprintf(path, sizeof(path), "%s\\%s_%s.log", dir, program, suffix) < int(sizeof(path)))
+        SetEnvironmentVariableA(name, path);
+}
+
 void log_init(const char* component)
 {
     std::lock_guard lock(g_lock);

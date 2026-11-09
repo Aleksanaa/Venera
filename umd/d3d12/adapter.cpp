@@ -116,6 +116,8 @@ extern "C" __declspec(dllexport) HRESULT APIENTRY OpenAdapter12(D3D12DDIARG_OPEN
     log_init("venera_d3d12");
     forward_settings({"VKD3D_DEBUG", "VKD3D_SHADER_DEBUG", "VKD3D_LOG_FILE", "VKD3D_CONFIG", "VKD3D_FEATURE_LEVEL",
                       "VN_DEBUG", "VN_PERF", "MESA_LOG_LEVEL"});
+    // vkd3d-proton's FIXMEs name what it does not do (ForcedSampleCount, formats, features).
+    log_file_beside("VKD3D_LOG_FILE", "venera_d3d12");
     if (!args || !args->pAdapterCallbacks || !args->pAdapterFuncs)
         return E_INVALIDARG;
 
