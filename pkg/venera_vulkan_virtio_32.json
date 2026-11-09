@@ -1,0 +1,7 @@
+{
+    "file_format_version": "1.0.1",
+    "ICD": {
+        "library_path": ".\\venera_vulkan_virtio_32.dll",
+        "api_version": "1.4.348"
+    }
+}

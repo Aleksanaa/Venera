@@ -12,7 +12,11 @@ namespace venera::umd {
 
 namespace {
 
+#ifdef _WIN64
 constexpr const wchar_t* kBundledIcd = L"venera_vulkan_virtio.dll";
+#else
+constexpr const wchar_t* kBundledIcd = L"venera_vulkan_virtio_32.dll";
+#endif
 
 PFN_vkGetInstanceProcAddr try_load(const std::wstring& path)
 {

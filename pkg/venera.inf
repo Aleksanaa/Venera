@@ -1,6 +1,7 @@
 ; SPDX-License-Identifier: BSD-3-Clause
 ; Driver package for the VirtIO GPU (Venus): yttrium's viogpu3d.sys as we build it (kmd/), our D3D10/11 and D3D12
-; UMDs, yttrium's Venus Vulkan and OpenGL (WGL on zink) drivers as we build them (icd/), and its resolution service
+; UMDs, yttrium's Venus Vulkan and OpenGL (WGL on zink) drivers as we build them (icd/), each also for 32-bit
+; processes (*_32), and its resolution service
 ; with the helper that applies the host's resolution in each session (svc/), all in the DriverStore. It replaces
 ; yttrium's package; none of yttrium's own binaries are installed (its D3D10 and D3D12 UMDs, EGL/GLES, lavapipe).
 ; Based on yttrium's viogpu3d_x64.inx (Copyright 2019-2022 Red Hat, Inc., kmd/yttrium/viogpu/LICENSE).
@@ -28,6 +29,11 @@ venera_d3d12.dll            = 1
 venera_vulkan_virtio.dll  = 1
 venera_vulkan_virtio.json = 1
 viogpu_wgl.dll         = 1
+venera_d3d11_32.dll    = 1
+venera_d3d12_32.dll    = 1
+venera_vulkan_virtio_32.dll  = 1
+venera_vulkan_virtio_32.json = 1
+viogpu_wgl_32.dll      = 1
 vgpusrv.exe            = 1
 viogpuap.exe           = 1
 
@@ -53,6 +59,11 @@ venera_d3d12.dll
 venera_vulkan_virtio.dll
 venera_vulkan_virtio.json
 viogpu_wgl.dll
+venera_d3d11_32.dll
+venera_d3d12_32.dll
+venera_vulkan_virtio_32.dll
+venera_vulkan_virtio_32.json
+viogpu_wgl_32.dll
 vgpusrv.exe
 viogpuap.exe
 
@@ -95,15 +106,19 @@ HKR,, UsePhysicalMemory, %REG_DWORD%, 0
 ; Slots: D3D9, D3D10, D3D11, D3D12. venera_d3d11.dll serves D3D10 and D3D11 (DWM too), venera_d3d12.dll D3D12. D3D9 runs
 ; on Windows' D3D9On12, on venera_d3d12.dll: "<>" is dxgkrnl's null UMD (IsNullUmdDriver), for which it answers the D3D9
 ; runtime's driver-name query with STATUS_INVALID_PARAMETER, and the runtime then uses d3d9on12.dll
-; (D3D9RequestsD3D9on12). An empty entry instead fails the adapter's start. No 32-bit UMDs (UserModeDriverNameWow).
+; (D3D9RequestsD3D9on12). An empty entry instead fails the adapter's start. 32-bit processes take the *Wow entries, the
+; same drivers built for i686 (*_32), which sit next to the 64-bit ones.
 HKR,, UserModeDriverName,      %REG_MULTI_SZ%, "<>", %13%\venera_d3d11.dll, %13%\venera_d3d11.dll, %13%\venera_d3d12.dll
+HKR,, UserModeDriverNameWow,   %REG_MULTI_SZ%, "<>", %13%\venera_d3d11_32.dll, %13%\venera_d3d11_32.dll, %13%\venera_d3d12_32.dll
 HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, venera_d3d11, venera_d3d11, venera_d3d11, venera_d3d12
 ; The Vulkan loader finds the ICD through the adapter (its manifest is in the DriverStore with it). The UMDs load it
 ; from their own directory without the loader.
 HKR,, VulkanDriverName,        %REG_MULTI_SZ%, %13%\venera_vulkan_virtio.json
+HKR,, VulkanDriverNameWow,     %REG_MULTI_SZ%, %13%\venera_vulkan_virtio_32.json
 ; OpenGL: Windows' opengl32.dll loads this ICD, which renders through zink on the Vulkan driver above and presents
 ; through D3D11 (venera_d3d11.dll). Flags and version as yttrium's package sets them.
 HKR,, OpenGLDriverName,        %REG_MULTI_SZ%, %13%\viogpu_wgl.dll
+HKR,, OpenGLDriverNameWow,     %REG_MULTI_SZ%, %13%\viogpu_wgl_32.dll
 HKR,, OpenGLFlags,             %REG_DWORD%, 3
 HKR,, OpenGLVersion,           %REG_DWORD%, 4096
 ; As yttrium's package sets them: preemption on; GPU timeouts do not reset the device (TdrDebugMode 1: ignore).

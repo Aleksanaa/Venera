@@ -24,7 +24,8 @@ add_library(venera_d3d11 SHARED
     view.cpp
     $<TARGET_OBJECTS:venera-dxvk-bridge>)
 # Next to venera_d3d12.dll in the build tree's umd/, where venera-test.ps1 finds them.
-set_target_properties(venera_d3d11 PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/umd")
+set_target_properties(venera_d3d11 PROPERTIES PREFIX "" OUTPUT_NAME "venera_d3d11${VENERA_UMD_SUFFIX}"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/umd")
 target_include_directories(venera_d3d11 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(venera_d3d11 PRIVATE venera-umd-common venera-vulkan-headers venera-dxvk)
 target_compile_options(venera_d3d11 PRIVATE ${VENERA_UMD_WARNINGS} ${VENERA_UMD_WDK_INCLUDES})

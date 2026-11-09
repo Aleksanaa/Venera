@@ -78,7 +78,9 @@ cmake -S . -B build/win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake &&
 `cmake/fetch-winkits.sh` extracts the WDK and SDK headers from Microsoft's NuGet packages (Microsoft.Windows.WDK.x64
 and Microsoft.Windows.SDK.CPP, 10.0.26100) into `refs/winkits/{wdk,sdk}`. The KMD build test-signs `viogpu3d.sys`
 with the PFX in `VENERA_KMD_SIGN_PFX`; any code signing certificate does, as the kernel accepts any signature in test
-mode. The installer is `build/win/setup/venera-setup.exe` (`.github/workflows/build.yml` does the same).
+mode. The installer is `build/win/setup/venera-setup.exe` (`.github/workflows/build.yml` does the same). The drivers
+are built for 32-bit processes too: `icd/build.sh` builds Mesa for both x86_64 and i686, and the main build runs a
+32-bit build of the UMDs in `build/win/umd32`.
 
 For testing, make `build/` visible in the guest and run this from an elevated PowerShell in `build\win\tests\win`; it
 runs the installer silently and sets the drivers' logging up. Its top comment covers the other actions.

@@ -3,19 +3,23 @@
 # as a cabinet, which payload.cmake stamps and packs at each build. The KMD and the Mesa drivers come from their own
 # builds (kmd/, icd/build.sh), which have to run first.
 set(VENERA_ICD_DIR "${CMAKE_SOURCE_DIR}/build/icd" CACHE PATH
-    "icd/build.sh's output (venera_vulkan_virtio.dll, viogpu_wgl.dll)")
+    "icd/build.sh's output (venera_vulkan_virtio.dll, viogpu_wgl.dll and their _32 builds)")
 set(VENERA_KMD_SYS "${CMAKE_SOURCE_DIR}/build/kmd/signed/viogpu3d.sys" CACHE FILEPATH
     "The test-signed KMD (kmd/ build)")
 find_program(GCAB gcab REQUIRED)
 find_package(Git REQUIRED)
 
 # The driver package's files, and the control panel, which is not part of the package: the installer copies it out of
-# the cabinet into Program Files, before it removes the cabinet.
+# the cabinet into Program Files, before it removes the cabinet. The 32-bit UMDs come from the 32-bit build tree
+# (VENERA_UMD32_DLLS: umd/CMakeLists.txt).
 set(payload "${VENERA_KMD_SYS}" "${VENERA_ICD_DIR}/venera_vulkan_virtio.dll" "${VENERA_ICD_DIR}/viogpu_wgl.dll"
-    "${CMAKE_SOURCE_DIR}/pkg/venera_vulkan_virtio.json"
-    $<TARGET_FILE:venera_d3d11> $<TARGET_FILE:venera_d3d12> $<TARGET_FILE:vgpusrv> $<TARGET_FILE:viogpuap>
+    "${VENERA_ICD_DIR}/venera_vulkan_virtio_32.dll" "${VENERA_ICD_DIR}/viogpu_wgl_32.dll"
+    "${CMAKE_SOURCE_DIR}/pkg/venera_vulkan_virtio.json" "${CMAKE_SOURCE_DIR}/pkg/venera_vulkan_virtio_32.json"
+    $<TARGET_FILE:venera_d3d11> $<TARGET_FILE:venera_d3d12> ${VENERA_UMD32_DLLS}
+    $<TARGET_FILE:vgpusrv> $<TARGET_FILE:viogpuap>
     $<TARGET_FILE:venera-panel> $<TARGET_FILE:venera-panel-com>)
-foreach(f "${VENERA_KMD_SYS}" "${VENERA_ICD_DIR}/venera_vulkan_virtio.dll")
+foreach(f "${VENERA_KMD_SYS}" "${VENERA_ICD_DIR}/venera_vulkan_virtio.dll"
+          "${VENERA_ICD_DIR}/venera_vulkan_virtio_32.dll")
   if(NOT EXISTS "${f}")
     message(WARNING "${f} is missing: build the KMD and the ICD (README) before the installer")
   endif()

@@ -14,6 +14,15 @@ set(VENERA_UMD_WDK_INCLUDES
     "SHELL:-idirafter ${SDK_INC}/shared" "SHELL:-idirafter ${SDK_INC}/um")
 # Self-contained DLLs: the runtime loads them into arbitrary processes, so no MinGW runtime DLLs alongside.
 set(VENERA_UMD_LINK_OPTIONS -static -static-libgcc -static-libstdc++ -Wl,--exclude-all-symbols)
+# The 32-bit UMDs (for 32-bit processes: UserModeDriverNameWow) sit in the DriverStore next to the 64-bit ones, as
+# venera_d3d11_32.dll and so on. Their exports are stdcall, which the runtime looks up undecorated (OpenAdapter12,
+# not OpenAdapter12@4).
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+  set(VENERA_UMD_SUFFIX _32)
+  list(APPEND VENERA_UMD_LINK_OPTIONS -Wl,--kill-at)
+else()
+  set(VENERA_UMD_SUFFIX "")
+endif()
 
 # Slot names of the DDI tables we fill, for logging stubs (see cmake/ddi_slots.cmake).
 include(${PROJECT_SOURCE_DIR}/cmake/ddi_slots.cmake)
@@ -35,3 +44,26 @@ target_compile_options(venera-umd-common PRIVATE ${VENERA_UMD_WARNINGS} ${VENERA
 
 add_subdirectory(d3d12)
 add_subdirectory(d3d11)
+
+# --- 32-bit --------------------------------------------------------------------------------------------------------
+# The x86_64 build builds the 32-bit UMDs too, as a build tree of this project of its own (umd32/) with the i686
+# toolchain, which has only the UMDs and the d3d9caps probe (CMakeLists.txt). The installer packs both sets of UMDs
+# (setup/CMakeLists.txt).
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+  include(ExternalProject)
+  set(dir "${CMAKE_BINARY_DIR}/umd32")
+  set(dlls "${dir}/umd/venera_d3d11_32.dll" "${dir}/umd/venera_d3d12_32.dll")
+  ExternalProject_Add(venera-umd32
+      SOURCE_DIR "${PROJECT_SOURCE_DIR}"
+      BINARY_DIR "${dir}"
+      CMAKE_ARGS "-DCMAKE_TOOLCHAIN_FILE=${PROJECT_SOURCE_DIR}/cmake/mingw-w64-i686.cmake"
+                 "-DVENERA_WINKITS_DIR=${VENERA_WINKITS_DIR}" "-DVENERA_RELEASE=${VENERA_RELEASE}"
+      # Its own build decides what is out of date.
+      BUILD_ALWAYS ON
+      BUILD_COMMAND "${CMAKE_COMMAND}" --build "${dir}" --target venera_d3d11 venera_d3d12 d3d9caps
+      BUILD_BYPRODUCTS ${dlls}
+      INSTALL_COMMAND ""
+      USES_TERMINAL_CONFIGURE ON
+      USES_TERMINAL_BUILD ON)
+  set(VENERA_UMD32_DLLS ${dlls} PARENT_SCOPE)
+endif()

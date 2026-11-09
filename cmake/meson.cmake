@@ -6,17 +6,22 @@
 find_program(VENERA_MESON meson REQUIRED)
 find_program(VENERA_NINJA ninja REQUIRED)
 
-# Writes a meson cross file for this build's MinGW compilers to `path`. GCC from nixpkgs uses the mcfgthread model,
-# whose headers and library live outside the wrapper's paths. Written only when it changes: meson rebuilds
-# everything when its cross file is touched.
+# Writes a meson cross file for this build's MinGW compilers (x86_64 or i686: the toolchain file's VENERA_MINGW_TRIPLE)
+# to `path`. GCC from nixpkgs uses the mcfgthread model, whose headers and library live outside the wrapper's paths
+# (the toolchain file's VENERA_MINGW_MCFG_*). Written only when it changes: meson rebuilds everything when its cross
+# file is touched.
 function(venera_meson_cross_file path)
   set(c_args "")
   set(link_args "")
-  if(DEFINED ENV{VENERA_MINGW_MCFG_INCLUDE})
-    set(c_args "'-isystem', '$ENV{VENERA_MINGW_MCFG_INCLUDE}'")
+  if(VENERA_MINGW_MCFG_INCLUDE)
+    set(c_args "'-isystem', '${VENERA_MINGW_MCFG_INCLUDE}'")
   endif()
-  if(DEFINED ENV{VENERA_MINGW_MCFG_LIB})
-    set(link_args "'-L$ENV{VENERA_MINGW_MCFG_LIB}'")
+  if(VENERA_MINGW_MCFG_LIB)
+    set(link_args "'-L${VENERA_MINGW_MCFG_LIB}'")
+  endif()
+  set(cpu_family "${CMAKE_SYSTEM_PROCESSOR}")
+  if(cpu_family STREQUAL "i686")
+    set(cpu_family x86)
   endif()
   # meson adds ccache itself only for native compilers: name it in the cross file (VENERA_CCACHE: CMakeLists.txt).
   set(launcher "")
@@ -27,9 +32,9 @@ function(venera_meson_cross_file path)
 [binaries]
 c = [@launcher@'${CMAKE_C_COMPILER}']
 cpp = [@launcher@'${CMAKE_CXX_COMPILER}']
-ar = 'x86_64-w64-mingw32-ar'
-strip = 'x86_64-w64-mingw32-strip'
-windres = 'x86_64-w64-mingw32-windres'
+ar = '${VENERA_MINGW_TRIPLE}-ar'
+strip = '${VENERA_MINGW_TRIPLE}-strip'
+windres = '${VENERA_MINGW_TRIPLE}-windres'
 
 [built-in options]
 c_args = [@c_args@]
@@ -42,8 +47,8 @@ needs_exe_wrapper = true
 
 [host_machine]
 system = 'windows'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
+cpu_family = '${cpu_family}'
+cpu = '${CMAKE_SYSTEM_PROCESSOR}'
 endian = 'little'
 ")
 endfunction()

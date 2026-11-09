@@ -28,6 +28,7 @@ struct ThreadStack {
 
 ThreadStack g_stacks[kMaxThreads];
 
+#ifdef _WIN64
 // Walks by the unwind data in .pdata; a frame without it is a leaf only at the top, where the return address is at
 // the stack pointer. Stops at the first frame it cannot unwind.
 unsigned walk(CONTEXT ctx, DWORD64* pc)
@@ -50,13 +51,38 @@ unsigned walk(CONTEXT ctx, DWORD64* pc)
     }
     return n;
 }
+#else
+// x86 has no unwind data to walk by: follows the EBP chain, which holds as far as frames keep a frame pointer (GCC
+// omits it by default, so stacks can end early). The chain is read with ReadProcessMemory, which fails rather than
+// faults on a bad pointer, and has to grow up the stack.
+unsigned walk(CONTEXT ctx, DWORD64* pc)
+{
+    unsigned n = 0;
+    if (!ctx.Eip)
+        return 0;
+    pc[n++] = ctx.Eip;
+    DWORD ebp = ctx.Ebp;
+    while (n < kMaxFrames && ebp >= ctx.Esp && !(ebp & 3)) {
+        DWORD frame[2];   // the caller's EBP, the return address
+        SIZE_T got = 0;
+        if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(ebp), frame, sizeof(frame), &got) ||
+            got != sizeof(frame) || !frame[1])
+            break;
+        pc[n++] = frame[1];
+        if (frame[0] <= ebp)
+            break;
+        ebp = frame[0];
+    }
+    return n;
+}
+#endif
 
 void format_frame(DWORD64 pc, char* out, size_t size)
 {
     HMODULE mod = nullptr;
     char path[MAX_PATH];
     if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCSTR>(pc), &mod) &&
+                           reinterpret_cast<LPCSTR>(static_cast<ULONG_PTR>(pc)), &mod) &&
         GetModuleFileNameA(mod, path, sizeof(path))) {
         const char* base = std::strrchr(path, '\\');
         std::snprintf(out, size, "%s+0x%llx", base ? base + 1 : path,
@@ -113,6 +139,7 @@ LONG CALLBACK log_exception(EXCEPTION_POINTERS* e)
         // What was accessed, and the registers that usually hold the pointer involved.
         const ULONG_PTR kind = e->ExceptionRecord->ExceptionInformation[0];
         const CONTEXT& c = *e->ContextRecord;
+#ifdef _WIN64
         logf(LogLevel::warn, "  %s 0x%llx; rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx r8 %llx r9 %llx",
              kind == 0 ? "reading" : kind == 1 ? "writing" : "executing",
              static_cast<unsigned long long>(e->ExceptionRecord->ExceptionInformation[1]),
@@ -120,6 +147,12 @@ LONG CALLBACK log_exception(EXCEPTION_POINTERS* e)
              static_cast<unsigned long long>(c.Rcx), static_cast<unsigned long long>(c.Rdx),
              static_cast<unsigned long long>(c.Rsi), static_cast<unsigned long long>(c.Rdi),
              static_cast<unsigned long long>(c.R8), static_cast<unsigned long long>(c.R9));
+#else
+        logf(LogLevel::warn, "  %s 0x%lx; eax %lx ebx %lx ecx %lx edx %lx esi %lx edi %lx ebp %lx esp %lx",
+             kind == 0 ? "reading" : kind == 1 ? "writing" : "executing",
+             static_cast<unsigned long>(e->ExceptionRecord->ExceptionInformation[1]), c.Eax, c.Ebx, c.Ecx, c.Edx,
+             c.Esi, c.Edi, c.Ebp, c.Esp);
+#endif
     }
     log_frames("at", *e->ContextRecord);
     return EXCEPTION_CONTINUE_SEARCH;

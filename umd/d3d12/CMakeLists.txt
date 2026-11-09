@@ -30,7 +30,8 @@ add_library(venera_d3d12 SHARED
     shared_image.cpp
     $<TARGET_OBJECTS:venera-vkd3d-bridge>)
 # Next to each other in the build tree's umd/, where venera-test.ps1 finds them.
-set_target_properties(venera_d3d12 PROPERTIES PREFIX "" RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/umd")
+set_target_properties(venera_d3d12 PROPERTIES PREFIX "" OUTPUT_NAME "venera_d3d12${VENERA_UMD_SUFFIX}"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/umd")
 target_include_directories(venera_d3d12 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(venera_d3d12 PRIVATE venera-umd-common venera-vulkan-headers venera-directx-headers
     venera-vkd3d-proton)

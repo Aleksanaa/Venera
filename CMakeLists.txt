@@ -7,7 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-if(NOT WIN32)
+# The toolchain file names the MinGW triple, which the meson builds use too (cmake/meson.cmake).
+if(NOT WIN32 OR NOT VENERA_MINGW_TRIPLE)
   message(FATAL_ERROR "Venera builds for the Windows guest only: configure with -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake")
 endif()
 
@@ -39,6 +40,10 @@ include(cmake/dxvk.cmake)
 
 add_subdirectory(umd)
 add_subdirectory(tests/win)
+# The 32-bit build (umd/CMakeLists.txt runs it for the installer) has only the UMDs and a probe (tests/win).
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+  return()
+endif()
 add_subdirectory(svc)
 # The control panel.
 add_subdirectory(panel)

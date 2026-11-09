@@ -1,4 +1,13 @@
 # SPDX-License-Identifier: MIT
+# D3D9 caps and an FP16 blend, for both builds: d3d9caps_32 runs on the 32-bit UMDs (D3D9On12 on venera_d3d12_32).
+add_executable(d3d9caps d3d9caps.cpp)
+target_link_libraries(d3d9caps PRIVATE d3d9)
+target_link_options(d3d9caps PRIVATE -static -static-libgcc -static-libstdc++)
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+  set_target_properties(d3d9caps PROPERTIES OUTPUT_NAME d3d9caps_32)
+  return()
+endif()
+
 add_executable(vkprobe vkprobe.cpp)
 target_link_libraries(vkprobe PRIVATE venera-vulkan-headers)
 target_link_options(vkprobe PRIVATE -static -static-libgcc -static-libstdc++)

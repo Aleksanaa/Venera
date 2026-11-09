@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 # Builds yttrium's Mesa drivers for the guest from the pinned Mesa fork (third_party/virtio-win-mesa) with
 # icd/patches/*.patch applied, cross-compiled with the dev shell's MinGW GCC: the Venus Vulkan driver
-# (venera_vulkan_virtio.dll) and the OpenGL driver (viogpu_wgl.dll: WGL on zink, so OpenGL runs on Venus too).
+# (venera_vulkan_virtio.dll) and the OpenGL driver (viogpu_wgl.dll: WGL on zink, so OpenGL runs on Venus too), each
+# for x86_64 and, for 32-bit processes, for i686 (venera_vulkan_virtio_32.dll, viogpu_wgl_32.dll).
 #
 #   icd/build.sh [build-dir]      (default build/icd; run inside nix develop)
 #
@@ -30,7 +31,7 @@ for p in "$root"/icd/patches/*.patch; do
     stamp="$stamp $(sha256sum "$p" | cut -d' ' -f1)"
 done
 if [ ! -f "$src/.stamp" ] || [ "$(cat "$src/.stamp")" != "$stamp" ]; then
-    rm -rf "$src" "$out/meson"
+    rm -rf "$src" "$out/meson" "$out/meson32"
     mkdir -p "$src"
     git -C "$mesa" archive HEAD | tar -x -C "$src"
     for p in "$root"/icd/patches/*.patch; do
@@ -40,7 +41,6 @@ if [ ! -f "$src/.stamp" ] || [ "$(cat "$src/.stamp")" != "$stamp" ]; then
     echo "$stamp" > "$src/.stamp"
 fi
 
-# GCC from nixpkgs uses the mcfgthread model; link it and the GCC runtime statically, as the UMD does.
 # d3dkmthk.h and friends, which MinGW lacks, from the SDK after MinGW's own headers (as for the UMD).
 sdk_shared=$root/refs/winkits/sdk/c/Include/10.0.26100.0/shared
 # meson adds ccache itself only for native compilers: name it in the cross file.
@@ -48,33 +48,43 @@ launcher=
 if command -v ccache >/dev/null; then
     launcher="'ccache', "
 fi
-cat > "$out/cross.ini" <<EOF
+
+# Builds the two drivers for one architecture into $out/<build> and copies them to $out with a suffix:
+#   build_arch <build> <triple> <meson cpu_family> <cpu> <mcfgthread include> <mcfgthread lib> <suffix>
+# GCC from nixpkgs uses the mcfgthread model; link it and the GCC runtime statically, as the UMD does.
+build_arch() {
+    build=$out/$1 triple=$2 cpu_family=$3 cpu=$4 mcfg_include=$5 mcfg_lib=$6 suffix=$7
+    cat > "$out/cross$suffix.ini" <<EOF
 [binaries]
-c = [${launcher}'x86_64-w64-mingw32-gcc']
-cpp = [${launcher}'x86_64-w64-mingw32-g++']
-ar = 'x86_64-w64-mingw32-ar'
-strip = 'x86_64-w64-mingw32-strip'
-windres = 'x86_64-w64-mingw32-windres'
+c = [${launcher}'$triple-gcc']
+cpp = [${launcher}'$triple-g++']
+ar = '$triple-ar'
+strip = '$triple-strip'
+windres = '$triple-windres'
 
 [built-in options]
-c_args = ['-isystem', '${VENERA_MINGW_MCFG_INCLUDE}', '-idirafter', '$sdk_shared']
-cpp_args = ['-isystem', '${VENERA_MINGW_MCFG_INCLUDE}']
-c_link_args = ['-L${VENERA_MINGW_MCFG_LIB}', '-static', '-static-libgcc']
-cpp_link_args = ['-L${VENERA_MINGW_MCFG_LIB}', '-static', '-static-libgcc', '-static-libstdc++']
+c_args = ['-isystem', '$mcfg_include', '-idirafter', '$sdk_shared']
+cpp_args = ['-isystem', '$mcfg_include']
+c_link_args = ['-L$mcfg_lib', '-static', '-static-libgcc']
+cpp_link_args = ['-L$mcfg_lib', '-static', '-static-libgcc', '-static-libstdc++']
 
 [host_machine]
 system = 'windows'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
+cpu_family = '$cpu_family'
+cpu = '$cpu'
 endian = 'little'
 EOF
 
-if [ ! -f "$out/meson/build.ninja" ]; then
-    # shellcheck disable=SC2086 # word splitting intended: the options list
-    meson setup "$out/meson" "$src" --cross-file "$out/cross.ini" $options
-fi
-ninja -C "$out/meson" src/virtio/vulkan/libvulkan_virtio.dll src/gallium/targets/wgl/viogpu_wgl.dll
-# Installed next to venera_d3d12.dll under the name the UMD looks for.
-cp "$out/meson/src/virtio/vulkan/libvulkan_virtio.dll" "$out/venera_vulkan_virtio.dll"
-cp "$out/meson/src/gallium/targets/wgl/viogpu_wgl.dll" "$out/viogpu_wgl.dll"
-echo "icd: $out/venera_vulkan_virtio.dll $out/viogpu_wgl.dll"
+    if [ ! -f "$build/build.ninja" ]; then
+        # shellcheck disable=SC2086 # word splitting intended: the options list
+        meson setup "$build" "$src" --cross-file "$out/cross$suffix.ini" $options
+    fi
+    ninja -C "$build" src/virtio/vulkan/libvulkan_virtio.dll src/gallium/targets/wgl/viogpu_wgl.dll
+    # Installed next to venera_d3d12$suffix.dll under the name the UMD looks for.
+    cp "$build/src/virtio/vulkan/libvulkan_virtio.dll" "$out/venera_vulkan_virtio$suffix.dll"
+    cp "$build/src/gallium/targets/wgl/viogpu_wgl.dll" "$out/viogpu_wgl$suffix.dll"
+    echo "icd: $out/venera_vulkan_virtio$suffix.dll $out/viogpu_wgl$suffix.dll"
+}
+
+build_arch meson x86_64-w64-mingw32 x86_64 x86_64 "$VENERA_MINGW_MCFG_INCLUDE" "$VENERA_MINGW_MCFG_LIB" ""
+build_arch meson32 i686-w64-mingw32 x86 i686 "$VENERA_MINGW32_MCFG_INCLUDE" "$VENERA_MINGW32_MCFG_LIB" _32
