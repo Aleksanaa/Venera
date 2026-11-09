@@ -1,5 +1,7 @@
 # QEMU
 
+For NVIDIA hosts, see the [host patch set](nvidia_patchset/README.md) for pinned sources, patches, and application order.
+
 QEMU's own SDL or GTK window draws without SPICE's blocking, so stock QEMU is smooth here. With GTK, yttrium's QEMU patch
 [cf3bba5c26](https://github.com/arehnman/yttrium-qemu/commit/cf3bba5c26) ("ui: decouple GL presentation from
 renderer blocking") still helps, so a hidden or minimized GTK window doesn't stall the guest. SDL2 doesn't need it.
