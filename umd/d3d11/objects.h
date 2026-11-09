@@ -35,6 +35,9 @@ struct Device {
     HANDLE present_context = nullptr;                 // a kernel context of the runtime's: presents, keyed mutexes
     D3DKMT_HANDLE paging_queue = 0, paging_fence = 0; // for making presentable surfaces resident
     HANDLE idle_event = nullptr;                      // set by DXVK when a flush completes (wait_idle)
+    // Surfaces another device reads or writes with nothing ordering it after our rendering: created shared or opened
+    // from another process. While there are any, Flush waits for the GPU (device.cpp). Presents order themselves.
+    unsigned shared_surfaces = 0;
     // A shared surface cleared since the last handoff: DXVK keeps a clear that no draw follows pending across its
     // submissions, and running it needs a surface to transition (flush_clears).
     Com<ID3D11Resource> pending_clear;
@@ -94,6 +97,7 @@ struct ResourceObject {
     D3DKMT_HANDLE allocation = 0;
     D3D10DDI_HRTRESOURCE rt_resource{};
     bool allocated = false;
+    bool shared = false;   // counted in Device::shared_surfaces
     // Views of it, recreated when RotateResourceIdentities swaps its storage (present buffers only).
     std::vector<ViewObject*> views;
 

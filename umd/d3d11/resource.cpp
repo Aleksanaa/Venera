@@ -127,8 +127,14 @@ void APIENTRY create_resource(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATERESOUR
                            a->ResourceDimension, r->width, r->height, a->pMipInfoList[0].TexelDepth, a->MipLevels,
                            a->ArraySize, a->Format, a->SampleDesc.Count, a->Usage, a->BindFlags, a->MapFlags,
                            a->MiscFlags, a->pPrimaryDesc ? ", primary" : ""));
-    if (FAILED(hr))
+    if (FAILED(hr)) {
         d->set_error(E_OUTOFMEMORY);
+    } else if ((a->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) && !(a->BindFlags & D3D10_DDI_BIND_PRESENT) &&
+               !a->pPrimaryDesc) {
+        // Swapchain buffers and primaries are shared too, but reach other devices through Present.
+        r->shared = true;
+        d->shared_surfaces++;
+    }
 }
 
 void APIENTRY open_resource(D3D10DDI_HDEVICE h, const D3D10DDIARG_OPENRESOURCE* a, D3D10DDI_HRESOURCE hr_,
@@ -138,14 +144,20 @@ void APIENTRY open_resource(D3D10DDI_HDEVICE h, const D3D10DDIARG_OPENRESOURCE* 
     auto* r = new (hr_.pDrvPrivate) ResourceObject;
     r->rt_resource = rt;
     HRESULT hr = open_shared_surface(*d, *a, *r);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
         d->set_error(E_OUTOFMEMORY);
+    } else {
+        r->shared = true;
+        d->shared_surfaces++;
+    }
 }
 
 void APIENTRY destroy_resource(D3D10DDI_HDEVICE h, D3D10DDI_HRESOURCE hr_)
 {
     Device* d = Device::from(h);
     ResourceObject* r = ResourceObject::from(hr_);
+    if (r->shared)
+        d->shared_surfaces--;
     if (r->image || r->allocated)
         destroy_shared_surface(*d, *r);
     r->~ResourceObject();

@@ -39,9 +39,14 @@ void APIENTRY relocate_device_funcs(D3D10DDI_HDEVICE, D3DWDDM2_0DDI_DEVICEFUNCS*
 BOOL APIENTRY flush(D3D10DDI_HDEVICE h, UINT /*context_type*/, UINT /*flags*/)
 {
     // Another device or process may read a shared surface once this returns, ordered by nothing else: our rendering
-    // runs on DXVK's Vulkan queue, which the runtime does not schedule. So complete it.
+    // runs on DXVK's Vulkan queue, which the runtime does not schedule. So complete it while there are any; without
+    // them, waiting only keeps the CPU from working ahead of the GPU (games flush every frame).
     Device* d = Device::from(h);
     d->flush_clears();
+    if (!d->shared_surfaces) {
+        d->ctx->Flush();
+        return TRUE;
+    }
     if (FAILED(d->wait_idle()))
         d->set_error(D3DDDIERR_DEVICEREMOVED);
     return TRUE;
