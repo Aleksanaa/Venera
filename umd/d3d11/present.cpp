@@ -88,6 +88,52 @@ HRESULT make_resident(Device& d, D3DKMT_HANDLE allocation)
     return hr;
 }
 
+// A copy of blt-model back buffer `src` (BltRing): on memory the KMD can map, as a resident device allocation.
+HRESULT create_blt_stage(Device& d, const ResourceObject& src, ResourceObject& out)
+{
+    const D3D11_TEXTURE2D_DESC1 desc = surface_desc(src.format, src.width, src.height,
+                                                    D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET);
+    int fd = -1;
+    HRESULT hr = surface_texture(d, desc, -1, 0, out, &fd, true);
+    if (FAILED(hr))
+        return hr;
+    SurfaceAlias alias(d.kernel());
+    hr = alias.open(fd, virgl_format(src.format), src.width, src.height, out.image->size(), out.image->row_pitch(),
+                    true);
+    if (FAILED(hr))
+        return hr;
+    D3DDDI_ALLOCATIONINFO info{};
+    info.pPrivateDriverData = &alias.data;
+    info.PrivateDriverDataSize = sizeof(alias.data);
+    D3DDDICB_ALLOCATE cb{};
+    cb.NumAllocations = 1;
+    cb.pAllocationInfo = &info;
+    hr = d.kt.pfnAllocateCb(d.rt_device.handle, &cb);
+    if (FAILED(hr) || !info.hAllocation) {
+        VENERA_WARN("Present: AllocateCb of a blt copy failed: 0x%08lx", hr);
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    out.allocation = info.hAllocation;
+    out.allocated = true;
+    return make_resident(d, info.hAllocation);
+}
+
+void destroy_blt_stage(Device& d, ResourceObject& r)
+{
+    r.resource = nullptr;
+    r.image.reset();
+    if (r.allocated) {
+        // A device allocation (no runtime resource): by handle.
+        D3DDDICB_DEALLOCATE cb{};
+        cb.NumAllocations = 1;
+        cb.HandleList = &r.allocation;
+        const HRESULT hr = d.kt.pfnDeallocateCb(d.rt_device.handle, &cb);
+        if (FAILED(hr))
+            VENERA_WARN("Present: DeallocateCb(0x%x) of a blt copy failed: 0x%08lx", r.allocation, hr);
+        r.allocated = false;
+    }
+}
+
 } // namespace
 
 bool is_shared_surface(const D3D11DDIARG_CREATERESOURCE& a)
@@ -123,6 +169,7 @@ HRESULT create_shared_surface(Device& d, const D3D11DDIARG_CREATERESOURCE& a, D3
     // window with the CPU, so it lives in memory the KMD can map.
     const bool blt_source = (a.BindFlags & D3D10_DDI_BIND_PRESENT) && !a.pPrimaryDesc &&
                             !(a.MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED);
+    out.blt_source = blt_source;
     int fd = -1;
     HRESULT hr = surface_texture(d, desc, -1, 0, out, &fd, blt_source);
     if (FAILED(hr)) {
@@ -216,10 +263,16 @@ HRESULT open_shared_surface(Device& d, const D3D10DDIARG_OPENRESOURCE& a, Resour
 
 void destroy_shared_surface(Device& d, ResourceObject& r)
 {
-    // The image goes with the texture: the GPU must be done with it first, and with a clear DXVK still holds for it.
-    if (r.image) {
+    // The image goes with the texture, and the blt copies with the back buffer: the GPU must be done with them first,
+    // and with a clear DXVK still holds for it.
+    if (r.image || r.blt_ring) {
         d.flush_clears();
         d.wait_idle();
+    }
+    if (r.blt_ring) {
+        for (ResourceObject& s : r.blt_ring->stages)
+            destroy_blt_stage(d, s);
+        r.blt_ring.reset();
     }
     r.resource = nullptr;
     r.image.reset();
@@ -356,6 +409,16 @@ namespace {
 
 // --- Present -------------------------------------------------------------------------------------------------
 
+HRESULT present_callback(Device& d, D3DKMT_HANDLE src, D3DKMT_HANDLE dst, void* dxgi_context)
+{
+    DXGIDDICB_PRESENT p{};
+    p.hSrcAllocation = src;
+    p.hDstAllocation = dst;
+    p.pDXGIContext = dxgi_context;
+    p.hContext = d.present_context;
+    return d.dxgi->pfnPresentCb(d.rt_device.handle, &p);
+}
+
 HRESULT present_allocations(Device& d, D3DKMT_HANDLE src, D3DKMT_HANDLE dst, void* dxgi_context)
 {
     // The runtime presents the allocations as they are: our rendering on them must be complete. The present
@@ -366,12 +429,82 @@ HRESULT present_allocations(Device& d, D3DKMT_HANDLE src, D3DKMT_HANDLE dst, voi
         hr = d.wait_idle();
     if (FAILED(hr))
         return hr;
-    DXGIDDICB_PRESENT p{};
-    p.hSrcAllocation = src;
-    p.hDstAllocation = dst;
-    p.pDXGIContext = dxgi_context;
-    p.hContext = d.present_context;
-    return d.dxgi->pfnPresentCb(d.rt_device.handle, &p);
+    return present_callback(d, src, dst, dxgi_context);
+}
+
+// --- Blt presents one frame behind -------------------------------------------------------------------------------
+//
+// A windowed present of a blt-model back buffer returns only once dxgkrnl has waited for its source to be rendered and
+// the KMD and GDI have copied it into the window: the app cannot build its next frame while the GPU renders this one
+// (GravityMark: 2 of the 3 ms each present blocked were the GPU wait). While presents come steadily, the back buffer
+// is copied on the GPU into the next stage of its BltRing and the stage before, rendered by now, is presented:
+// one frame later on screen. After a pause the frame itself is presented, or an app that draws only on change would
+// not show its last frame.
+//
+// Completion is an event query of DXVK's, checked here, not the render fence: the fence's signal is a packet on the
+// KMD's single engine that completes only when the GPU has finished, and the present's packet would queue behind it.
+
+constexpr DWORD kSteadyPresentMs = 100;
+
+// The ring of back buffer `src`, made on its first windowed present; null if it cannot be, and then never tried
+// again for this back buffer, which is presented itself.
+BltRing* blt_ring_for(Device& d, ResourceObject& src)
+{
+    if (src.blt_ring)
+        return src.blt_ring.get();
+    auto ring = std::make_unique<BltRing>();
+    const D3D11_QUERY_DESC event{D3D11_QUERY_EVENT, 0};
+    for (unsigned i = 0; i < BltRing::kStages; i++) {
+        HRESULT hr = create_blt_stage(d, src, ring->stages[i]);
+        if (SUCCEEDED(hr))
+            hr = d.d3d->CreateQuery(&event, ring->copied[i].put());
+        if (FAILED(hr)) {
+            VENERA_WARN("Present: blt copies of %ux%u format %d failed: 0x%08lx; presenting the back buffer itself",
+                        src.width, src.height, src.format, hr);
+            for (ResourceObject& s : ring->stages)
+                destroy_blt_stage(d, s);
+            src.blt_source = false;
+            return nullptr;
+        }
+    }
+    VENERA_TRACE("Present: blt presents of %ux%u format %d go one frame behind through %u copies", src.width,
+                 src.height, src.format, BltRing::kStages);
+    src.blt_ring = std::move(ring);
+    return src.blt_ring.get();
+}
+
+// Waits until the GPU has done the copy into stage `i`: usually already, a frame after it was submitted.
+HRESULT wait_for_copy(Device& d, BltRing& ring, unsigned i)
+{
+    const DWORD start = GetTickCount();
+    HRESULT hr;
+    while ((hr = d.ctx->GetData(ring.copied[i].get(), nullptr, 0, 0)) == S_FALSE) {
+        if (GetTickCount() - start > 2000) {
+            VENERA_WARN("Present: a blt copy is not done after 2s; waiting for the GPU");
+            return d.wait_idle();
+        }
+        SwitchToThread();
+    }
+    return FAILED(hr) ? hr : S_OK;
+}
+
+HRESULT present_blt_behind(Device& d, BltRing& ring, ResourceObject& src, void* dxgi_context)
+{
+    const DWORD now = GetTickCount();
+    const bool steady = ring.last >= 0 && now - ring.last_tick < kSteadyPresentMs;
+    ring.last_tick = now;
+    d.flush_clears();
+    const unsigned k = ring.next;
+    ring.next = (k + 1) % BltRing::kStages;
+    d.ctx->CopyResource(ring.stages[k].resource.get(), src.resource.get());
+    d.ctx->End(ring.copied[k].get());
+    d.ctx->Flush();   // the frame goes to the GPU now, not when DXVK next submits
+    const unsigned show = steady ? static_cast<unsigned>(ring.last) : k;
+    ring.last = static_cast<int>(k);
+    const HRESULT hr = wait_for_copy(d, ring, show);
+    if (FAILED(hr))
+        return hr;
+    return present_callback(d, ring.stages[show].allocation, 0, dxgi_context);
 }
 
 D3DKMT_HANDLE allocation_of(DXGI_DDI_HRESOURCE h)
@@ -397,7 +530,10 @@ HRESULT APIENTRY present(DXGI_DDI_ARG_PRESENT* a)
     // Also before: a present that blocks (on our rendering or in the KMD) never reaches the line below.
     if (n < 8 || verbose())
         VENERA_TRACE("Present #%u: src 0x%x, dst 0x%x: begin", n, src, dst);
-    HRESULT hr = present_allocations(d, src, dst, a->pDXGIContext);
+    ResourceObject& s = *ResourceObject::from(a->hSurfaceToPresent);
+    BltRing* ring = a->Flags.Blt && !dst && s.blt_source ? blt_ring_for(d, s) : nullptr;
+    HRESULT hr = ring ? present_blt_behind(d, *ring, s, a->pDXGIContext)
+                      : present_allocations(d, src, dst, a->pDXGIContext);
     if (n < 8 || FAILED(hr) || verbose())
         VENERA_TRACE("Present #%u: src 0x%x (sub %u), dst 0x%x (sub %u), flags 0x%x, interval %d -> 0x%08lx", n, src,
                      a->SrcSubResourceIndex, dst, a->DstSubResourceIndex, a->Flags.Value,

@@ -82,6 +82,7 @@ T* object(H h)
 }
 
 struct ViewObject;
+struct BltRing;
 
 struct ResourceObject {
     Com<ID3D11Resource> resource;
@@ -97,12 +98,26 @@ struct ResourceObject {
     D3DKMT_HANDLE allocation = 0;
     D3D10DDI_HRTRESOURCE rt_resource{};
     bool allocated = false;
-    bool shared = false;   // counted in Device::shared_surfaces
+    bool shared = false;       // counted in Device::shared_surfaces
+    bool blt_source = false;   // a legacy blt-model back buffer, which the KMD copies into the window with the CPU
+    std::unique_ptr<BltRing> blt_ring;   // its copies, which windowed presents hand over one frame late
     // Views of it, recreated when RotateResourceIdentities swaps its storage (present buffers only).
     std::vector<ViewObject*> views;
 
     static ResourceObject* from(D3D10DDI_HRESOURCE h) { return object<ResourceObject>(h); }
     static ResourceObject* from(DXGI_DDI_HRESOURCE h) { return reinterpret_cast<ResourceObject*>(h); }
+};
+
+// Copies of a blt-model back buffer (ResourceObject::blt_ring), on memory the KMD can map, as device allocations: a
+// windowed present copies the back buffer into the next and hands over the one before, which the GPU has finished by
+// then (present.cpp).
+struct BltRing {
+    static constexpr unsigned kStages = 3;   // one being written, one presented, one the kernel may still read
+    ResourceObject stages[kStages];
+    Com<ID3D11Query> copied[kStages];   // an event query after the copy into each
+    unsigned next = 0;                  // the stage the next present copies into
+    int last = -1;                      // the stage the previous present copied into
+    DWORD last_tick = 0;                // when the previous present came
 };
 
 // The COM resource behind a handle; null for a null handle.
