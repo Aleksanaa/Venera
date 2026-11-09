@@ -55,6 +55,15 @@ UINT api_misc_flags(const D3D11DDIARG_CREATERESOURCE& a)
     return out;
 }
 
+// After a failed create or open: the runtime takes the handle as never made and does not destroy it (CreateResource's
+// documentation), so what was made goes now.
+void undo_create(Device& d, ResourceObject& r)
+{
+    if (r.image || r.allocated)
+        destroy_shared_surface(d, r);
+    r.~ResourceObject();
+}
+
 SIZE_T APIENTRY calc_private_resource_size(D3D10DDI_HDEVICE, const D3D11DDIARG_CREATERESOURCE*)
 {
     return sizeof(ResourceObject);
@@ -128,6 +137,7 @@ void APIENTRY create_resource(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATERESOUR
                            a->ArraySize, a->Format, a->SampleDesc.Count, a->Usage, a->BindFlags, a->MapFlags,
                            a->MiscFlags, a->pPrimaryDesc ? ", primary" : ""));
     if (FAILED(hr)) {
+        undo_create(*d, *r);
         d->set_error(E_OUTOFMEMORY);
     } else if ((a->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED) && !(a->BindFlags & D3D10_DDI_BIND_PRESENT) &&
                !a->pPrimaryDesc) {
@@ -145,6 +155,7 @@ void APIENTRY open_resource(D3D10DDI_HDEVICE h, const D3D10DDIARG_OPENRESOURCE* 
     r->rt_resource = rt;
     HRESULT hr = open_shared_surface(*d, *a, *r);
     if (FAILED(hr)) {
+        undo_create(*d, *r);
         d->set_error(E_OUTOFMEMORY);
     } else {
         r->shared = true;

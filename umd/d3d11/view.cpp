@@ -43,7 +43,10 @@ void finish(D3D10DDI_HDEVICE h, ViewObject* v, ResourceObject* r, const char* wh
     if (FAILED(hr)) {
         VENERA_WARN("Create%s: format %d on resource dimension %d (%u layers, %u samples) failed: 0x%08lx", what,
                     r->format, r->dimension, r->array_size, r->samples, hr);
+        // The runtime does not destroy a view whose creation failed.
+        v->~ViewObject();
         d->set_error(E_OUTOFMEMORY);
+        return;
     }
     if (r->bind & D3D10_DDI_BIND_PRESENT)
         r->views.push_back(v);
