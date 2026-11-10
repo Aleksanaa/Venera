@@ -184,6 +184,8 @@ public:
 constexpr UINT kPageMessage = WM_APP + 1;
 constexpr UINT_PTR kPageTimer = 100;
 
+// /mock: the Overview shows a made-up system with every warning and problem row, for checking its layout.
+extern bool g_mockOverview;
 std::unique_ptr<Page> makeOverview(HWND window);
 std::unique_ptr<Page> makeSettings(HWND window);
 std::unique_ptr<Page> makeLogs(HWND window);

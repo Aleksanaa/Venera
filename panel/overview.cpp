@@ -10,6 +10,8 @@ namespace panel {
 
 using namespace theme;
 
+bool g_mockOverview = false;
+
 namespace {
 
 constexpr UINT kProbeDone = kPageMessage;
@@ -40,15 +42,89 @@ float warningHeight(Ui& ui, const InfoRow& r, float w)
 
 float rowHeight(Ui& ui, const InfoRow& r, float w) { return valueHeight(ui, r, w) + warningHeight(ui, r, w); }
 
+// Every warning and problem the report knows, with long values (/mock).
+SystemInfo mockInfo()
+{
+    SystemInfo s;
+    s.deviceFound = true;
+    s.driverDesc = L"VirtIO GPU (Venus) with Venera D3D10/11/12";
+    s.provider = L"Venera project";
+    s.ours = true;
+    s.problem = 43;
+    s.driverVersion = L"0.2.1.140";
+    s.driverDate = L"Monday, November 3, 2026";
+    s.needRestart = true;
+    s.driverFolder = L"C:\\Windows\\System32\\DriverStore\\FileRepository\\venera.inf_amd64_0123456789abcdef";
+    s.productVersion = L"0.2.2.159.dbdbd77";
+    s.installDate = L"Tuesday, November 10, 2026";
+    s.testSigning = false;
+    s.kmdAnswered = true;
+    s.machine = L"QEMU Standard PC (Q35 + ICH9, 2009)";
+    s.machineType = L"pc-q35-11.1";
+    s.windows = L"Windows 11 Pro 25H2, build 26200.9711";
+    s.cpu = L"AMD RYZEN AI MAX+ 395 w/ Radeon 8060S";
+    s.sockets = 2;
+    s.cores = 2;
+    s.threads = 2;
+    s.memory = 8ull << 30;
+    s.usableMemory = s.memory - (100ull << 20);
+    s.displays = {{2464, 1570, 60, 150}, {1920, 1080, 144, 100}};
+    s.otherVulkanDrivers = {L"C:\\Program Files\\Some Vendor\\Graphics Runtime\\vulkan\\some_vendor_icd64.json",
+                            L"C:\\Windows\\SysWOW64\\leftover_yttrium_icd32.json"};
+    s.settings = {{L"DXVK_HUD", L"fps,frametimes,gpuload,memory,version,api,compiler"},
+                  {L"MESA_LOG_LEVEL", L"debug"},
+                  {L"VENERA_LOG", L"C:\\venera\\venera.log"}};
+    s.environment = {{L"VK_INSTANCE_LAYERS", L"VK_LAYER_KHRONOS_validation"},
+                     {L"VKD3D_CONFIG", L"dxr,force_static_cbv,no_upload_hvv,single_queue"}};
+    return s;
+}
+
+ProbeResult mockProbe()
+{
+    const std::wstring folder =
+        L"C:\\Windows\\System32\\DriverStore\\FileRepository\\venera.inf_amd64_0123456789abcdef";
+    return {{"vk.status", L"ok"},
+            {"vk.device", L"Virtio-GPU Venus (AMD Radeon 8060S Graphics (RADV STRIX_HALO))"},
+            {"vk.host_driver_info", L"Mesa 26.2.5"},
+            {"vk.api", L"1.4.334"},
+            {"vk.driver", L"venus"},
+            {"vk.driver_info", L"Mesa 26.1.0"},
+            {"vk.heap.0", L"6227702784 m"},
+            {"vk.heap.1", L"12562141184 dm"},
+            {"d3d12.status", L"error 0x887a0004"},
+            {"d3d11.status", L"ok"},
+            {"d3d11.level", L"12_1"},
+            {"gl.status", L"ok"},
+            {"gl.version", L"1.1.0"},
+            {"gl.renderer", L"GDI Generic"},
+            {"dxgi.dedicated", L"0"},
+            {"dxgi.shared", L"4294967296"},
+            {"dxgi.budget_local", L"3865470566"},
+            {"dxgi.budget_non_local", L"0"},
+            {"module.venera_d3d11.dll", L"C:\\Windows\\System32\\venera_d3d11.dll"},
+            {"module.venera_vulkan_virtio.dll", folder + L"\\venera_vulkan_virtio.dll"},
+            {"done", L"1"}};
+}
+
 class Overview : public Page {
 public:
-    explicit Overview(HWND window) : window_(window), info_(readSystemInfo()) { check(); }
+    explicit Overview(HWND window) : window_(window), info_(g_mockOverview ? mockInfo() : readSystemInfo())
+    {
+        if (g_mockOverview)
+            probe_ = mockProbe();
+        else
+            check();
+    }
 
     const wchar_t* title() const override { return L"Overview"; }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui, float x, float w, float& y) override;
     void click(int id) override;
-    void refresh() override { info_.displays = readDisplays(info_.ours ? info_.driverDesc : std::wstring()); }
+    void refresh() override
+    {
+        if (!g_mockOverview)
+            info_.displays = readDisplays(info_.ours ? info_.driverDesc : std::wstring());
+    }
     bool message(UINT msg, WPARAM wp, LPARAM lp) override;
 
 private:
@@ -139,7 +215,7 @@ void Overview::click(int id)
         setClipboard(window_, reportText(describe(info_, probe())));
         copied_ = true;
         SetTimer(window_, kCopiedTimer, 2000, nullptr);
-    } else if (id == kCheckId) {
+    } else if (id == kCheckId && !g_mockOverview) {
         info_ = readSystemInfo();
         check();
     } else if (id >= kExpanderId && id < kExpanderId + 8) {

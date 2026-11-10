@@ -351,6 +351,10 @@ int runCommandLine(int argc, wchar_t** argv, int* page)
             out.print(text);
             return anyProblem(report) ? 1 : 0;
         }
+        if (o == L"mock") {  // the window's Overview, made up
+            g_mockOverview = true;
+            continue;
+        }
         if (o == L"page" && i + 1 < argc) {  // the window's
             *page = _wtoi(argv[++i]);
             continue;
