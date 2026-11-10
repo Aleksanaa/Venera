@@ -113,7 +113,8 @@ void Window::drawPane()
     for (size_t i = 0; i < pages_.size(); i++) {
         int id = kNavId + int(i);
         D2D1_RECT_F r = {4, y, kPaneW - 4, y + 36};
-        bool sel = page_ == i, h = ui_.hover == id, p = h && ui_.pressed == id;
+        bool sel = page_ == i;
+        auto [h, p] = ui_.pointer(id);
         if (sel || h)
             ui_.fill(r, 4, kWhite, p ? kControlPressed : (sel && h) ? kControlHover : kControl);
         if (sel)

@@ -18,7 +18,7 @@ using namespace theme;
 
 namespace {
 
-constexpr float kHeroH = 104, kCardH = 68, kGap = 4, kRowH = 56;
+constexpr float kHeroH = 104, kGap = 4, kRowH = 56;
 constexpr UINT kChecked = kPageMessage + 5, kProgress = kPageMessage + 6, kDownloaded = kPageMessage + 7,
                kInstalled = kPageMessage + 8;
 
@@ -359,33 +359,27 @@ void About::drawUpdate(Ui& ui, float x, float w, float& y)
     ui.text(glyph, Ui::kGlyph, {x + 24, y, x + 72, y + kHeroH}, glyphColor, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
     float right = x + w - 24, cy = y + kHeroH / 2;
     if (state_ == kAvailable) {
-        right -= ui.buttonWidth(L"Download");
-        ui.button(L"Download", right, cy - 16, kDownloadId, true);
+        right = ui.buttonRight(L"Download", right, cy, kDownloadId, true);
     } else if (state_ == kReady) {
-        right -= ui.buttonWidth(L"Install");
-        ui.button(L"Install", right, cy - 16, kInstallId, true);
+        right = ui.buttonRight(L"Install", right, cy, kInstallId, true);
     } else if (state_ == kDownloading) {
-        right -= ui.buttonWidth(L"Cancel");
-        ui.button(L"Cancel", right, cy - 16, kCancelId, false);
-        right -= 16 + 28;
+        right = ui.buttonRight(L"Cancel", right, cy, kCancelId, false) - 16 - 28;
         ui.progressRing(right + 14, cy, 28, update_.size ? float(done_) / update_.size : -1);
     } else if (state_ == kChecking || state_ == kInstalling) {
         right -= 28;
         ui.progressRing(right + 14, cy, 28, -1);
     } else {
         const wchar_t* label = state_ == kFailed ? L"Try again" : L"Check for updates";
-        right -= ui.buttonWidth(label);
-        ui.button(label, right, cy - 16, kCheckId, false);
+        right = ui.buttonRight(label, right, cy, kCheckId, false);
     }
     ui.text(title, Ui::kSubtitle, {x + 96, y + 22, right - 24, y + 52});
     ui.selectable(kStatusText, sub, Ui::kBody, {x + 96, y + 56, right - 24, y + 80}, kWhite, kTextSecondary);
     y += kHeroH + kGap;
 
-    float ccy = ui.settingsCard(x, y, w, kCardH, L"" /* Switch */, L"Update channel",
+    float ccy = ui.settingsCard(x, y, w, L"" /* Switch */, L"Update channel",
                                 L"Release: tagged versions. Develop: the newest working build of main");
     ui.comboBox(x + w - 16, ccy, kChannelId, {L"Release", L"Develop"}, channel_ == Channel::kDevelop,
                 state_ != kDownloading && state_ != kInstalling);
-    y += kCardH + kGap;
 }
 
 // Snapped to device pixels, so the icon is drawn 1:1 from its own size.
@@ -432,13 +426,9 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
     float topH = 144, h = topH + 1 + 12 + kRows * 32 + 12;
     ui.card({x, y, x + w, y + h});
     drawIcon(ui, {x + 32, y + 32, x + 112, y + 112});
-    float tx = x + 140, right = x + w - 24;
-    float bw = ui.buttonWidth(L"Telegram");
-    ui.button(L"Telegram", right - bw, y + 56, kTelegramId, false);
-    right -= bw + 8;
-    bw = ui.buttonWidth(L"GitHub");
-    ui.button(L"GitHub", right - bw, y + 56, kGithubId, false);
-    right -= bw + 24;
+    float tx = x + 140;
+    float right = ui.buttonRight(L"Telegram", x + w - 24, y + 72, kTelegramId, false);
+    right = ui.buttonRight(L"GitHub", right - 8, y + 72, kGithubId, false) - 24;
     ui.text(L"Venera", Ui::kTitle, {tx, y + 26, right, y + 66});
     ui.text(L"Hardware-accelerated Direct3D 9 to 12, Vulkan and OpenGL for Windows guests in QEMU", Ui::kBody,
             {tx, y + 68, right, y + 90}, kWhite, kTextSecondary);
@@ -446,7 +436,7 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
         L"Version " + installed_ + (buildChannel() == Channel::kDevelop ? L", develop build" : L"");
     ui.selectable(kVersionText, installed_.empty() ? L"Not installed" : version, Ui::kCaption,
                   {tx, y + 92, right, y + 112}, kWhite, kTextTertiary);
-    ui.fill({x + 1, y + topH, x + w - 1, y + topH + 1}, 0, kBlack, 0.25f);
+    ui.divider(x, w, y + topH);
     float ry = y + topH + 1 + 12;
     for (const Row& r : rows) {
         ui.text(r.key, Ui::kBody, {x + 32, ry, x + 32 + 180, ry + 32}, kWhite, kTextSecondary);
@@ -464,14 +454,14 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
         float top = y + i * kRowH;
         int id = kCreditId + i;
         if (i)
-            ui.fill({x + 1, top, x + w - 1, top + 1}, 0, kBlack, 0.25f);
-        if (ui.hover == id)
+            ui.divider(x, w, top);
+        auto [over, pressed] = ui.pointer(id);
+        if (over)
             ui.fill({x + 1, top + 1, x + w - 1, top + kRowH - 1}, 3, kWhite,
-                    ui.pressed == id ? kControlPressed : kCardHover - kCardFill);
+                    pressed ? kControlPressed : kCardHover - kCardFill);
         ui.hot({x, top, x + w, top + kRowH}, id);
         float licenseW = 220;
-        ui.text(c.name, Ui::kBody, {x + 16, top + 9, x + w - licenseW - 56, top + 29});
-        ui.text(c.use, Ui::kCaption, {x + 16, top + 29, x + w - licenseW - 56, top + 47}, kWhite, kTextSecondary);
+        ui.titleDesc(x + 16, x + w - licenseW - 56, top + kRowH / 2, c.name, c.use);
         ui.text(c.license, Ui::kBody, {x + w - licenseW - 48, top, x + w - 48, top + kRowH}, kWhite, kTextSecondary,
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
         ui.text(L"" /* OpenInNewWindow */, Ui::kIconSmall, {x + w - 40, top, x + w - 16, top + kRowH}, kWhite,

@@ -16,7 +16,7 @@ using namespace theme;
 namespace {
 
 constexpr UINT kLines = kPageMessage + 4;
-constexpr float kCardH = 68, kRowH = 22;
+constexpr float kRowH = 22;
 constexpr size_t kMaxLines = 20000;
 constexpr int kLineRun = 1;
 enum : int { kCaptureId = kPageId, kClearId, kExportId, kElevateId, kFilterId, kLineText = kPageId + 100 };
@@ -104,38 +104,23 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
         std::wstring desc = L"Since " + clock(since_, false) + L", from " +
                             (capture_.kernelError.empty() ? L"programs, services and the kernel"
                                                           : L"programs in this session");
-        float cy = ui.settingsCard(x, y, w, kCardH, L"", L"Capturing debug output", desc, kNoId, kCritical);
-        ui.button(L"Stop", x + w - 16 - ui.buttonWidth(L"Stop"), cy - 16, kCaptureId, false);
+        float cy = ui.settingsCard(x, y, w, L"", L"Capturing debug output", desc, kCritical);
+        ui.buttonRight(L"Stop", x + w - 16, cy, kCaptureId, false);
     } else {
-        float cy = ui.settingsCard(x, y, w, kCardH, L"", L"Capture debug output",
+        float cy = ui.settingsCard(x, y, w, L"", L"Capture debug output",
                                    L"What the drivers print while programs use the GPU");
-        ui.button(L"Start", x + w - 16 - ui.buttonWidth(L"Start"), cy - 16, kCaptureId, true);
+        ui.buttonRight(L"Start", x + w - 16, cy, kCaptureId, true);
     }
-    y += kCardH + 4;
 
-    // InfoBars, a sentence each, for what the capture cannot see.
-    auto infoBar = [&](const wchar_t* glyph, UINT32 iconColor, UINT32 fill, float fillAlpha, const std::wstring& text,
-                       const wchar_t* action) {
-        D2D1_RECT_F r = {x, y, x + w, y + 48};
-        ui.fill(r, 4, fill, fillAlpha);
-        ui.stroke(r, 4, kBlack, 0.1f);
-        ui.text(glyph, Ui::kIcon, {x + 16, y, x + 36, y + 48}, iconColor, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
-        float right = x + w - 16;
-        if (action) {
-            right -= ui.buttonWidth(action) + 12;
-            ui.button(action, right + 12, y + 8, kElevateId, false);
-        }
-        ui.text(text, Ui::kBody, {x + 48, y, right, y + 48});
-        y += 48 + 4;
-    };
+    // InfoBars for what the capture cannot see.
     if (!admin_)
-        infoBar(L"", accent, kWhite, 0.0326f,
-                L"Restart as administrator to also see the kernel driver's messages and services' output.",
-                L"Restart as administrator");
+        ui.infoBar(x, w, y, Ui::Severity::kInformational, L"",
+                   L"Restart as administrator to also see the kernel driver's messages and services' output.",
+                   L"Restart as administrator", kElevateId);
     if (capture_.running() && !capture_.userError.empty())
-        infoBar(L"", kCritical, kCriticalBg, 1, capture_.userError + L".", nullptr);
+        ui.infoBar(x, w, y, Ui::Severity::kError, L"", capture_.userError + L".");
     if (capture_.running() && admin_ && !capture_.kernelError.empty())
-        infoBar(L"", kCritical, kCriticalBg, 1, capture_.kernelError + L".", nullptr);
+        ui.infoBar(x, w, y, Ui::Severity::kError, L"", capture_.kernelError + L".");
     y += 16;
 
     // SelectorBar for which lines, actions on the right
@@ -143,7 +128,7 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
     for (int i = 0; i < 4; i++) {
         float tw = ui.measure(kFilters[i], Ui::kBody) + 24;
         D2D1_RECT_F r = {fx, y, fx + tw, y + 40};
-        bool sel = filter_ == i, h = ui.hover == kFilterId + i;
+        bool sel = filter_ == i, h = ui.pointer(kFilterId + i).over;
         if (h && !sel)
             ui.fill({r.left, r.top + 4, r.right, r.bottom - 4}, 4, kWhite, kControl);
         ui.text(kFilters[i], Ui::kBody, r, kWhite, sel || h ? kTextPrimary : kTextSecondary,
@@ -153,10 +138,8 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
         ui.hot(r, kFilterId + i);
         fx += tw;
     }
-    float bx = x + w - ui.buttonWidth(L"Export");
-    ui.button(L"Export", bx, y + 4, kExportId, false);
-    bx -= 8 + ui.buttonWidth(L"Clear");
-    ui.button(L"Clear", bx, y + 4, kClearId, false);
+    float bx = ui.buttonRight(L"Export", x + w, y + 20, kExportId, false);
+    ui.buttonRight(L"Clear", bx - 8, y + 20, kClearId, false);
     y += 40 + 12;
 
     std::vector<const Line*> shownLines;

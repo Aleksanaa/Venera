@@ -35,6 +35,7 @@ constexpr float kStrongStroke = 0.544f;  // ControlStrongStrokeColorDefault
 constexpr float kTextDisabled = 0.3628f, kControlDisabled = 0.0419f, kStrokeDisabled = 0.2465f;
 constexpr UINT32 kSuccess = 0x6ccb5f, kCaution = 0xfce100, kCritical = 0xff99a4;
 constexpr UINT32 kCautionBg = 0x433519, kCriticalBg = 0x442726;
+constexpr float kAttentionFill = 0.0326f;  // SystemFillColorAttentionBackground
 extern UINT32 accent;      // SystemAccentColorLight2, from Windows' accent palette
 extern UINT32 accentBase;  // SystemAccentColor: the text selection highlight
 }  // namespace theme
@@ -82,6 +83,8 @@ public:
     int hit(float x, float y) const;
     float offset = 0, view = 0;  // view: the height of what is shown, from offset
     int hover = kNoId, pressed = kNoId;
+    struct Pointer { bool over, pressed; };
+    Pointer pointer(int id) const { return {hover == id, hover == id && pressed == id}; }
 
     // A part of a page that fills the window (Page::fills) and scrolls by itself, like a log's lines: what is drawn
     // between beginScroll and endScroll is clipped to r, and moved up by `scroll`, which the window keeps; `height` is
@@ -96,15 +99,30 @@ public:
     // out and not clickable when not `enabled`.
     float button(const std::wstring& s, float x, float y, int id, bool accent);
     float buttonWidth(const std::wstring& s);
+    // A button placed by its right edge and vertical centre, like the toggle; returns its left edge.
+    float buttonRight(const std::wstring& s, float right, float cy, int id, bool accent);
     void toggle(float right, float cy, int id, bool on, bool enabled = true);
     void comboBox(float right, float cy, int id, const std::vector<std::wstring>& options, int selected,
                   bool enabled = true);
-    // A Settings card (68 high): icon, title, description; returns the vertical centre for the control on its right.
-    float settingsCard(float x, float y, float w, float h, const wchar_t* icon, const std::wstring& title,
-                       const std::wstring& desc, int clickId = kNoId, UINT32 iconColor = theme::kWhite,
-                       float iconAlpha = 1);
+    // A Settings card (68 high, 4 apart): icon, title, description; returns the vertical centre for the control on its
+    // right, and leaves y below it.
+    float settingsCard(float x, float& y, float w, const wchar_t* icon, const std::wstring& title,
+                       const std::wstring& desc, UINT32 iconColor = theme::kWhite);
     void card(D2D1_RECT_F r, bool hover = false);
+    // The pointer over a clickable part of a card: the card's hover fill there.
+    void cardHover(D2D1_RECT_F r, float radius = 4);
+    // A line across a card w wide, at y.
+    void divider(float x, float w, float y);
+    // A title on a line and a description in Caption below it, between x and right, around cy; the description is
+    // selectable with a `descId`.
+    void titleDesc(float x, float right, float cy, const std::wstring& title, const std::wstring& desc,
+                   UINT32 descColor = theme::kWhite, float descAlpha = theme::kTextSecondary, int descId = kNoId);
     void sectionHeader(const std::wstring& s, float x, float& y);
+    // An InfoBar: its severity's icon, an optional title in Body Strong above the message, both wrapping, and an
+    // optional button on the right; leaves y below it.
+    enum class Severity { kInformational, kError };
+    void infoBar(float x, float w, float& y, Severity severity, const std::wstring& title, const std::wstring& message,
+                 const wchar_t* action = nullptr, int actionId = kNoId);
     // A 32 x 32 subtle button with a glyph: no fill until the pointer is over it.
     void iconButton(const wchar_t* glyph, float x, float y, int id);
     // A ProgressRing `size` across: `value` from 0 to 1, or below 0 for the indeterminate one (keep painting frames).

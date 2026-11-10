@@ -16,7 +16,7 @@ using namespace theme;
 namespace {
 
 constexpr UINT kStarted = kPageMessage + 1, kFinished = kPageMessage + 2, kIdle = kPageMessage + 3;
-constexpr float kCardH = 68, kHeaderH = 64, kRowH = 52;
+constexpr float kHeaderH = 64, kRowH = 52;
 enum : int {
     kRunAllId = kPageId, kCopyId,
     kHeaderId = kPageId + 100,   // + group
@@ -332,26 +332,16 @@ void Tests::draw(Ui& ui, float x, float w, float& y)
         GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &lastRun_, nullptr, time, 64);
         desc = std::wstring(L"Last run at ") + time;
     }
-    float cy = ui.settingsCard(x, y, w, kCardH, L"", title, desc, kNoId, failed && !busy() ? kCritical : kWhite);
+    float cy = ui.settingsCard(x, y, w, L"", title, desc, failed && !busy() ? kCritical : kWhite);
     const wchar_t* run = busy() ? L"Stop" : L"Run all";
-    float right = x + w - 16 - ui.buttonWidth(run);
-    ui.button(run, right, cy - 16, kRunAllId, !busy());
-    if (passed || failed) {
-        const wchar_t* copy = copied_ ? L"Copied" : L"Copy results";
-        ui.button(copy, right - 8 - ui.buttonWidth(copy), cy - 16, kCopyId, false);
-    }
-    y += kCardH + 4;
+    float right = ui.buttonRight(run, x + w - 16, cy, kRunAllId, !busy());
+    if (passed || failed)
+        ui.buttonRight(copied_ ? L"Copied" : L"Copy results", right - 8, cy, kCopyId, false);
 
-    // an informational InfoBar: what the present tests do to the screen
-    D2D1_RECT_F bar = {x, y, x + w, y + 68};
-    ui.fill(bar, 4, kWhite, 0.0326f);  // SystemFillColorAttentionBackground
-    ui.stroke(bar, 4, kBlack, 0.1f);
-    ui.text(L"", Ui::kIcon, {x + 16, y, x + 36, y + 68}, accent, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
-    ui.text(L"Some tests show things on the screen", Ui::kBodyStrong, {x + 52, y + 14, x + w - 16, y + 34});
-    ui.text(L"Swapchain and present tests open windows for a few seconds, and some fill the whole screen. They close "
-            L"by themselves.",
-            Ui::kBody, {x + 52, y + 34, x + w - 16, y + 54}, kWhite, kTextSecondary);
-    y += 68 + 24;
+    ui.infoBar(x, w, y, Ui::Severity::kInformational, L"Some tests show things on the screen",
+               L"Swapchain and present tests open windows for a few seconds, and some fill the whole screen. They close "
+               L"by themselves.");
+    y += 20;
 
     for (size_t g = 0; g < groups_.size(); g++)
         drawGroup(ui, int(g), x, w, y);
@@ -367,8 +357,8 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
 
     // the header: state, name and how it went, the run button (a ProgressRing while it runs) and the chevron
     int headerId = kHeaderId + g, runId = kGroupRunId + g;
-    if (ui.hover == headerId)
-        ui.fill({x + 1, y + 1, x + w - 1, y + kHeaderH}, 4, kWhite, kCardHover - kCardFill);
+    if (ui.pointer(headerId).over)
+        ui.cardHover({x + 1, y + 1, x + w - 1, y + kHeaderH});
     ui.hot({x, y, x + w, y + kHeaderH}, headerId);
     int passed = 0, failed = 0, done = 0;
     for (const Entry& e : group.tests) {
@@ -386,16 +376,15 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
     else if (done)
         sub = std::to_wstring(passed) + L" passed" + (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
               (done < int(group.tests.size()) ? L", " + std::to_wstring(group.tests.size() - done) + L" not run" : L"");
-    ui.text(tg.name, Ui::kBody, {x + 56, y + kHeaderH / 2 - 19, x + w - 120, y + kHeaderH / 2 + 1});
-    ui.text(sub, Ui::kCaption, {x + 56, y + kHeaderH / 2 + 1, x + w - 120, y + kHeaderH / 2 + 19}, failed && !running
-            ? kCritical : kWhite, failed && !running ? 1 : kTextSecondary);
+    ui.titleDesc(x + 56, x + w - 120, y + kHeaderH / 2, tg.name, sub, failed && !running ? kCritical : kWhite,
+                 failed && !running ? 1 : kTextSecondary);
     float bx = x + w - 52 - 32, by = y + kHeaderH / 2 - 16;
     if (running) {
-        bool h2 = ui.hover == runId;
-        if (h2)
-            ui.fill({bx, by, bx + 32, by + 32}, 4, kWhite, ui.pressed == runId ? kControlPressed : kControlHover);
+        auto [over, pressed] = ui.pointer(runId);
+        if (over)
+            ui.fill({bx, by, bx + 32, by + 32}, 4, kWhite, pressed ? kControlPressed : kControlHover);
         ui.progressRing(bx + 16, by + 16, 20, group.runTotal ? float(group.runDone) / group.runTotal : 0);
-        if (h2)
+        if (over)
             ui.text(kStop, Ui::kIconSmall, {bx, by, bx + 32, by + 32}, kWhite, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
         ui.hot({bx, by, bx + 32, by + 32}, runId);
     } else {
@@ -406,7 +395,7 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
 
     // the tests
     if (group.open) {
-        ui.fill({x + 1, y + kHeaderH, x + w - 1, y + kHeaderH + 1}, 0, kBlack, 0.25f);
+        ui.divider(x, w, y + kHeaderH);
         float ry = y + kHeaderH + 1 + 8;
         for (size_t t = 0; t < group.tests.size(); t++) {
             const Test& test = tg.tests[t];
@@ -416,14 +405,13 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
             float right = x + w - 52 - 32 - 16;  // left of the run button
             std::wstring time = e.state == kPassed || e.state == kFailed ? seconds(e.result.seconds) : L"";
             float tw = time.empty() ? 0 : ui.measure(time, Ui::kCaption) + 16;
-            ui.text(test.name, Ui::kBody, {x + 56, cy - 19, right - tw, cy + 1});
-            if (e.state == kFailed || (e.state == kNotRun && !e.result.summary.empty())) {
-                std::wstring why = fit(ui, e.result.summary, Ui::kCaption, right - tw - x - 56);
-                ui.selectable(kResultText + g * 100 + int(t), why, Ui::kCaption, {x + 56, cy + 1, right - tw, cy + 19},
-                              e.state == kFailed ? kCritical : kWhite, e.state == kFailed ? 1 : kTextSecondary);
-            } else {
-                ui.text(test.desc, Ui::kCaption, {x + 56, cy + 1, right - tw, cy + 19}, kWhite, kTextSecondary);
-            }
+            if (e.state == kFailed || (e.state == kNotRun && !e.result.summary.empty()))
+                ui.titleDesc(x + 56, right - tw, cy, test.name,
+                             fit(ui, e.result.summary, Ui::kCaption, right - tw - x - 56),
+                             e.state == kFailed ? kCritical : kWhite, e.state == kFailed ? 1 : kTextSecondary,
+                             kResultText + g * 100 + int(t));
+            else
+                ui.titleDesc(x + 56, right - tw, cy, test.name, test.desc);
             if (!time.empty())
                 ui.text(time, Ui::kCaption, {right - tw, cy - 10, right, cy + 10}, kWhite, kTextSecondary,
                         DWRITE_TEXT_ALIGNMENT_TRAILING);

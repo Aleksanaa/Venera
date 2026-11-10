@@ -158,7 +158,7 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
     float bw = ui.buttonWidth(label);
     ui.selectable(kNameText, name, Ui::kSubtitle, {x + 96, y + 24, x + w - bw - 40, y + 54});
     ui.text(sub, Ui::kBody, {x + 96, y + 56, x + w - bw - 40, y + 78}, kWhite, kTextSecondary);
-    ui.button(label, x + w - 24 - bw, y + 36, kCopyId, false);
+    ui.buttonRight(label, x + w - 24, y + 52, kCopyId, false);
     y += 104 + 24;
 
     // expanders: header row, then (unless collapsed) a divider and the rows
@@ -178,17 +178,17 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
             }
         }
         ui.card({x, y, x + w, y + h});
-        if (ui.hover == headerId)
-            ui.fill({x + 1, y + 1, x + w - 1, y + 64}, 4, kWhite, kCardHover - kCardFill);
+        if (ui.pointer(headerId).over)
+            ui.cardHover({x + 1, y + 1, x + w - 1, y + 64});
         ui.hot({x, y, x + w, y + 64}, headerId);
         ui.text(s.icon, Ui::kIconLarge, {x + 16, y, x + 36, y + 64}, kWhite, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
         ui.text(s.title, Ui::kBody, {x + 56, y, x + w - 260, y + 64});
         if (s.title == L"Graphics APIs" && !probing_)
-            ui.button(L"Check again", x + w - 52 - ui.buttonWidth(L"Check again"), y + 16, kCheckId, false);
+            ui.buttonRight(L"Check again", x + w - 52, y + 32, kCheckId, false);
         ui.text(open ? L"" : L"", Ui::kIconSmall, {x + w - 44, y, x + w - 16, y + 64}, kWhite,
                 kTextPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
         if (open) {
-            ui.fill({x + 1, y + 64, x + w - 1, y + 65}, 0, kBlack, 0.25f);
+            ui.divider(x, w, y + 64);
             float ry = y + 65 + 12;
             for (const Row& r : rows) {
                 ui.text(r.info->key, Ui::kBody, {x + 56, ry, x + kValueX, ry + 32}, kWhite, kTextSecondary);

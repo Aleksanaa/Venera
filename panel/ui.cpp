@@ -366,11 +366,18 @@ int Ui::hit(float x, float y) const
 
 float Ui::buttonWidth(const std::wstring& s) { return std::max(measure(s, kBody) + 24, 96.f); }
 
+float Ui::buttonRight(const std::wstring& s, float right, float cy, int id, bool isAccent)
+{
+    float x = right - buttonWidth(s);
+    button(s, x, cy - 16, id, isAccent);
+    return x;
+}
+
 float Ui::button(const std::wstring& s, float x, float y, int id, bool isAccent)
 {
     float w = buttonWidth(s);
     D2D1_RECT_F r = {x, y, x + w, y + 32};
-    bool h = hover == id, p = h && pressed == id;
+    auto [h, p] = pointer(id);
     if (isAccent) {
         fill(r, 4, accent, p ? 0.8f : h ? 0.9f : 1);
         text(s, kBody, r, kBlack, p ? 0.5f : 1, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -386,7 +393,7 @@ float Ui::button(const std::wstring& s, float x, float y, int id, bool isAccent)
 // With its On/Off label on the left, as Settings shows it.
 void Ui::toggle(float right, float cy, int id, bool on, bool enabled)
 {
-    bool h = enabled && hover == id, p = h && pressed == id;
+    auto [h, p] = enabled ? pointer(id) : Pointer{};
     float x = right - 40, knob = p || h ? 7 : 6;
     D2D1_RECT_F r = {x, cy - 10, x + 40, cy + 10};
     if (!enabled) {
@@ -419,7 +426,7 @@ void Ui::comboBox(float right, float cy, int id, const std::vector<std::wstring>
         w = std::max(w, measure(o, kBody));
     w = std::max(160.f, w + 12 + 40);
     D2D1_RECT_F r = {right - w, cy - 16, right, cy + 16};
-    bool h = enabled && hover == id, p = h && pressed == id;
+    auto [h, p] = enabled ? pointer(id) : Pointer{};
     fill(r, 4, kWhite, !enabled ? kControlDisabled : p ? kControlPressed : h ? kControlHover : kControl);
     stroke(r, 4, kWhite, kControlStroke);
     text(options[selected], kBody, {r.left + 12, r.top, r.right - 36, r.bottom}, kWhite,
@@ -439,7 +446,7 @@ void Ui::card(D2D1_RECT_F r, bool h)
 void Ui::iconButton(const wchar_t* glyph, float x, float y, int id)
 {
     D2D1_RECT_F r = {x, y, x + 32, y + 32};
-    bool h = hover == id, p = h && pressed == id;
+    auto [h, p] = pointer(id);
     if (h)
         fill(r, 4, kWhite, p ? kControlPressed : kControlHover);
     text(glyph, kIcon, r, kWhite, p ? kTextSecondary : kTextPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -507,24 +514,57 @@ void Ui::progressRing(float cx, float cy, float size, float value)
     arc(cx, cy, r, float(tail), float(head + 12), thickness);
 }
 
-float Ui::settingsCard(float x, float y, float w, float h, const wchar_t* icon, const std::wstring& title,
-                       const std::wstring& desc, int clickId, UINT32 iconColor, float iconAlpha)
+float Ui::settingsCard(float x, float& y, float w, const wchar_t* icon, const std::wstring& title,
+                       const std::wstring& desc, UINT32 iconColor)
 {
-    card({x, y, x + w, y + h}, clickId && hover == clickId);
-    float tx = x + 16;
-    if (icon) {
-        text(icon, kIconLarge, {x + 16, y, x + 36, y + h}, iconColor, iconAlpha, DWRITE_TEXT_ALIGNMENT_CENTER);
-        tx = x + 56;
-    }
-    if (!desc.empty()) {
-        text(title, kBody, {tx, y + h / 2 - 19, x + w - 300, y + h / 2 + 1});
-        text(desc, kCaption, {tx, y + h / 2 + 1, x + w - 300, y + h / 2 + 19}, kWhite, kTextSecondary);
-    } else {
-        text(title, kBody, {tx, y, x + w - 300, y + h});
-    }
-    if (clickId)
-        hot({x, y, x + w, y + h}, clickId);
-    return y + h / 2;
+    constexpr float kH = 68;
+    card({x, y, x + w, y + kH});
+    text(icon, kIconLarge, {x + 16, y, x + 36, y + kH}, iconColor, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
+    float cy = y + kH / 2;
+    titleDesc(x + 56, x + w - 300, cy, title, desc);
+    y += kH + 4;
+    return cy;
+}
+
+void Ui::cardHover(D2D1_RECT_F r, float radius) { fill(r, radius, kWhite, kCardHover - kCardFill); }
+
+void Ui::divider(float x, float w, float y) { fill({x + 1, y, x + w - 1, y + 1}, 0, kBlack, 0.25f); }
+
+void Ui::titleDesc(float x, float right, float cy, const std::wstring& title, const std::wstring& desc,
+                   UINT32 descColor, float descAlpha, int descId)
+{
+    text(title, kBody, {x, cy - 19, right, cy + 1});
+    if (descId)
+        selectable(descId, desc, kCaption, {x, cy + 1, right, cy + 19}, descColor, descAlpha);
+    else
+        text(desc, kCaption, {x, cy + 1, right, cy + 19}, descColor, descAlpha);
+}
+
+// Informational: the attention fill and InfoSolid in the accent; error: the critical fill and StatusErrorFull.
+void Ui::infoBar(float x, float w, float& y, Severity severity, const std::wstring& title, const std::wstring& message,
+                 const wchar_t* action, int actionId)
+{
+    bool error = severity == Severity::kError;
+    float right = x + w - 16 - (action ? buttonWidth(action) + 12 : 0);
+    Paragraph t, m = wrap(message, kBody, right - (x + 48));
+    if (!title.empty())
+        t = wrap(title, kBodyStrong, right - (x + 48));
+    float content = t.height + m.height, h = std::max(48.f, content + 28);
+    D2D1_RECT_F r = {x, y, x + w, y + h};
+    fill(r, 4, error ? kCriticalBg : kWhite, error ? 1 : kAttentionFill);
+    stroke(r, 4, kBlack, 0.1f);
+    text(error ? L"" : L"", kIcon, {x + 16, y, x + 36, y + 48}, error ? kCritical : accent, 1,
+         DWRITE_TEXT_ALIGNMENT_CENTER);
+    float ty = y + (h - content) / 2;
+    color(kWhite);
+    if (t.layout)
+        rt_->DrawTextLayout({x + 48, ty}, t.layout.get(), brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    color(kWhite, t.layout ? kTextSecondary : kTextPrimary);
+    if (m.layout)
+        rt_->DrawTextLayout({x + 48, ty + t.height}, m.layout.get(), brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    if (action)
+        buttonRight(action, x + w - 16, y + h / 2, actionId, false);
+    y += h + 4;
 }
 
 void Ui::sectionHeader(const std::wstring& s, float x, float& y)

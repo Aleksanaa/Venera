@@ -17,7 +17,6 @@ using namespace theme;
 
 namespace {
 
-constexpr float kCardH = 68, kGap = 4;
 constexpr wchar_t kKey[] = L"SOFTWARE\\Venera";
 constexpr wchar_t kLogFile[] = L"C:\\venera\\venera.log";
 
@@ -134,7 +133,6 @@ private:
                  kLevelId = kPageId + 50 };
 
     void load();
-    void infoBar(Ui& ui, float x, float w, float& y, const std::wstring& text, const wchar_t* action, int id);
 
     HWND window_;
     bool admin_ = elevated();
@@ -155,49 +153,34 @@ void Settings::load()
         levels_[i] = readLevel(i);
 }
 
-// An InfoBar of informational severity: a sentence, and a button.
-void Settings::infoBar(Ui& ui, float x, float w, float& y, const std::wstring& text, const wchar_t* action, int id)
-{
-    D2D1_RECT_F r = {x, y, x + w, y + 48};
-    ui.fill(r, 4, kWhite, 0.0326f);
-    ui.stroke(r, 4, kBlack, 0.1f);
-    ui.text(L"\uE946", Ui::kIcon, {x + 16, y, x + 36, y + 48}, accent, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
-    float right = x + w - 16 - ui.buttonWidth(action) - 12;
-    ui.button(action, right + 12, y + 8, id, false);
-    ui.text(text, Ui::kBody, {x + 48, y, right, y + 48});
-    y += 48 + 4;
-}
-
 void Settings::draw(Ui& ui, float x, float w, float& y)
 {
     if (!admin_)
-        infoBar(ui, x, w, y, L"Restart as administrator to change these.", L"Restart as administrator", kElevateId);
+        ui.infoBar(x, w, y, Ui::Severity::kInformational, L"", L"Restart as administrator to change these.",
+                   L"Restart as administrator", kElevateId);
 
     float cy;
     if (driver_) {
         ui.sectionHeader(L"Pointer", x, y);
         for (int i = 0; i < kPointerCount; i++) {
             const PointerSetting& p = kPointer[i];
-            cy = ui.settingsCard(x, y, w, kCardH, p.icon, p.title, p.desc);
+            cy = ui.settingsCard(x, y, w, p.icon, p.title, p.desc);
             ui.toggle(x + w - 16, cy, kPointerId + i, pointer_[i] != 0, admin_ && (i == 0 || pointer_[0]));
-            y += kCardH + kGap;
         }
     }
 
     ui.sectionHeader(L"Logging", x, y);
     if (admin_ && changed_)
-        infoBar(ui, x, w, y,
-                L"Programs started from now on use these. Restart the Desktop Window Manager for the desktop's own.",
-                L"Restart it", kDwmId);
-    cy = ui.settingsCard(x, y, w, kCardH, L"\uE8A5", L"Log file",
+        ui.infoBar(x, w, y, Ui::Severity::kInformational, L"",
+                   L"Programs started from now on use these. Restart the Desktop Window Manager for the desktop's own.",
+                   L"Restart it", kDwmId);
+    cy = ui.settingsCard(x, y, w, L"\uE8A5", L"Log file",
                          logFile_.empty() ? L"The drivers also write what they print to a file"
                                           : L"The drivers also write what they print to " + logFile_);
     ui.toggle(x + w - 16, cy, kLogFileId, !logFile_.empty(), admin_);
-    y += kCardH + kGap;
-    cy = ui.settingsCard(x, y, w, kCardH, L"\uE9D9", L"Verbose",
+    cy = ui.settingsCard(x, y, w, L"\uE9D9", L"Verbose",
                          L"Also every format and multisampling query. Slows programs down.");
     ui.toggle(x + w - 16, cy, kVerboseId, verbose_, admin_);
-    y += kCardH + kGap;
     for (int i = 0; i < kLevelCount; i++) {
         const Level& l = kLevels[i];
         std::wstring desc = l.desc;
@@ -212,9 +195,8 @@ void Settings::draw(Ui& ui, float x, float w, float& y)
         std::vector<std::wstring> labels;
         for (const auto& c : l.choices)
             labels.push_back(c.first);
-        cy = ui.settingsCard(x, y, w, kCardH, l.icon, l.title, desc);
+        cy = ui.settingsCard(x, y, w, l.icon, l.title, desc);
         ui.comboBox(x + w - 16, cy, kLevelId + i, labels, levels_[i], admin_);
-        y += kCardH + kGap;
     }
 }
 

@@ -13,7 +13,6 @@ using namespace theme;
 
 namespace {
 
-constexpr float kCardH = 68, kGap = 4;
 constexpr UINT_PTR kWatchTimer = kPageTimer + 1;
 
 constexpr wchar_t kNewIssue[] = L"https://github.com/Aleksanaa/venera/issues/new";
@@ -47,19 +46,16 @@ private:
 void Tools::draw(Ui& ui, float x, float w, float& y)
 {
     shown_ = overlayOn();
-    float cy = ui.settingsCard(x, y, w, kCardH, L"", L"Frame rate overlay",
+    float cy = ui.settingsCard(x, y, w, L"", L"Frame rate overlay",
                                L"Frame rate, hitches, and each program's FPS and GPU memory");
     ui.toggle(x + w - 16, cy, kFpsId, shown_);
-    y += kCardH + kGap;
     ui.sectionHeader(L"Troubleshooting", x, y);
-    cy = ui.settingsCard(x, y, w, kCardH, L"", L"Report an issue",
+    cy = ui.settingsCard(x, y, w, L"", L"Report an issue",
                          L"On GitHub. Paste the Overview's report into it.");
-    ui.button(L"Open", x + w - 16 - ui.buttonWidth(L"Open"), cy - 16, kIssueId, false);
-    y += kCardH + kGap;
-    cy = ui.settingsCard(x, y, w, kCardH, L"", L"Restart the Desktop Window Manager",
+    ui.buttonRight(L"Open", x + w - 16, cy, kIssueId, false);
+    cy = ui.settingsCard(x, y, w, L"", L"Restart the Desktop Window Manager",
                          L"Reloads the drivers and their settings. The screen flickers.");
-    ui.button(L"Restart", x + w - 16 - ui.buttonWidth(L"Restart"), cy - 16, kDwmId, false);
-    y += kCardH + kGap;
+    ui.buttonRight(L"Restart", x + w - 16, cy, kDwmId, false);
 }
 
 void Tools::click(int id)
