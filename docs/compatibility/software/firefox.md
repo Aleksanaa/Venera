@@ -60,6 +60,7 @@ The OpenGL path above needs none of this.
 
 - `DoesRecreatingCreateTexture2DFail` in about:support's failure log: one of Firefox's startup checks creates a shared
   texture with a full mip chain, and our driver only shares single-level textures. Firefox notes it and carries on.
-- `Failed to create a D3D11 content device: 0x887a0004` from the RDD process, and `Failed to get D3D11VideoDevice`:
-  our driver has no video decode (the content device most likely asks for video support), so Firefox decodes video
-  in software.
+- `Failed to create a D3D11 content device: 0x887a0004` from the RDD process: Firefox's media process loads only
+  DLLs signed by Microsoft, and ours are test-signed. Windows refuses `venera_d3d11.dll` there (CodeIntegrity event
+  3033 in Event Viewer, naming firefox.exe), so Firefox decodes video in software.
+- `Failed to get D3D11VideoDevice`: our driver has no video decode, so Firefox doesn't use video overlays.
