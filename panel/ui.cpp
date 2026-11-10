@@ -526,7 +526,20 @@ float Ui::settingsCard(float x, float& y, float w, const wchar_t* icon, const st
     return cy;
 }
 
-void Ui::cardHover(D2D1_RECT_F r, float radius) { fill(r, radius, kWhite, kCardHover - kCardFill); }
+float Ui::expander(float x, float y, float w, int id, bool open, float bodyH)
+{
+    constexpr float kHeaderH = 64;
+    float h = kHeaderH + (open ? 1 + bodyH : 0);
+    card({x, y, x + w, y + h});
+    if (pointer(id).over)
+        fill({x + 1, y + 1, x + w - 1, y + kHeaderH}, 4, kWhite, kCardHover - kCardFill);
+    hot({x, y, x + w, y + kHeaderH}, id);
+    text(open ? L"" : L"", kIconSmall, {x + w - 44, y, x + w - 16, y + kHeaderH}, kWhite, kTextPrimary,
+         DWRITE_TEXT_ALIGNMENT_CENTER);  // ChevronUp, ChevronDown
+    if (open)
+        divider(x, w, y + kHeaderH);
+    return h;
+}
 
 void Ui::divider(float x, float w, float y) { fill({x + 1, y, x + w - 1, y + 1}, 0, kBlack, 0.25f); }
 

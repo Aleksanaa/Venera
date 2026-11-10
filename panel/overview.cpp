@@ -142,7 +142,7 @@ private:
     SystemInfo info_;
     ProbeResult probe_;
     bool probing_ = false, copied_ = false;
-    bool collapsed_[8] = {};
+    std::vector<bool> collapsed_;  // by section
 };
 
 void Overview::draw(Ui& ui, float x, float w, float& y)
@@ -163,32 +163,24 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
 
     // expanders: header row, then (unless collapsed) a divider and the rows
     std::vector<InfoSection> all = describe(info_, probe());
+    collapsed_.resize(all.size());
     int text = kValueText;  // the values are selectable, numbered in order
     for (size_t i = 0; i < all.size(); i++) {
         const InfoSection& s = all[i];
         bool open = !collapsed_[i];
-        int headerId = kExpanderId + int(i);
-        float h = 64;
         std::vector<Row> rows;
-        if (open) {
-            h += 1 + 12 + 12;
+        float bodyH = 12 + 12;
+        if (open)
             for (const InfoRow& r : s.rows) {
                 rows.push_back(layoutRow(ui, r, w));
-                h += rows.back().valueH + rows.back().warningH;
+                bodyH += rows.back().valueH + rows.back().warningH;
             }
-        }
-        ui.card({x, y, x + w, y + h});
-        if (ui.pointer(headerId).over)
-            ui.cardHover({x + 1, y + 1, x + w - 1, y + 64});
-        ui.hot({x, y, x + w, y + 64}, headerId);
+        float h = ui.expander(x, y, w, kExpanderId + int(i), open, bodyH);
         ui.text(s.icon, Ui::kIconLarge, {x + 16, y, x + 36, y + 64}, kWhite, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
         ui.text(s.title, Ui::kBody, {x + 56, y, x + w - 260, y + 64});
         if (s.title == L"Graphics APIs" && !probing_)
             ui.buttonRight(L"Check again", x + w - 52, y + 32, kCheckId, false);
-        ui.text(open ? L"" : L"", Ui::kIconSmall, {x + w - 44, y, x + w - 16, y + 64}, kWhite,
-                kTextPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
         if (open) {
-            ui.divider(x, w, y + 64);
             float ry = y + 65 + 12;
             for (const Row& r : rows) {
                 ui.text(r.info->key, Ui::kBody, {x + 56, ry, x + kValueX, ry + 32}, kWhite, kTextSecondary);
@@ -222,7 +214,7 @@ void Overview::click(int id)
     } else if (id == kCheckId && !g_mockOverview) {
         info_ = readSystemInfo();
         check();
-    } else if (id >= kExpanderId && id < kExpanderId + 8) {
+    } else if (id >= kExpanderId && id - kExpanderId < int(collapsed_.size())) {
         collapsed_[id - kExpanderId] = !collapsed_[id - kExpanderId];
     }
 }

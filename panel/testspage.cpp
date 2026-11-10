@@ -352,14 +352,10 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
     const TestGroup& tg = testGroups()[g];
     const Group& group = groups_[g];
     bool running = active(group);
-    float h = kHeaderH + (group.open ? 1 + 8 + group.tests.size() * kRowH + 8 : 0);
-    ui.card({x, y, x + w, y + h});
+    float h = ui.expander(x, y, w, kHeaderId + g, group.open, 8 + group.tests.size() * kRowH + 8);
 
-    // the header: state, name and how it went, the run button (a ProgressRing while it runs) and the chevron
-    int headerId = kHeaderId + g, runId = kGroupRunId + g;
-    if (ui.pointer(headerId).over)
-        ui.cardHover({x + 1, y + 1, x + w - 1, y + kHeaderH});
-    ui.hot({x, y, x + w, y + kHeaderH}, headerId);
+    // the header: state, name and how it went, the run button (a ProgressRing while it runs)
+    int runId = kGroupRunId + g;
     int passed = 0, failed = 0, done = 0;
     for (const Entry& e : group.tests) {
         passed += e.state == kPassed;
@@ -390,12 +386,9 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
     } else {
         ui.iconButton(kPlay, bx, by, runId);
     }
-    ui.text(group.open ? L"" : L"", Ui::kIconSmall, {x + w - 44, y, x + w - 16, y + kHeaderH}, kWhite,
-            kTextPrimary, DWRITE_TEXT_ALIGNMENT_CENTER);
 
     // the tests
     if (group.open) {
-        ui.divider(x, w, y + kHeaderH);
         float ry = y + kHeaderH + 1 + 8;
         for (size_t t = 0; t < group.tests.size(); t++) {
             const Test& test = tg.tests[t];

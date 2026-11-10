@@ -109,8 +109,10 @@ public:
     float settingsCard(float x, float& y, float w, const wchar_t* icon, const std::wstring& title,
                        const std::wstring& desc, UINT32 iconColor = theme::kWhite);
     void card(D2D1_RECT_F r, bool hover = false);
-    // The pointer over a clickable part of a card: the card's hover fill there.
-    void cardHover(D2D1_RECT_F r, float radius = 4);
+    // An Expander's frame: a card with a 64-high header, which `id` makes clickable, with a hover fill and the chevron
+    // on the right, and when `open` a divider and `bodyH` more below it. The caller draws the header's content (left of
+    // x + w - 52) and the body (from y + 65). Returns its height.
+    float expander(float x, float y, float w, int id, bool open, float bodyH);
     // A line across a card w wide, at y.
     void divider(float x, float w, float y);
     // A title on a line and a description in Caption below it, between x and right, around cy; the description is
