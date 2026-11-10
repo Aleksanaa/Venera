@@ -79,6 +79,11 @@ private:
 
 Window* g_window;
 
+// One window per session: a second start brings the first one up instead (firstInstance), by this message, which the
+// first lets through UIPI should it run elevated. The mutex is given up when restarting elevated, for the new process.
+const UINT kActivateMessage = RegisterWindowMessageW(L"venera-panel-activate");
+HANDLE g_instance;
+
 void Window::makeTarget()
 {
     if (rt_)
@@ -552,6 +557,12 @@ LRESULT Window::proc(UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     }
+    if (msg == kActivateMessage) {
+        if (IsIconic(hwnd_))
+            ShowWindow(hwnd_, SW_RESTORE);
+        SetForegroundWindow(hwnd_);
+        return 0;
+    }
     if ((msg >= kPageMessage && msg < 0xC000) || (msg == WM_TIMER && wp >= kPageTimer)) {
         for (auto& p : pages_)
             if (p->message(msg, wp, lp)) {
@@ -618,6 +629,7 @@ int Window::run(HINSTANCE inst, int show, int page)
     DwmSetWindowAttribute(hwnd_, 36 /* DWMWA_TEXT_COLOR */, &captionText, sizeof(captionText));
     int corners = 2;  // DWMWCP_ROUND
     DwmSetWindowAttribute(hwnd_, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corners, sizeof(corners));
+    ChangeWindowMessageFilterEx(hwnd_, kActivateMessage, MSGFLT_ALLOW, nullptr);
     ShowWindow(hwnd_, show);
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -641,10 +653,31 @@ bool restartElevated(HWND window, int page)
     sei.lpParameters = args.c_str();
     sei.hwnd = window;
     sei.nShow = SW_SHOWNORMAL;
-    if (!ShellExecuteExW(&sei))
+    ReleaseMutex(g_instance);
+    if (!ShellExecuteExW(&sei)) {
+        WaitForSingleObject(g_instance, 0);
         return false;
+    }
     PostMessageW(window, WM_CLOSE, 0, 0);
     return true;
+}
+
+// Whether this is the session's only window; if not, the other one is brought up.
+bool firstInstance()
+{
+    g_instance = CreateMutexW(nullptr, TRUE, L"Local\\venera-panel");
+    if (g_instance && GetLastError() != ERROR_ALREADY_EXISTS)
+        return true;
+    // Free: left by a panel restarting elevated. No handle at all: an elevated panel holds it.
+    if (g_instance && WaitForSingleObject(g_instance, 0) != WAIT_TIMEOUT)
+        return true;
+    if (HWND other = FindWindowW(L"venera-panel", nullptr)) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(other, &pid);
+        AllowSetForegroundWindow(pid);
+        PostMessageW(other, kActivateMessage, 0, 0);
+    }
+    return false;
 }
 
 }  // namespace panel
@@ -661,6 +694,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     int code = panel::runCommandLine(argc, argv, &page);
     if (code >= 0)
         return code;
+    if (!panel::firstInstance())
+        return 0;
     panel::Window window;
     return window.run(inst, show, page);
 }
