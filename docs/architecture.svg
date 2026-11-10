@@ -1,75 +1,112 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 480" width="720" height="480" font-family="Helvetica, Arial, sans-serif" font-size="12">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 566" width="960" height="566" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12">
   <defs>
     <style>
-      rect { fill: #fff; stroke: #000; stroke-width: 1; }
-      rect.ours { fill: #d9d9d9; }
-      rect.frame { fill: none; }
-      text { fill: #000; }
-      line { stroke: #000; stroke-width: 1; stroke-dasharray: 6 4; }
-      .side { font-size: 11px; }
+      .bg { fill: #fff; }
+      .frame { fill: #f5f6f8; stroke: #c9ced6; stroke-width: 1; }
+      .box { fill: #fff; stroke: #8b94a3; stroke-width: 1; }
+      .ours { fill: #dce6f4; stroke: #5a78a8; stroke-width: 1; }
+      .title { font-size: 13px; font-weight: 600; fill: #222; }
+      .label { fill: #222; }
+      .small { font-size: 11px; fill: #333; }
+      .mode { font-size: 11px; font-style: italic; fill: #7a8291; }
+      .divider { stroke: #a3abb8; stroke-width: 1; stroke-dasharray: 5 4; }
+      .flow { stroke: #3d4b63; stroke-width: 1.5; marker-end: url(#head); }
+      .dot { fill: #3d4b63; }
+      .api { font-family: Menlo, Consolas, 'DejaVu Sans Mono', monospace; font-size: 11px; font-weight: 600; fill: #2c4a7a; }
     </style>
+    <marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#3d4b63"/>
+    </marker>
   </defs>
-  <rect x="0" y="0" width="720" height="480" style="stroke:none"/>
+  <rect class="bg" x="0" y="0" width="960" height="566"/>
+
+  <!-- How each layer talks to the one below: one name per gap -->
+  <line class="flow" x1="140" y1="40" x2="140" y2="520"/>
+  <circle class="dot" cx="140" cy="74" r="2.5"/>
+  <text class="api" x="130" y="78" text-anchor="end">D3D API</text>
+  <circle class="dot" cx="140" cy="112" r="2.5"/>
+  <text class="api" x="130" y="116" text-anchor="end">D3D DDI</text>
+  <circle class="dot" cx="140" cy="140" r="2.5"/>
+  <text class="api" x="130" y="144" text-anchor="end">D3D API</text>
+  <circle class="dot" cx="140" cy="178" r="2.5"/>
+  <text class="api" x="130" y="182" text-anchor="end">Vulkan</text>
+  <circle class="dot" cx="140" cy="219" r="2.5"/>
+  <text class="api" x="130" y="223" text-anchor="end">D3DKMT</text>
+  <circle class="dot" cx="140" cy="260" r="2.5"/>
+  <text class="api" x="130" y="264" text-anchor="end">DXGK DDI</text>
+  <circle class="dot" cx="140" cy="320" r="2.5"/>
+  <text class="api" x="130" y="324" text-anchor="end">virtio-gpu</text>
+  <circle class="dot" cx="140" cy="400" r="2.5"/>
+  <text class="api" x="130" y="404" text-anchor="end">Venus stream</text>
+  <circle class="dot" cx="140" cy="438" r="2.5"/>
+  <text class="api" x="130" y="442" text-anchor="end">Vulkan</text>
+  <circle class="dot" cx="140" cy="479" r="2.5"/>
+  <text class="api" x="130" y="483" text-anchor="end">GPU commands</text>
 
   <!-- Windows guest -->
-  <rect class="frame" x="10" y="10" width="700" height="234"/>
-  <text x="20" y="28" font-weight="bold">Windows guest</text>
+  <rect class="frame" x="156" y="10" width="714" height="294"/>
+  <text class="title" x="170" y="30">Windows guest</text>
 
-  <rect x="20" y="38" width="580" height="28"/>
-  <text x="310" y="56" text-anchor="middle">Applications, DWM</text>
+  <rect class="box" x="170" y="40" width="686" height="30"/>
+  <text class="label" x="513" y="59" text-anchor="middle">Applications, DWM</text>
 
-  <rect x="20" y="70" width="142" height="28"/>
-  <text x="91" y="88" text-anchor="middle">D3D10/11 runtime</text>
-  <rect x="166" y="70" width="142" height="28"/>
-  <text x="237" y="88" text-anchor="middle">D3D9 + D3D9On12</text>
-  <rect x="312" y="70" width="142" height="28"/>
-  <text x="383" y="88" text-anchor="middle">D3D12 runtime</text>
-  <rect x="458" y="70" width="142" height="28"/>
-  <text x="529" y="88" text-anchor="middle">opengl32.dll</text>
+  <rect class="box" x="170" y="78" width="166" height="30"/>
+  <text class="label" x="253" y="97" text-anchor="middle">D3D10/11 runtime</text>
+  <rect class="box" x="343" y="78" width="166" height="30"/>
+  <text class="label" x="426" y="97" text-anchor="middle">D3D9 + D3D9On12</text>
+  <rect class="box" x="516" y="78" width="166" height="30"/>
+  <text class="label" x="599" y="97" text-anchor="middle">D3D12 runtime</text>
+  <rect class="box" x="690" y="78" width="166" height="30"/>
+  <text class="label" x="773" y="97" text-anchor="middle">opengl32.dll</text>
 
-  <rect class="ours" x="20" y="102" width="142" height="28"/>
-  <text x="91" y="120" text-anchor="middle">venera_d3d11.dll (DXVK)</text>
-  <rect class="ours" x="166" y="102" width="288" height="28"/>
-  <text x="310" y="120" text-anchor="middle">venera_d3d12.dll (vkd3d-proton)</text>
-  <rect x="458" y="102" width="142" height="28"/>
-  <text x="529" y="120" text-anchor="middle">viogpu_wgl.dll (zink)</text>
+  <rect class="ours" x="170" y="116" width="166" height="58"/>
+  <text class="small" x="253" y="132" text-anchor="middle">venera_d3d11.dll</text>
+  <rect class="box" x="178" y="142" width="150" height="24"/>
+  <text class="label" x="253" y="158" text-anchor="middle">DXVK</text>
 
-  <rect class="ours" x="20" y="134" width="580" height="28"/>
-  <text x="310" y="152" text-anchor="middle">venera_vulkan_virtio.dll (Mesa Venus driver)</text>
+  <rect class="ours" x="343" y="116" width="339" height="58"/>
+  <text class="small" x="512" y="132" text-anchor="middle">venera_d3d12.dll</text>
+  <rect class="box" x="351" y="142" width="323" height="24"/>
+  <text class="label" x="512" y="158" text-anchor="middle">vkd3d-proton</text>
 
-  <line x1="10" y1="168" x2="710" y2="168"/>
-  <text class="side" x="612" y="163">user mode</text>
-  <text class="side" x="612" y="181">kernel mode</text>
+  <rect class="box" x="690" y="116" width="166" height="58"/>
+  <text class="label" x="773" y="149" text-anchor="middle">viogpu_wgl.dll (zink)</text>
 
-  <rect x="20" y="174" width="580" height="28"/>
-  <text x="310" y="192" text-anchor="middle">dxgkrnl</text>
-  <rect class="ours" x="20" y="206" width="580" height="28"/>
-  <text x="310" y="224" text-anchor="middle">viogpu3d.sys (yttrium WDDM driver)</text>
+  <rect class="ours" x="170" y="182" width="686" height="30"/>
+  <text class="label" x="513" y="201" text-anchor="middle">venera_vulkan_virtio.dll (Mesa Venus driver)</text>
 
-  <text x="310" y="262" text-anchor="middle" class="side">virtio-gpu (Venus command stream)</text>
+  <line class="divider" x1="156" y1="219" x2="876" y2="219"/>
+  <text class="mode" x="882" y="215">user mode</text>
+  <text class="mode" x="882" y="231">kernel mode</text>
+
+  <rect class="box" x="170" y="226" width="686" height="30"/>
+  <text class="label" x="513" y="245" text-anchor="middle">dxgkrnl</text>
+  <rect class="ours" x="170" y="264" width="686" height="30"/>
+  <text class="label" x="513" y="283" text-anchor="middle">viogpu3d.sys (yttrium WDDM driver)</text>
 
   <!-- Linux host -->
-  <rect class="frame" x="10" y="272" width="700" height="170"/>
-  <text x="20" y="290" font-weight="bold">Linux host</text>
+  <rect class="frame" x="156" y="336" width="714" height="190"/>
+  <text class="title" x="170" y="356">Linux host</text>
 
-  <rect x="20" y="300" width="400" height="28"/>
-  <text x="220" y="318" text-anchor="middle">QEMU virtio-gpu (venus=on)</text>
-  <rect x="424" y="300" width="176" height="28"/>
-  <text x="512" y="318" text-anchor="middle">SPICE / GTK display</text>
+  <rect class="box" x="170" y="366" width="512" height="30"/>
+  <text class="label" x="426" y="385" text-anchor="middle">QEMU virtio-gpu (venus=on)</text>
+  <rect class="box" x="690" y="366" width="166" height="30"/>
+  <text class="label" x="773" y="385" text-anchor="middle">SPICE / GTK display</text>
 
-  <rect x="20" y="332" width="580" height="28"/>
-  <text x="310" y="350" text-anchor="middle">virglrenderer (Venus)</text>
+  <rect class="box" x="170" y="404" width="686" height="30"/>
+  <text class="label" x="513" y="423" text-anchor="middle">virglrenderer (Venus)</text>
 
-  <rect x="20" y="364" width="580" height="28"/>
-  <text x="310" y="382" text-anchor="middle">Vulkan driver (RADV, ...)</text>
+  <rect class="box" x="170" y="442" width="686" height="30"/>
+  <text class="label" x="513" y="461" text-anchor="middle">Vulkan driver (RADV, ...)</text>
 
-  <line x1="10" y1="398" x2="710" y2="398"/>
-  <text class="side" x="612" y="411">hardware</text>
+  <line class="divider" x1="156" y1="479" x2="876" y2="479"/>
+  <text class="mode" x="882" y="475">software</text>
+  <text class="mode" x="882" y="491">hardware</text>
 
-  <rect x="20" y="404" width="580" height="28"/>
-  <text x="310" y="422" text-anchor="middle">GPU</text>
+  <rect class="box" x="170" y="486" width="686" height="30"/>
+  <text class="label" x="513" y="505" text-anchor="middle">GPU</text>
 
   <!-- Key -->
-  <rect class="ours" x="20" y="454" width="14" height="14"/>
-  <text x="42" y="465" class="side">written or patched here</text>
+  <rect class="ours" x="156" y="540" width="14" height="14"/>
+  <text class="small" x="178" y="551">written or patched here</text>
 </svg>

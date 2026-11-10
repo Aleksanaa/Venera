@@ -19,7 +19,10 @@ Discuss in: [![Telegram group](https://img.shields.io/badge/Telegram-group-26A5E
 
 - **DXVK and vkd3d-proton translate Direct3D to Vulkan.** `venera_d3d11.dll` implements the D3D10/11 user-mode driver
   interface (DDI) on top of DXVK. `venera_d3d12.dll` implements the D3D12 DDI on top of vkd3d-proton. D3D9 runs on Windows' own
-  D3D9On12 adapter over `venera_d3d12.dll`.
+  D3D9On12 adapter over `venera_d3d12.dll`. Windows' D3D runtime lowers the application's API calls to DDI calls, and our UMDs raise
+  them back to API calls for DXVK and vkd3d-proton. Looks a bit insane, but it lets us ship a regular driver
+  instead of replacing or injecting system DLLs, which breaks in various ways. The adapter is thin anyways, and it also
+  let us handle compatibility issues without touching DXVK or vkd3d-proton code.
 - **Venus takes the Vulkan calls to the host.** Mesa's Venus driver on guest's side encodes Vulkan calls into a command stream and submits to virtio-gpu. Vulkan applications reach it through the Vulkan loader, and OpenGL goes through Mesa's zink. virglrenderer on the host decodes the stream and replays it on the host's Vulkan driver.
 
 - **yttrium's kernel driver makes virtio-gpu a WDDM device.** `viogpu3d.sys` is the Windows display miniport for
