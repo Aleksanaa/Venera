@@ -191,7 +191,45 @@ void Ui::select(int id, UINT32 anchor, UINT32 caret)
     selCaret_ = caret;
 }
 
-void Ui::selectStart(int id, UINT32 pos) { select(id, pos, pos); }
+bool Ui::textDown(float x, float y, POINT px, bool doubleClick)
+{
+    int id;
+    UINT32 pos;
+    if (!textAt(x, y, &id, &pos))
+        return false;
+    if (doubleClick) {
+        selectAll(id);
+        doubleAt_ = GetMessageTime();
+        pressAt_ = px;
+    } else if (DWORD(GetMessageTime()) - doubleAt_ <= GetDoubleClickTime() &&
+               abs(px.x - pressAt_.x) <= GetSystemMetrics(SM_CXDOUBLECLK) / 2 &&
+               abs(px.y - pressAt_.y) <= GetSystemMetrics(SM_CYDOUBLECLK) / 2) {
+        clearSelection();  // the third click
+        doubleAt_ -= GetDoubleClickTime() + 1;
+    } else {
+        selectWord(id, pos);
+        selecting_ = true;
+        dragged_ = false;
+        pressText_ = id;
+        pressPos_ = pos;
+        pressAt_ = px;
+    }
+    return true;
+}
+
+bool Ui::textMove(float x, float y, POINT px)
+{
+    if (!selecting_)
+        return false;
+    if (!dragged_) {
+        if (abs(px.x - pressAt_.x) < GetSystemMetrics(SM_CXDRAG) && abs(px.y - pressAt_.y) < GetSystemMetrics(SM_CYDRAG))
+            return true;
+        dragged_ = true;
+        select(pressText_, pressPos_, pressPos_);
+    }
+    selectTo(x, y);
+    return true;
+}
 
 void Ui::selectTo(float x, float y)
 {

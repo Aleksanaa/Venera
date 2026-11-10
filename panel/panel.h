@@ -143,9 +143,14 @@ public:
     void runText(int run, std::function<bool(int id, std::wstring* s)> text) { runs_[run] = std::move(text); }
     // The selectable text under a point (window DIPs) and the character position there.
     bool textAt(float x, float y, int* id, UINT32* pos) const;
-    void selectStart(int id, UINT32 pos);
-    void selectTo(float x, float y);  // drag: moves the caret of the current selection towards the point
-    void selectWord(int id, UINT32 pos);
+    // The left button on selectable text, at (x, y) in window DIPs and `px` in pixels, as the system's drag and
+    // double-click distances are: a press selects the word, a double-click the whole text and a third click clears it;
+    // dragging past the drag threshold selects from where it was pressed instead. textDown is false when the press is
+    // not on text, textMove when no selection follows the pointer.
+    bool textDown(float x, float y, POINT px, bool doubleClick);
+    bool textMove(float x, float y, POINT px);
+    void textUp() { selecting_ = false; }
+    bool selecting() const { return selecting_; }
     void selectAll(int id);
     void clearSelection() { selId_ = caretId_ = kNoId; }
     // `id` is in the selection, which is not empty.
@@ -164,6 +169,8 @@ private:
     struct Selectable { D2D1_RECT_F r; int id; Paragraph p; int run; D2D1_RECT_F clip; };
     const Selectable* findSelectable(int id) const;
     void select(int id, UINT32 anchor, UINT32 caret);
+    void selectTo(float x, float y);  // moves the caret of the selection towards the point
+    void selectWord(int id, UINT32 pos);
     void ends(int* firstId, UINT32* firstPos, int* lastId, UINT32* lastPos) const;
     bool part(int id, int run, UINT32 length, UINT32* start, UINT32* end) const;
     void arc(float cx, float cy, float r, float from, float to, float thickness);
@@ -182,6 +189,12 @@ private:
     // The selection: from the anchor (where it started) to the caret, each a text and a position in it.
     int selId_ = kNoId, caretId_ = kNoId, selRun_ = 0;
     UINT32 selAnchor_ = 0, selCaret_ = 0;
+    // A press on text: where (its text, position and pixel), and whether it was dragged yet.
+    bool selecting_ = false, dragged_ = false;
+    int pressText_ = kNoId;
+    UINT32 pressPos_ = 0;
+    POINT pressAt_{};
+    DWORD doubleAt_ = 0;  // when the last double-click was
     std::map<int, std::function<bool(int, std::wstring*)>> runs_;
 };
 
