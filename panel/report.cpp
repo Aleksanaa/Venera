@@ -214,6 +214,12 @@ std::vector<InfoSection> describe(const SystemInfo& info, const ProbeResult* pro
     apis.rows.push_back(api(probe, L"Vulkan", "vk",
                             probed(probe, "vk.api") + L" (" + probed(probe, "vk.driver") + L", " +
                                 probed(probe, "vk.driver_info") + L")"));
+    // Another program's driver, which applications may pick over ours or which may break the loader.
+    for (const std::wstring& d : info.otherVulkanDrivers)
+        apis.rows.push_back({L"Other Vulkan driver", d});
+    if (!info.otherVulkanDrivers.empty())
+        apis.rows.back().warning = std::wstring(L"Applications may use ") +
+                                   (info.otherVulkanDrivers.size() > 1 ? L"these" : L"it") + L" instead of Venera's";
     // OpenGL: "4.6 (Compatibility Profile) Mesa 26.1.0" from zink; Windows' own renderer is "GDI Generic".
     std::wstring glVersion = probed(probe, "gl.version"), renderer = probed(probe, "gl.renderer");
     InfoRow gl = api(probe, L"OpenGL", "gl", L"");

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // What the panel reads in its own process: the VirtIO GPU and its driver (SetupAPI, the driver's registry key, the
 // device's problem code), what the KMD says the host offers, Venera as Apps & features lists it, test signing, the
-// displays on the adapter, and the guest: the virtual machine from the firmware's SMBIOS tables, Windows, the
-// processors, memory, page files, mice and keyboards.
+// displays on the adapter, other Vulkan drivers, and the guest: the virtual machine from the firmware's SMBIOS tables,
+// Windows, the processors, memory, page files, mice and keyboards.
 #include "panel.h"
 
 #include <initguid.h>  // defines the class GUIDs and property keys below
@@ -301,6 +301,29 @@ std::vector<std::wstring> devices(const GUID& cls)
     return out;
 }
 
+// The loader's registered drivers, 64- and 32-bit: a value per manifest, enabled when it is 0.
+std::vector<std::wstring> vulkanDrivers()
+{
+    std::vector<std::wstring> out;
+    for (REGSAM view : {KEY_WOW64_64KEY, KEY_WOW64_32KEY}) {
+        HKEY key;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Khronos\\Vulkan\\Drivers", 0, KEY_READ | view, &key) !=
+            ERROR_SUCCESS)
+            continue;
+        wchar_t name[MAX_PATH];
+        for (DWORD i = 0;; i++) {
+            DWORD nameLen = MAX_PATH, type, value = 1, size = sizeof(value);
+            LONG r = RegEnumValueW(key, i, name, &nameLen, nullptr, &type, reinterpret_cast<BYTE*>(&value), &size);
+            if (r == ERROR_NO_MORE_ITEMS)
+                break;
+            if (r == ERROR_SUCCESS && type == REG_DWORD && value == 0)
+                out.push_back(name);
+        }
+        RegCloseKey(key);
+    }
+    return out;
+}
+
 }  // namespace
 
 HKEY openDriverKey(REGSAM access)
@@ -376,6 +399,7 @@ SystemInfo readSystemInfo()
     s.mice = devices(GUID_DEVCLASS_MOUSE);
     s.keyboards = devices(GUID_DEVCLASS_KEYBOARD);
     s.displays = readDisplays(s.ours ? s.driverDesc : std::wstring());
+    s.otherVulkanDrivers = vulkanDrivers();
     return s;
 }
 

@@ -225,6 +225,8 @@ struct SystemInfo {
     ULONGLONG memory = 0, usableMemory = 0, swap = 0;  // bytes
     std::vector<std::wstring> mice, keyboards;
     std::vector<Display> displays;
+    // Vulkan drivers registered beside ours (whose manifest the loader finds through the adapter): their manifests.
+    std::vector<std::wstring> otherVulkanDrivers;
 };
 SystemInfo readSystemInfo();
 // Venera's version as Apps & features lists it ("0.1.0.121.9e11c1e"), empty when it is not installed.
