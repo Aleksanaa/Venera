@@ -400,6 +400,70 @@ bool compute_test(ID3D11Device* dev, ID3D11DeviceContext* ctx)
     return result(t, ok);
 }
 
+const char* kStreamOutputHlsl = R"(
+struct O { float4 pos : SV_Position; float4 skinned : TEXCOORD0; uint2 tags : TEXCOORD1; };
+O vs(uint id : SV_VertexID) {
+    O o;
+    o.pos = float4(0, 0, 0, 1);
+    o.skinned = float4(id * 2 + 1, id, -0.5, 1);
+    o.tags = uint2(id + 5, 0xfffffff0u + id);
+    return o;
+}
+)";
+
+// Stream output of a vertex shader with no geometry shader, as games skin meshes: 4 points written to a buffer with
+// rasterization off. The integers (small ones are float denormals) must arrive bit for bit.
+bool stream_output_test(ID3D11Device* dev, ID3D11DeviceContext* ctx)
+{
+    const char* t = "stream-output";
+    Ref<ID3DBlob> vsb;
+    if (!compile(kStreamOutputHlsl, "vs", "vs_5_0", &vsb))
+        return result(t, false);
+    constexpr UINT n = 4, stride = 24;
+    const D3D11_SO_DECLARATION_ENTRY decl[] = {{0, "TEXCOORD", 0, 0, 4, 0}, {0, "TEXCOORD", 1, 0, 2, 0}};
+    const UINT strides[] = {stride};
+    Ref<ID3D11VertexShader> vs;
+    Ref<ID3D11GeometryShader> gs;
+    Ref<ID3D11Buffer> buf, staging;
+    D3D11_BUFFER_DESC bd{n * stride, D3D11_USAGE_DEFAULT, D3D11_BIND_STREAM_OUTPUT, 0, 0, 0};
+    D3D11_BUFFER_DESC sd{n * stride, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ, 0, 0};
+    if (!check(t, "CreateVertexShader", dev->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, vs.put())) ||
+        !check(t, "CreateGeometryShaderWithStreamOutput",
+               dev->CreateGeometryShaderWithStreamOutput(vsb->GetBufferPointer(), vsb->GetBufferSize(), decl, 2, strides,
+                                                         1, D3D11_SO_NO_RASTERIZED_STREAM, nullptr, gs.put())) ||
+        !check(t, "CreateBuffer", dev->CreateBuffer(&bd, nullptr, buf.put())) ||
+        !check(t, "CreateBuffer(staging)", dev->CreateBuffer(&sd, nullptr, staging.put())))
+        return result(t, false);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_POINTLIST);
+    ctx->VSSetShader(vs, nullptr, 0);
+    ctx->GSSetShader(gs, nullptr, 0);
+    ID3D11Buffer* targets[] = {buf};
+    const UINT offsets[] = {0};
+    ctx->SOSetTargets(1, targets, offsets);
+    ctx->Draw(n, 0);
+    ctx->SOSetTargets(0, nullptr, nullptr);
+    ctx->CopyResource(staging, buf);
+    D3D11_MAPPED_SUBRESOURCE m;
+    bool ok = check(t, "Map", ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m));
+    if (ok) {
+        const auto* v = static_cast<const uint32_t*>(m.pData);
+        for (UINT i = 0; i < n && ok; i++) {
+            const float f[4] = {float(i * 2 + 1), float(i), -0.5f, 1.0f};
+            uint32_t want[6] = {0, 0, 0, 0, i + 5, 0xfffffff0u + i};
+            std::memcpy(want, f, sizeof(f));
+            for (UINT c = 0; c < 6 && ok; c++)
+                if (v[i * 6 + c] != want[c]) {
+                    std::printf("    %s: vertex %u word %u is 0x%08x, expected 0x%08x\n", t, i, c, v[i * 6 + c],
+                                want[c]);
+                    ok = false;
+                }
+        }
+        ctx->Unmap(staging, 0);
+    }
+    ctx->ClearState();
+    return result(t, ok);
+}
+
 // An event, an occlusion query around a full-screen draw of 64x64 pixels, and timestamps.
 bool queries_test(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 {
@@ -1241,6 +1305,8 @@ TestGroup d3d11Tests()
         {"textured", L"Textures", L"Sampling a texture through a shader resource view", run<textured_test>},
         {"depth", L"Depth and MSAA", L"Depth tests, MSAA and a resolve", run<depth_test>},
         {"compute", L"Compute", L"A dispatch writing a UAV", run<compute_test>},
+        {"stream-output", L"Stream output", L"A vertex shader's outputs streamed to a buffer, no geometry shader",
+         run<stream_output_test>},
         {"queries", L"Queries", L"An event, an occlusion query and timestamps", run<queries_test>},
         {"update", L"Updates", L"Dynamic buffers mapped with discard and no-overwrite, UpdateSubresource",
          run<update_test>},

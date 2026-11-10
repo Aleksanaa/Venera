@@ -136,6 +136,10 @@ void APIENTRY create_cs(D3D10DDI_HDEVICE h, const UINT* code, D3D10DDI_HSHADER h
     create_shader(h, Stage::compute, code, {}, hs);
 }
 
+// A vertex program that only returns (vs_5_0, 3 tokens, ret): given one in place of a geometry program, DXVK builds a
+// pass-through geometry program from its output signature alone.
+constexpr UINT kPassthroughSource[] = {0x00010050, 3, 0x0100003e};
+
 // The DDI names stream-output components by output register; the API by the semantics of the output signature,
 // which the container gives the same names (shader_container.h).
 void APIENTRY create_gs_with_so(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT* a,
@@ -143,13 +147,16 @@ void APIENTRY create_gs_with_so(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATEGEOM
 {
     Device* d = Device::from(h);
     auto* obj = new (hs.pDrvPrivate) ShaderObject;
-    if (!a->pShaderCode) {
-        // Stream output of the vertex or domain program, with no geometry program to compile.
-        VENERA_WARN("CreateGeometryShaderWithStreamOutput without a geometry program: not supported yet");
-        d->set_error(E_OUTOFMEMORY);
-        return;
+    ShaderSignatures sig = stage_signatures(s);
+    const UINT* code = a->pShaderCode;
+    if (!code) {
+        // Stream output of the vertex or domain program, with no geometry program (games skin meshes this way): the
+        // runtime describes that program's outputs as the input signature. They pass through unchanged, under the
+        // same names as the program's own outputs.
+        code = kPassthroughSource;
+        sig.output = sig.input.empty() ? sig.output : sig.input;
+        sig.input.clear();
     }
-    const ShaderSignatures sig = stage_signatures(s);
     std::vector<D3D11_SO_DECLARATION_ENTRY> decl;
     for (UINT i = 0; i < a->NumEntries; i++) {
         const auto& e = a->pOutputStreamDecl[i];
@@ -175,13 +182,14 @@ void APIENTRY create_gs_with_so(D3D10DDI_HDEVICE h, const D3D11DDIARG_CREATEGEOM
         decl.push_back(o);
     }
     std::vector<uint8_t> c;
-    HRESULT hr = build_shader_container(a->pShaderCode, sig, dxvk::dxbc_checksum, &c);
+    HRESULT hr = build_shader_container(code, sig, dxvk::dxbc_checksum, &c);
     if (SUCCEEDED(hr))
         hr = d->d3d->CreateGeometryShaderWithStreamOutput(
             c.data(), c.size(), decl.data(), static_cast<UINT>(decl.size()), a->BufferStridesInBytes, a->NumStrides,
             a->RasterizedStream, nullptr, reinterpret_cast<ID3D11GeometryShader**>(obj->shader.put()));
     if (FAILED(hr)) {
-        VENERA_WARN("CreateGeometryShaderWithStreamOutput (%u entries) failed: 0x%08lx", a->NumEntries, hr);
+        VENERA_WARN("CreateGeometryShaderWithStreamOutput (%u entries%s) failed: 0x%08lx", a->NumEntries,
+                    a->pShaderCode ? "" : ", pass-through", hr);
         d->set_error(E_OUTOFMEMORY);
     }
 }
