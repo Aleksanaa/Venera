@@ -26,21 +26,24 @@ constexpr float kGlyphW = 24;        // an icon and its gap
 constexpr float kWarningIndent = 16;
 constexpr wchar_t kErrorGlyph[] = L"", kWarningGlyph[] = L"";  // StatusErrorFull, Warning (filled)
 
-float valueHeight(Ui& ui, const InfoRow& r, float w)
-{
-    float width = w - 16 - kValueX - (r.bad ? kGlyphW : 0);
-    return std::max(32.f, ui.textHeight(r.value, Ui::kBody, width) + 12);
-}
+// A row laid out in a card w wide: its value and warning wrapped to their columns, and the lines' heights, which centre
+// them.
+struct Row {
+    const InfoRow* info;
+    Ui::Paragraph value, warning;
+    float valueH, warningH = 0;
+};
 
-float warningHeight(Ui& ui, const InfoRow& r, float w)
+Row layoutRow(Ui& ui, const InfoRow& r, float w)
 {
-    if (r.warning.empty())
-        return 0;
-    float width = w - 16 - 56 - kWarningIndent - kGlyphW;
-    return std::max(28.f, ui.textHeight(r.warning, Ui::kBody, width) + 8);
+    Row row{&r, ui.wrap(r.value, Ui::kBody, w - 16 - kValueX - (r.bad ? kGlyphW : 0))};
+    row.valueH = std::max(32.f, row.value.height + 12);
+    if (!r.warning.empty()) {
+        row.warning = ui.wrap(r.warning, Ui::kBody, w - 16 - 56 - kWarningIndent - kGlyphW);
+        row.warningH = std::max(28.f, row.warning.height + 8);
+    }
+    return row;
 }
-
-float rowHeight(Ui& ui, const InfoRow& r, float w) { return valueHeight(ui, r, w) + warningHeight(ui, r, w); }
 
 // Every warning and problem the report knows, with long values (/mock).
 SystemInfo mockInfo()
@@ -166,10 +169,13 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
         bool open = !collapsed_[i];
         int headerId = kExpanderId + int(i);
         float h = 64;
+        std::vector<Row> rows;
         if (open) {
             h += 1 + 12 + 12;
-            for (const InfoRow& r : s.rows)
-                h += rowHeight(ui, r, w);
+            for (const InfoRow& r : s.rows) {
+                rows.push_back(layoutRow(ui, r, w));
+                h += rows.back().valueH + rows.back().warningH;
+            }
         }
         ui.card({x, y, x + w, y + h});
         if (ui.hover == headerId)
@@ -184,24 +190,22 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
         if (open) {
             ui.fill({x + 1, y + 64, x + w - 1, y + 65}, 0, kBlack, 0.25f);
             float ry = y + 65 + 12;
-            for (const InfoRow& r : s.rows) {
-                ui.text(r.key, Ui::kBody, {x + 56, ry, x + kValueX, ry + 32}, kWhite, kTextSecondary);
+            for (const Row& r : rows) {
+                ui.text(r.info->key, Ui::kBody, {x + 56, ry, x + kValueX, ry + 32}, kWhite, kTextSecondary);
                 float vx = x + kValueX;
-                if (r.bad) {
+                if (r.info->bad) {
                     ui.text(kErrorGlyph, Ui::kIcon, {vx, ry, vx + 16, ry + 32}, kCritical, 1);
                     vx += kGlyphW;
                 }
-                float vh = valueHeight(ui, r, w);
-                ui.selectable(text++, r.value, Ui::kBody, {vx, ry, x + w - 16, ry + vh}, kWhite, kTextPrimary, 0, true);
-                ry += vh;
-                if (!r.warning.empty()) {
+                ui.selectable(text++, r.value, vx, ry + (r.valueH - r.value.height) / 2);
+                ry += r.valueH;
+                if (r.warningH) {
                     // indented under the key, its icon on the first line
                     float wx = x + 56 + kWarningIndent;
-                    float wh = warningHeight(ui, r, w);
                     ui.text(kWarningGlyph, Ui::kIcon, {wx, ry, wx + 16, ry + 28}, kCaution, 1);
-                    ui.selectable(text++, r.warning, Ui::kBody, {wx + kGlyphW, ry, x + w - 16, ry + wh}, kWhite,
-                                  kTextSecondary, 0, true);
-                    ry += wh;
+                    ui.selectable(text++, r.warning, wx + kGlyphW, ry + (r.warningH - r.warning.height) / 2, kWhite,
+                                  kTextSecondary);
+                    ry += r.warningH;
                 }
             }
         }

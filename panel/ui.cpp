@@ -70,14 +70,28 @@ void Ui::init()
     }
 }
 
-IDWriteTextLayout* Ui::layout(const std::wstring& s, Font f, D2D1_RECT_F r, bool wrap) const
+Ui::Paragraph Ui::paragraph(const std::wstring& s, Font f, float width, float height, bool wrap) const
 {
     fonts_[f]->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     IDWriteTextLayout* l = nullptr;
-    dw_->CreateTextLayout(s.c_str(), s.size(), fonts_[f], r.right - r.left, r.bottom - r.top, &l);
+    dw_->CreateTextLayout(s.c_str(), s.size(), fonts_[f], width, height, &l);
     if (l && wrap)
         l->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
-    return l;
+    return {s, std::shared_ptr<IDWriteTextLayout>(l, [](IDWriteTextLayout* p) { if (p) p->Release(); }), width,
+            height};
+}
+
+Ui::Paragraph Ui::wrap(const std::wstring& s, Font f, float width)
+{
+    Paragraph p = paragraph(s, f, width, 10000, true);
+    p.height = 0;
+    if (p.layout) {
+        DWRITE_TEXT_METRICS m{};
+        p.layout->GetMetrics(&m);
+        p.height = m.height;
+        p.layout->SetMaxHeight(m.height);  // its lines from the top: the formats centre them in the height
+    }
+    return p;
 }
 
 const Ui::Selectable* Ui::findSelectable(int id) const
@@ -88,25 +102,33 @@ const Ui::Selectable* Ui::findSelectable(int id) const
     return nullptr;
 }
 
-void Ui::selectable(int id, const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c, float a, int run, bool wrap)
+void Ui::selectable(int id, const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c, float a, int run)
 {
-    selectables_.push_back({{r.left, r.top - offset, r.right, r.bottom - offset}, id, s, f, run, clip_, wrap});
-    IDWriteTextLayout* l = layout(s, f, r, wrap);
-    if (!l)
+    addSelectable(id, paragraph(s, f, r.right - r.left, r.bottom - r.top, false), r.left, r.top, c, a, run);
+}
+
+void Ui::selectable(int id, const Paragraph& p, float x, float y, UINT32 c, float a)
+{
+    addSelectable(id, p, x, y, c, a, 0);
+}
+
+void Ui::addSelectable(int id, const Paragraph& p, float x, float y, UINT32 c, float a, int run)
+{
+    if (!p.layout)
         return;
+    selectables_.push_back({{x, y - offset, x + p.width, y + p.height - offset}, id, p, run, clip_});
     UINT32 start, end;
-    if (part(id, run, UINT32(s.size()), &start, &end)) {
+    if (part(id, run, UINT32(p.s.size()), &start, &end)) {
         DWRITE_HIT_TEST_METRICS m[16];
         UINT32 count = 0;
-        if (SUCCEEDED(l->HitTestTextRange(start, end - start, r.left, r.top, m, 16, &count)))
+        if (SUCCEEDED(p.layout->HitTestTextRange(start, end - start, x, y, m, 16, &count)))
             for (UINT32 i = 0; i < count; i++) {
                 color(accentBase);
                 rt_->FillRectangle({m[i].left, m[i].top, m[i].left + m[i].width, m[i].top + m[i].height}, brush_);
             }
     }
     color(c, a);
-    rt_->DrawTextLayout({r.left, r.top}, l, brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
-    l->Release();
+    rt_->DrawTextLayout({x, y}, p.layout.get(), brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 // The selection's ends in order: the first text and position, then the last.
@@ -138,7 +160,7 @@ bool Ui::selected(int id) const
 {
     const Selectable* s = findSelectable(id);
     UINT32 start, end;
-    return s && part(id, s->run, UINT32(s->s.size()), &start, &end);
+    return s && part(id, s->run, UINT32(s->p.s.size()), &start, &end);
 }
 
 bool Ui::textAt(float x, float y, int* id, UINT32* pos) const
@@ -146,15 +168,11 @@ bool Ui::textAt(float x, float y, int* id, UINT32* pos) const
     for (const Selectable& s : selectables_) {
         if (x < s.r.left || x >= s.r.right || y < s.r.top || y >= s.r.bottom || y < s.clip.top || y >= s.clip.bottom)
             continue;
-        IDWriteTextLayout* l = layout(s.s, s.f, s.r, s.wrap);
-        if (!l)
-            return false;
         DWRITE_TEXT_METRICS tm{};
-        l->GetMetrics(&tm);
+        s.p.layout->GetMetrics(&tm);
         BOOL trailing, inside;
         DWRITE_HIT_TEST_METRICS m{};
-        l->HitTestPoint(x - s.r.left, y - s.r.top, &trailing, &inside, &m);
-        l->Release();
+        s.p.layout->HitTestPoint(x - s.r.left, y - s.r.top, &trailing, &inside, &m);
         if (x - s.r.left > tm.left + tm.width + 8)  // past the end of the text: not on it
             return false;
         *id = s.id;
@@ -205,14 +223,11 @@ void Ui::selectTo(float x, float y)
             return;
     }
     if (pos == UINT32(-1) || (y >= s->r.top && y < s->r.bottom)) {
-        IDWriteTextLayout* l = layout(s->s, s->f, s->r, s->wrap);
-        if (!l)
-            return;
         BOOL trailing, inside;
         DWRITE_HIT_TEST_METRICS m{};
-        l->HitTestPoint(x - s->r.left, std::clamp(y, s->r.top, s->r.bottom - 1) - s->r.top, &trailing, &inside, &m);
-        l->Release();
-        pos = (selRun_ && y >= s->r.bottom) ? UINT32(s->s.size()) : m.textPosition + (trailing ? m.length : 0);
+        s->p.layout->HitTestPoint(x - s->r.left, std::clamp(y, s->r.top, s->r.bottom - 1) - s->r.top, &trailing,
+                                  &inside, &m);
+        pos = (selRun_ && y >= s->r.bottom) ? UINT32(s->p.s.size()) : m.textPosition + (trailing ? m.length : 0);
     }
     caretId_ = s->id;
     selCaret_ = pos;
@@ -225,10 +240,10 @@ void Ui::selectWord(int id, UINT32 pos)
     if (!s)
         return;
     auto boundary = [](wchar_t c) { return c == L' ' || c == L',' || c == L'(' || c == L')'; };
-    UINT32 start = std::min<UINT32>(pos, s->s.size()), end = start;
-    while (start > 0 && !boundary(s->s[start - 1]))
+    UINT32 start = std::min<UINT32>(pos, s->p.s.size()), end = start;
+    while (start > 0 && !boundary(s->p.s[start - 1]))
         start--;
-    while (end < s->s.size() && !boundary(s->s[end]))
+    while (end < s->p.s.size() && !boundary(s->p.s[end]))
         end++;
     select(id, start, end);
 }
@@ -236,7 +251,7 @@ void Ui::selectWord(int id, UINT32 pos)
 void Ui::selectAll(int id)
 {
     if (const Selectable* s = findSelectable(id))
-        select(id, 0, UINT32(s->s.size()));
+        select(id, 0, UINT32(s->p.s.size()));
 }
 
 std::wstring Ui::selectedText() const
@@ -248,7 +263,7 @@ std::wstring Ui::selectedText() const
     ends(&firstId, &firstPos, &lastId, &lastPos);
     auto text = [&](int id, std::wstring* s) {
         if (const Selectable* t = findSelectable(id)) {
-            *s = t->s;
+            *s = t->p.s;
             return true;
         }
         auto run = runs_.find(selRun_);
@@ -313,17 +328,6 @@ float Ui::measure(const std::wstring& s, Font f)
     layout->GetMetrics(&m);
     layout->Release();
     return m.widthIncludingTrailingWhitespace;
-}
-
-float Ui::textHeight(const std::wstring& s, Font f, float width)
-{
-    IDWriteTextLayout* l = layout(s, f, {0, 0, width, 10000}, true);
-    if (!l)
-        return 0;
-    DWRITE_TEXT_METRICS m{};
-    l->GetMetrics(&m);
-    l->Release();
-    return m.height;
 }
 
 void Ui::hot(D2D1_RECT_F r, int id)

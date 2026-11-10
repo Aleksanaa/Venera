@@ -67,8 +67,15 @@ public:
     void text(const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c = theme::kWhite, float a = theme::kTextPrimary,
               DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING);
     float measure(const std::wstring& s, Font f);
-    // The height of `s` wrapped to `width`, as selectable draws it with `wrap`.
-    float textHeight(const std::wstring& s, Font f, float width);
+    // Text laid out once: its size is known before it is drawn (a card sized to its wrapped text), and drawing it,
+    // selecting in it and finding the character under the pointer all use the same layout. Copies share it.
+    struct Paragraph {
+        std::wstring s;
+        std::shared_ptr<IDWriteTextLayout> layout;
+        float width = 0, height = 0;
+    };
+    // `s` wrapped to `width` in as many lines as it needs, breaking words that do not fit one; as high as its lines.
+    Paragraph wrap(const std::wstring& s, Font f, float width);
 
     // Clickable areas, in window DIPs; `offset` is the scroll offset of what is being drawn.
     void hot(D2D1_RECT_F r, int id);
@@ -107,9 +114,11 @@ public:
     // in it with the mouse and copy. One selection at a time; `id` names the text across frames. Texts with the same
     // `run` (not 0) are lines of one text, like a log's: a selection can go from one to another, in the order of their
     // ids, which grow down the page.
-    // With `wrap`, it takes as many lines as r's width needs (textHeight), breaking words that do not fit one.
     void selectable(int id, const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c = theme::kWhite,
-                    float a = theme::kTextPrimary, int run = 0, bool wrap = false);
+                    float a = theme::kTextPrimary, int run = 0);
+    // A paragraph, its top left at (x, y).
+    void selectable(int id, const Paragraph& p, float x, float y, UINT32 c = theme::kWhite,
+                    float a = theme::kTextPrimary);
     // A run's lines by id, also those not drawn (scrolled away), for copying; false for an id that is not a line.
     void runText(int run, std::function<bool(int id, std::wstring* s)> text) { runs_[run] = std::move(text); }
     // The selectable text under a point (window DIPs) and the character position there.
@@ -130,8 +139,9 @@ public:
 private:
     IDWriteTextFormat* format(const wchar_t* family, float size, DWRITE_FONT_WEIGHT weight);
     bool hasFont(const wchar_t* family);
-    IDWriteTextLayout* layout(const std::wstring& s, Font f, D2D1_RECT_F r, bool wrap = false) const;
-    struct Selectable { D2D1_RECT_F r; int id; std::wstring s; Font f; int run; D2D1_RECT_F clip; bool wrap; };
+    Paragraph paragraph(const std::wstring& s, Font f, float width, float height, bool wrap) const;
+    void addSelectable(int id, const Paragraph& p, float x, float y, UINT32 c, float a, int run);
+    struct Selectable { D2D1_RECT_F r; int id; Paragraph p; int run; D2D1_RECT_F clip; };
     const Selectable* findSelectable(int id) const;
     void select(int id, UINT32 anchor, UINT32 caret);
     void ends(int* firstId, UINT32* firstPos, int* lastId, UINT32* lastPos) const;
