@@ -48,6 +48,9 @@ to use a QEMU launch script with SDL. Nvidia GPUs need a set of patches applied 
 - Windows 11, x64. Tested on 25H2.
 - Secure Boot off. Or you buy me a Windows driver certificate.
 
+
+Also check [Software Compatibility Notes](docs/compatibility/software) for a list of workarounds for some software.
+
 ## Installing
 
 Run `venera-setup.exe` in the guest. Download builds from the [Actions](https://github.com/Aleksanaa/venera/actions)
