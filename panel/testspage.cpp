@@ -16,6 +16,7 @@ using namespace theme;
 namespace {
 
 constexpr UINT kStarted = kPageMessage + 1, kFinished = kPageMessage + 2, kIdle = kPageMessage + 3;
+constexpr UINT_PTR kCopiedTimer = kPageTimer + 2;
 constexpr float kHeaderH = 64, kRowH = 52;
 enum : int {
     kRunAllId = kPageId, kCopyId,
@@ -193,6 +194,11 @@ void Tests::stop(int g, int t)
 
 bool Tests::message(UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg == WM_TIMER && wp == kCopiedTimer) {
+        KillTimer(window_, kCopiedTimer);
+        copied_ = false;
+        return true;
+    }
     if (msg != kStarted && msg != kFinished && msg != kIdle)
         return false;
     if (msg == kIdle) {
@@ -231,6 +237,7 @@ void Tests::click(int id)
     } else if (id == kCopyId) {
         setClipboard(window_, results());
         copied_ = true;
+        SetTimer(window_, kCopiedTimer, 2000, nullptr);
     } else if (id >= kHeaderId && id < kHeaderId + n) {
         groups_[id - kHeaderId].open = !groups_[id - kHeaderId].open;
     } else if (id >= kGroupRunId && id < kGroupRunId + n) {
@@ -255,8 +262,6 @@ void Tests::click(int id)
             queue(g, t);
         }
     }
-    if (id != kCopyId)
-        copied_ = false;
 }
 
 // ---- drawing --------------------------------------------------------------------------------------------------------
