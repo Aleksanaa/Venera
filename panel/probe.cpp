@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // The graphics probe: `venera-panel.exe /probe` tries each API on the VirtIO GPU as an application would (Vulkan
 // through the loader, D3D12 and D3D11 on the adapter, OpenGL on a window) and prints key=value lines. Each API first
-// prints "<api>.status=checking", so one that crashes the process is told apart from one that was never reached. The
-// panel runs it as a child process (startProbe) and reads its output.
+// prints "<api>.status=checking", so one that crashes the process is told apart from one that was never reached, and
+// each names the files of ours it loaded (module.*). The panel runs it as a child process (startProbe) and reads its
+// output.
 #include "panel.h"
 
 #define VK_NO_PROTOTYPES
@@ -13,7 +14,9 @@
 #include <d3d11.h>
 #include <dxguids/dxguids.h>
 #include <GL/gl.h>
+#include <psapi.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <thread>
 
@@ -33,6 +36,28 @@ std::string hex(HRESULT hr)
     char buf[32];
     snprintf(buf, sizeof(buf), "error 0x%08lx", static_cast<unsigned long>(hr));
     return buf;
+}
+
+// Where each of our drivers in the process was loaded from, as "module.<file>=<path>": called while an API's device
+// is alive, as a runtime may unload its driver with the device.
+void outModules()
+{
+    HMODULE modules[512];
+    DWORD size = 0;
+    if (!EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &size))
+        return;
+    for (DWORD i = 0; i < std::min<DWORD>(size / sizeof(HMODULE), 512); i++) {
+        char path[MAX_PATH];
+        DWORD n = GetModuleFileNameA(modules[i], path, MAX_PATH);
+        if (!n || n >= MAX_PATH)
+            continue;
+        const char* slash = strrchr(path, '\\');
+        std::string file = slash ? slash + 1 : path;
+        for (char& c : file)
+            c = char(tolower(static_cast<unsigned char>(c)));
+        if (!file.compare(0, 7, "venera_") || !file.compare(0, 7, "viogpu_"))
+            out("module." + file, path);
+    }
 }
 
 bool hasExtension(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhysicalDevice d, const char* name)
@@ -109,6 +134,7 @@ void probeVulkan()
                 out("vk.host_driver_info", hostDriver.driverInfo);
             }
         }
+        outModules();
         found = true;
         break;
     }
@@ -163,6 +189,7 @@ void probeD3D12(IDXGIAdapter1* adapter)
             break;
         }
     }
+    outModules();
     device->Release();
     out("d3d12.status", "ok");
 }
@@ -181,6 +208,7 @@ void probeD3D11(IDXGIAdapter1* adapter)
         return;
     }
     out("d3d11.level", level(got));
+    outModules();
     device->Release();
     out("d3d11.status", "ok");
 }
@@ -211,6 +239,7 @@ void probeOpenGL()
         out("gl.version", str(GL_VERSION));
         out("gl.renderer", str(GL_RENDERER));
         out("gl.vendor", str(GL_VENDOR));
+        outModules();
         wglMakeCurrent(nullptr, nullptr);
         out("gl.status", "ok");
     }

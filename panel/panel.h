@@ -206,6 +206,8 @@ struct SystemInfo {
     std::wstring driverDesc, provider, driverVersion, driverDate;
     bool ours = false;            // the driver is Venera's package
     ULONG problem = 0;            // Device Manager's problem code, 0 for none
+    bool needRestart = false;     // a driver was installed that runs only after a restart
+    std::wstring driverFolder;    // where the device's driver files are (its folder in the DriverStore)
     // Venera as Apps & features lists it.
     std::wstring productVersion, installDate;
     bool testSigning = false;

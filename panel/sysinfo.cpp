@@ -60,6 +60,20 @@ bool isVirtioGpu(HDEVINFO set, SP_DEVINFO_DATA* dev)
     return false;
 }
 
+// The folder of the D3D drivers the device names (UserModeDriverName: "<>" for D3D9, then full paths), where the
+// package's files are.
+std::wstring driverFolder(HKEY key)
+{
+    wchar_t names[2048] = {};
+    DWORD size = sizeof(names) - 2 * sizeof(wchar_t);
+    if (RegGetValueW(key, nullptr, L"UserModeDriverName", RRF_RT_REG_MULTI_SZ, nullptr, names, &size) != ERROR_SUCCESS)
+        return {};
+    for (const wchar_t* p = names; *p; p += wcslen(p) + 1)
+        if (const wchar_t* slash = wcsrchr(p, L'\\'))
+            return std::wstring(p, slash);
+    return {};
+}
+
 void readDevice(SystemInfo& s)
 {
     HDEVINFO set = SetupDiGetClassDevsW(nullptr, L"PCI", nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
@@ -71,8 +85,11 @@ void readDevice(SystemInfo& s)
             continue;
         s.deviceFound = true;
         ULONG status = 0, problem = 0;
-        if (CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0) == CR_SUCCESS && (status & DN_HAS_PROBLEM))
-            s.problem = problem;
+        if (CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0) == CR_SUCCESS) {
+            if (status & DN_HAS_PROBLEM)
+                s.problem = problem;
+            s.needRestart = status & DN_NEED_RESTART;
+        }
         HKEY key = SetupDiOpenDevRegKey(set, &dev, DICS_FLAG_GLOBAL, 0, DIREG_DRV, KEY_READ);
         if (key != INVALID_HANDLE_VALUE) {
             s.driverDesc = regString(key, nullptr, L"DriverDesc");
@@ -81,6 +98,7 @@ void readDevice(SystemInfo& s)
             unsigned m = 0, d = 0, y = 0;  // DriverDate is m-d-yyyy
             if (swscanf(regString(key, nullptr, L"DriverDate").c_str(), L"%u-%u-%u", &m, &d, &y) == 3)
                 s.driverDate = longDate(y, m, d);
+            s.driverFolder = driverFolder(key);
             RegCloseKey(key);
         }
         s.ours = s.provider == kProvider;

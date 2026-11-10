@@ -80,10 +80,38 @@ std::vector<InfoSection> describe(const SystemInfo& info, const ProbeResult* pro
         if (info.problem)
             driver.rows.push_back(
                 {L"Device", L"Device Manager reports a problem, code " + std::to_wstring(info.problem), true});
-        driver.rows.push_back({L"Device driver", info.driverDesc.empty() ? L"None" : info.driverDesc, !info.ours});
-        if (!info.driverVersion.empty())
-            driver.rows.push_back(
-                {L"Driver version", info.driverVersion + (info.driverDate.empty() ? L"" : L", " + info.driverDate)});
+        InfoRow device{L"Device driver", info.driverDesc.empty() ? L"None" : info.driverDesc, !info.ours};
+        if (info.needRestart)
+            device.warning = L"Restart Windows to run the driver installed last";
+        driver.rows.push_back(device);
+        if (!info.driverVersion.empty()) {
+            // The package's DriverVer is Venera's version without the commit hash (setup/payload.cmake).
+            InfoRow version{L"Driver version",
+                            info.driverVersion + (info.driverDate.empty() ? L"" : L", " + info.driverDate)};
+            if (info.ours && !info.productVersion.empty() &&
+                info.productVersion.compare(0, info.driverVersion.size() + 1, info.driverVersion + L".")) {
+                version.warning = L"Not the installed Venera's (" + info.productVersion + L"): install Venera again";
+            }
+            driver.rows.push_back(version);
+        }
+        // Our drivers that the probe's processes loaded from elsewhere than the device's folder: stale copies.
+        if (info.ours && probe && !info.driverFolder.empty()) {
+            std::wstring stale;
+            bool any = false;
+            for (const auto& [key, path] : *probe) {
+                if (key.compare(0, 7, "module."))
+                    continue;
+                any = true;
+                size_t slash = path.rfind(L'\\');
+                if (slash == std::wstring::npos || _wcsicmp(path.substr(0, slash).c_str(), info.driverFolder.c_str()))
+                    stale += (stale.empty() ? L"" : L", ") + path;
+            }
+            if (!stale.empty())
+                driver.rows.push_back({L"Driver files", L"Not all from the installed driver", false,
+                                       L"Loaded from outside the driver's folder: " + stale});
+            else if (any)
+                driver.rows.push_back({L"Driver files", L"Loaded from the installed driver"});
+        }
     }
     driver.rows.push_back({L"Test signing", info.testSigning ? L"On" : L"Off, so Windows does not load the driver",
                            !info.testSigning});
