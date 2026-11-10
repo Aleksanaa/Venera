@@ -369,6 +369,23 @@ float Ui::measure(const std::wstring& s, Font f)
     return m.widthIncludingTrailingWhitespace;
 }
 
+void Ui::image(const UINT32* pixels, int px, float x, float y)
+{
+    D2D1_MATRIX_3X2_F m;
+    rt_->GetTransform(&m);
+    float dx = x * m._11 + m._31, dy = y * m._22 + m._32;
+    x += (std::round(dx) - dx) / m._11;
+    y += (std::round(dy) - dy) / m._22;
+    ID2D1Bitmap* bitmap = nullptr;
+    rt_->CreateBitmap(
+        D2D1::SizeU(px, px), pixels, px * 4,
+        D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &bitmap);
+    if (bitmap) {
+        rt_->DrawBitmap(bitmap, {x, y, x + px / m._11, y + px / m._22});
+        bitmap->Release();
+    }
+}
+
 void Ui::hot(D2D1_RECT_F r, int id)
 {
     D2D1_RECT_F w = {std::max(r.left, clip_.left), std::max(r.top - offset, clip_.top), std::min(r.right, clip_.right),

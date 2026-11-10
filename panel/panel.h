@@ -59,7 +59,6 @@ public:
         scrollArea = {};
         clip_ = kNoClip;
     }
-    ID2D1RenderTarget* rt() const { return rt_; }
 
     // Drawing; colours are 0xRRGGBB with an alpha.
     void color(UINT32 rgb, float a = 1);
@@ -68,6 +67,8 @@ public:
     void text(const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c = theme::kWhite, float a = theme::kTextPrimary,
               DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING);
     float measure(const std::wstring& s, Font f);
+    // A `px` pixels square premultiplied BGRA image, drawn 1:1 with its top left on the device pixel nearest (x, y).
+    void image(const UINT32* pixels, int px, float x, float y);
     // Text laid out once: its size is known before it is drawn (a card sized to its wrapped text), and drawing it,
     // selecting in it and finding the character under the pointer all use the same layout. Copies share it.
     struct Paragraph {

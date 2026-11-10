@@ -10,7 +10,6 @@
 #include <shellapi.h>
 
 #include <atomic>
-#include <cmath>
 
 namespace panel {
 
@@ -121,7 +120,7 @@ private:
     }
     void drawUpdate(Ui& ui, float x, float w, float& y);
     void drawAbout(Ui& ui, float x, float w, float& y);
-    void drawIcon(Ui& ui, D2D1_RECT_F r);
+    void drawIcon(Ui& ui, float x, float y, float size);
     const wchar_t* newest() const { return channel_ == Channel::kDevelop ? L"build of main" : L"release"; }
 
     HWND window_;
@@ -373,32 +372,16 @@ void About::drawUpdate(Ui& ui, float x, float w, float& y)
                 state_ != kDownloading && state_ != kInstalling);
 }
 
-// Snapped to device pixels, so the icon is drawn 1:1 from its own size.
-void About::drawIcon(Ui& ui, D2D1_RECT_F r)
+// From the icon's own size for the window's DPI, drawn 1:1.
+void About::drawIcon(Ui& ui, float x, float y, float size)
 {
-    float scale = GetDpiForWindow(window_) / 96.f;
-    int px = int((r.right - r.left) * scale + 0.5f);
+    int px = int(size * GetDpiForWindow(window_) / 96.f + 0.5f);
     if (px != iconPx_) {
         icon_ = iconPixels(px);
         iconPx_ = px;
     }
-    if (icon_.empty())
-        return;
-    D2D1_MATRIX_3X2_F m;
-    ui.rt()->GetTransform(&m);
-    float dx = (r.left * m._11 + m._31), dy = (r.top * m._22 + m._32);
-    r.left += (std::round(dx) - dx) / m._11;
-    r.top += (std::round(dy) - dy) / m._22;
-    r.right = r.left + px / m._11;
-    r.bottom = r.top + px / m._22;
-    ID2D1Bitmap* bitmap = nullptr;
-    ui.rt()->CreateBitmap(
-        D2D1::SizeU(px, px), icon_.data(), px * 4,
-        D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &bitmap);
-    if (bitmap) {
-        ui.rt()->DrawBitmap(bitmap, r);
-        bitmap->Release();
-    }
+    if (!icon_.empty())
+        ui.image(icon_.data(), px, x, y);
 }
 
 void About::drawAbout(Ui& ui, float x, float w, float& y)
@@ -416,7 +399,7 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
     constexpr int kRows = sizeof(rows) / sizeof(rows[0]);
     float topH = 144, h = topH + 1 + 12 + kRows * 32 + 12;
     ui.card({x, y, x + w, y + h});
-    drawIcon(ui, {x + 32, y + 32, x + 112, y + 112});
+    drawIcon(ui, x + 32, y + 32, 80);
     float tx = x + 140;
     float right = ui.buttonRight(L"Telegram", x + w - 24, y + 72, kTelegramId, false);
     right = ui.buttonRight(L"GitHub", right - 8, y + 72, kGithubId, false) - 24;
