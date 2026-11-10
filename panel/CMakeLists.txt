@@ -11,8 +11,13 @@ target_compile_definitions(venera-panel PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_
 set_source_files_properties(panel.rc PROPERTIES COMPILE_DEFINITIONS
     "VENERA_VERSION=${PROJECT_VERSION};VENERA_VERSION_RC=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
 target_include_directories(venera-panel PRIVATE tests/shaders)
-target_link_libraries(venera-panel PRIVATE venera-vulkan-headers venera-directx-headers
-    d2d1 dwrite dwmapi d3d12 d3d11 d3d9 dxgi dxguid opengl32 setupapi cfgmgr32 shcore ntdll psapi gdi32 user32 shell32
+# d3dkmthk.h, which MinGW lacks, from the SDK, searched after MinGW's headers as in umd/
+set_source_files_properties(tests/d3d11.cpp PROPERTIES COMPILE_OPTIONS
+    "-idirafter;${VENERA_WINKITS_DIR}/sdk/c/Include/10.0.26100.0/shared")
+# gdi32 first: d3d11.dll also exports D3DKMT entry points, stubs that succeed without asking the KMD, and the first
+# library naming a symbol is the one bound.
+target_link_libraries(venera-panel PRIVATE venera-vulkan-headers venera-directx-headers gdi32
+    d2d1 dwrite dwmapi d3d12 d3d11 d3d9 dxgi dxguid opengl32 setupapi cfgmgr32 shcore ntdll psapi user32 shell32
     advapi32 comdlg32 winhttp bcrypt version)
 target_link_options(venera-panel PRIVATE -municode -s -static -static-libgcc -static-libstdc++)
 set_source_files_properties(panel.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/docs/venera.ico")

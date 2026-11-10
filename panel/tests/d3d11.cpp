@@ -8,9 +8,12 @@
 
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
+#include <winternl.h>  // NTSTATUS, for d3dkmthk.h
+#include <d3dkmthk.h>
 #include <dxgi1_6.h>
 #include <dwmapi.h>
 
+#include "../../umd/common/viogpu_abi.h"
 
 #include <cmath>
 #include <cstdint>
@@ -974,6 +977,60 @@ bool shared_nt_test(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGIAdapter* a
     return result(t, check(t, "ReleaseSync(consumer)", consumer->ReleaseSync(2)) && ok);
 }
 
+// The UMDs open their own kernel device by the LUID the KMD reports for the runtime's adapter (umd/common/kmt.cpp),
+// so the KMD must report the DXGI adapter's own LUID. Also lists the kernel adapters: an indirect display (remote
+// control tools' virtual screens) adds one, and picking a kernel adapter by enumeration once broke every shared
+// texture while one was attached.
+bool kmt_adapter_test(ID3D11Device*, ID3D11DeviceContext*, IDXGIAdapter* adapter)
+{
+    const char* t = "kmt adapter";
+    DXGI_ADAPTER_DESC desc{};
+    if (!check(t, "GetDesc", adapter->GetDesc(&desc)))
+        return result(t, false);
+    auto query = [](D3DKMT_HANDLE handle, venera::viogpu::AdapterInfo* info) {
+        D3DKMT_QUERYADAPTERINFO q{};
+        q.hAdapter = handle;
+        q.Type = KMTQAITYPE_UMDRIVERPRIVATE;
+        q.pPrivateDriverData = info;
+        q.PrivateDriverDataSize = sizeof(*info);
+        return D3DKMTQueryAdapterInfo(&q) >= 0 && info->IamVioGPU == venera::viogpu::kIam;
+    };
+    auto close = [](D3DKMT_HANDLE handle) {
+        D3DKMT_CLOSEADAPTER ca{handle};
+        if (D3DKMTCloseAdapter(&ca) < 0)
+            std::printf("D3DKMTCloseAdapter(0x%x) failed\n", handle);
+    };
+    D3DKMT_ENUMADAPTERS2 e{};
+    std::vector<D3DKMT_ADAPTERINFO> adapters;
+    if (D3DKMTEnumAdapters2(&e) >= 0 && e.NumAdapters) {
+        adapters.resize(e.NumAdapters);
+        e.pAdapters = adapters.data();
+        if (D3DKMTEnumAdapters2(&e) < 0)
+            e.NumAdapters = 0;
+    }
+    for (ULONG i = 0; i < e.NumAdapters; i++) {
+        venera::viogpu::AdapterInfo info{};
+        const bool ours = query(adapters[i].hAdapter, &info);
+        std::printf("kernel adapter %08lx:%08lx: %lu sources%s\n", static_cast<ULONG>(adapters[i].AdapterLuid.HighPart),
+                    adapters[i].AdapterLuid.LowPart, adapters[i].NumOfSources, ours ? ", viogpu" : "");
+        close(adapters[i].hAdapter);
+    }
+    D3DKMT_OPENADAPTERFROMLUID oa{};
+    oa.AdapterLuid = desc.AdapterLuid;
+    const NTSTATUS s = D3DKMTOpenAdapterFromLuid(&oa);
+    std::printf("DXGI adapter %08lx:%08lx: D3DKMTOpenAdapterFromLuid 0x%08lx\n",
+                static_cast<ULONG>(desc.AdapterLuid.HighPart), desc.AdapterLuid.LowPart, s);
+    if (s < 0)
+        return result(t, false);
+    venera::viogpu::AdapterInfo info{};
+    const bool ours = query(oa.hAdapter, &info);
+    close(oa.hAdapter);
+    std::printf("KMD: %s, reports adapter %08lx:%08lx\n", ours ? "viogpu" : "NOT viogpu",
+                static_cast<ULONG>(info.AdapterLuid.HighPart), info.AdapterLuid.LowPart);
+    return result(t, ours && info.AdapterLuid.HighPart == desc.AdapterLuid.HighPart &&
+                     info.AdapterLuid.LowPart == desc.AdapterLuid.LowPart);
+}
+
 // Keep both imports open while full updates and dirty rectangles cross the mutex.
 // Odd dimensions expose row-pitch errors. Every pixel is checked on every frame.
 bool shared_updates_test(ID3D11Device* dev, ID3D11DeviceContext* ctx, IDXGIAdapter* adapter)
@@ -1319,6 +1376,8 @@ TestGroup d3d11Tests()
         {"conservative", L"Conservative rasterization", L"A triangle smaller than a pixel, missing its centre",
          run<conservative_test>},
         {"trim", L"Trim", L"IDXGIDevice3::Trim, then a clear", run<trim_test>},
+        {"kmt-adapter", L"Kernel adapter",
+         L"The KMD reports the DXGI adapter's LUID, where the drivers open shared memory", runAdapter<kmt_adapter_test>},
         {"shared", L"Shared texture", L"A texture opened by another device and process, as DWM does",
          runAdapter<shared_test>},
         {"shared-nt", L"Shared NT handle", L"The same through an NT handle", runAdapter<shared_nt_test>},
