@@ -231,8 +231,9 @@ void probeD3D12(IDXGIAdapter1* adapter)
 void probeD3D11(IDXGIAdapter1* adapter)
 {
     out("d3d11.status", "checking");
-    D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
-                                  D3D_FEATURE_LEVEL_10_0};
+    // Up to 12_1, which a list must name: the default list stops at 11_1.
+    D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_1,
+                                  D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
     ID3D11Device* device = nullptr;
     D3D_FEATURE_LEVEL got;
     HRESULT hr = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, ARRAYSIZE(levels),
