@@ -254,7 +254,7 @@ private:
 
 Overlay* g_overlay;
 
-// A process's file name without .exe, shortened with an ellipsis to fit beside its frame rate.
+// A process's file name without .exe.
 std::wstring Overlay::appName(DWORD pid)
 {
     auto known = names_.find(pid);
@@ -272,12 +272,6 @@ std::wstring Overlay::appName(DWORD pid)
         return L"Process " + std::to_wstring(pid);
     if (name.size() > 4 && !_wcsicmp(name.c_str() + name.size() - 4, L".exe"))
         name.resize(name.size() - 4);
-    float room = w_ - 2 * kGap - countW_ - 12 - memoryW_ - 12;
-    if (ui_.measure(name, Ui::kBody) > room) {
-        while (!name.empty() && ui_.measure(name + L"…", Ui::kBody) > room)
-            name.pop_back();
-        name += L"…";
-    }
     if (names_.size() > 256)  // ids are reused: forget them now and then
         names_.clear();
     return names_[pid] = name;
@@ -328,7 +322,9 @@ void Overlay::paint()
         y += 6;
     }
     for (const auto& app : stats_.apps) {
-        ui_.text(appName(app.pid), Ui::kBody, {kGap, y, w_ - kGap, y + kRowH}, kWhite, kTextSecondary);
+        // cut with an ellipsis before its memory and frame count
+        ui_.text(appName(app.pid), Ui::kBody, {kGap, y, w_ - kGap - countW_ - 12 - memoryW_ - 12, y + kRowH}, kWhite,
+                 kTextSecondary);
         ui_.text(app.memory, Ui::kBody, {kGap, y, w_ - kGap - countW_ - 12, y + kRowH}, kWhite, kTextSecondary,
                  DWRITE_TEXT_ALIGNMENT_TRAILING);
         ui_.text(std::to_wstring(app.presents), Ui::kBodyStrong, {kGap, y, w_ - kGap, y + kRowH}, kWhite, 1,

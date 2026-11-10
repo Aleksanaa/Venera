@@ -261,22 +261,6 @@ void Tests::click(int id)
 
 // ---- drawing --------------------------------------------------------------------------------------------------------
 
-// `s` cut with an ellipsis to fit `width`.
-std::wstring fit(Ui& ui, const std::wstring& s, Ui::Font f, float width)
-{
-    if (ui.measure(s, f) <= width)
-        return s;
-    size_t lo = 0, hi = s.size();
-    while (lo < hi) {
-        size_t mid = (lo + hi + 1) / 2;
-        if (ui.measure(s.substr(0, mid) + L"…", f) <= width)
-            lo = mid;
-        else
-            hi = mid - 1;
-    }
-    return s.substr(0, lo) + L"…";
-}
-
 void stateIcon(Ui& ui, State s, float x, float cy)
 {
     if (s == kPartial) {  // a caution-filled circle with a dash, as CompletedSolid is one with a check
@@ -399,8 +383,7 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
             std::wstring time = e.state == kPassed || e.state == kFailed ? seconds(e.result.seconds) : L"";
             float tw = time.empty() ? 0 : ui.measure(time, Ui::kCaption) + 16;
             if (e.state == kFailed || (e.state == kNotRun && !e.result.summary.empty()))
-                ui.titleDesc(x + 56, right - tw, cy, test.name,
-                             fit(ui, e.result.summary, Ui::kCaption, right - tw - x - 56),
+                ui.titleDesc(x + 56, right - tw, cy, test.name, e.result.summary,
                              e.state == kFailed ? kCritical : kWhite, e.state == kFailed ? 1 : kTextSecondary,
                              kResultText + g * 100 + int(t));
             else

@@ -72,7 +72,6 @@ void Ui::init()
 
 Ui::Paragraph Ui::paragraph(const std::wstring& s, Font f, float width, float height, bool wrap) const
 {
-    fonts_[f]->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     IDWriteTextLayout* l = nullptr;
     dw_->CreateTextLayout(s.c_str(), s.size(), fonts_[f], width, height, &l);
     if (l && wrap)
@@ -356,6 +355,8 @@ void Ui::text(const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c, float a, D
     fonts_[f]->SetTextAlignment(align);
     color(c, a);
     rt_->DrawText(s.c_str(), s.size(), fonts_[f], r, brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    if (align != DWRITE_TEXT_ALIGNMENT_LEADING)
+        fonts_[f]->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
 }
 
 float Ui::measure(const std::wstring& s, Font f)

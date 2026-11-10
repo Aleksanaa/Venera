@@ -180,6 +180,7 @@ private:
     ID2D1RenderTarget* rt_ = nullptr;
     ID2D1SolidColorBrush* brush_ = nullptr;
     IDWriteFactory* dw_ = nullptr;
+    // Leading-aligned, as the layouts made from them take it; text() aligns one DrawText.
     IDWriteTextFormat* fonts_[kFontCount] = {};
     static constexpr D2D1_RECT_F kNoClip = {-1e9f, -1e9f, 1e9f, 1e9f};
     D2D1_RECT_F clip_ = kNoClip;  // where clicks and text are, in window DIPs
