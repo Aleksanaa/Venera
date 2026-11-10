@@ -134,6 +134,21 @@ void probeVulkan()
                 out("vk.host_driver_info", hostDriver.driverInfo);
             }
         }
+        // Its memory heaps, as "<bytes> <flags>": device-local (d) and with a memory type the CPU maps (m).
+        auto memory = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+            gipa(instance, "vkGetPhysicalDeviceMemoryProperties"));
+        VkPhysicalDeviceMemoryProperties mp;
+        memory(d, &mp);
+        for (uint32_t h = 0; h < mp.memoryHeapCount; h++) {
+            bool mappable = false;
+            for (uint32_t t = 0; t < mp.memoryTypeCount; t++)
+                mappable |= mp.memoryTypes[t].heapIndex == h &&
+                            (mp.memoryTypes[t].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+            std::string flags = mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "d" : "";
+            if (mappable)
+                flags += "m";
+            out("vk.heap." + std::to_string(h), std::to_string(mp.memoryHeaps[h].size) + " " + flags);
+        }
         outModules();
         found = true;
         break;
@@ -165,6 +180,25 @@ IDXGIAdapter1* findAdapter()
 namespace {
 
 std::string level(UINT fl) { return std::to_string(fl >> 12) + "_" + std::to_string((fl >> 8) & 0xf); }
+
+// The memory DXGI says the adapter has, and the budget it gives a process of each segment group.
+void probeMemory(IDXGIAdapter1* adapter)
+{
+    DXGI_ADAPTER_DESC1 desc;
+    if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+        out("dxgi.dedicated", std::to_string(desc.DedicatedVideoMemory));
+        out("dxgi.shared", std::to_string(desc.SharedSystemMemory));
+    }
+    IDXGIAdapter3* adapter3 = nullptr;
+    if (FAILED(adapter->QueryInterface(IID_PPV_ARGS(&adapter3))))
+        return;
+    DXGI_QUERY_VIDEO_MEMORY_INFO local, nonLocal;
+    if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)))
+        out("dxgi.budget_local", std::to_string(local.Budget));
+    if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonLocal)))
+        out("dxgi.budget_non_local", std::to_string(nonLocal.Budget));
+    adapter3->Release();
+}
 
 void probeD3D12(IDXGIAdapter1* adapter)
 {
@@ -257,6 +291,7 @@ int runProbe()
     probeVulkan();
     IDXGIAdapter1* adapter = findAdapter();
     if (adapter) {
+        probeMemory(adapter);
         probeD3D12(adapter);
         probeD3D11(adapter);
         adapter->Release();

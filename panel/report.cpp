@@ -236,6 +236,37 @@ std::vector<InfoSection> describe(const SystemInfo& info, const ProbeResult* pro
     apis.rows.push_back(gl);
     out.push_back(apis);
 
+    // What programs may allocate: DXGI's sizes and per-process budgets, and the Vulkan heaps Venus offers.
+    InfoSection memory{L"", L"Video memory"};
+    auto bytes = [&](const char* key) { return gigabytes(std::wcstoull(probed(probe, key).c_str(), nullptr, 10)); };
+    if (!probe) {
+        memory.rows.push_back({L"Memory", L"Checking…"});
+    } else {
+        if (!probed(probe, "dxgi.dedicated").empty()) {
+            memory.rows.push_back({L"Dedicated", bytes("dxgi.dedicated")});
+            memory.rows.push_back({L"Shared", bytes("dxgi.shared")});
+        }
+        if (!probed(probe, "dxgi.budget_local").empty())
+            memory.rows.push_back({L"Budget per program", bytes("dxgi.budget_local") + L" local, " +
+                                                              bytes("dxgi.budget_non_local") + L" shared"});
+        for (int h = 0;; h++) {
+            std::wstring heap = probed(probe, ("vk.heap." + std::to_string(h)).c_str());
+            if (heap.empty())
+                break;
+            size_t space = heap.find(L' ');
+            std::wstring flags = space == std::wstring::npos ? L"" : heap.substr(space + 1);
+            std::wstring value = gigabytes(std::wcstoull(heap.c_str(), nullptr, 10));
+            if (flags.find(L'd') != std::wstring::npos)
+                value += L", device-local";
+            if (flags.find(L'm') != std::wstring::npos)
+                value += L", CPU-mappable";
+            memory.rows.push_back({L"Vulkan heap " + std::to_wstring(h), value});
+        }
+        if (memory.rows.empty())
+            memory.rows.push_back({L"Memory", L"Unknown: no API answered", true});
+    }
+    out.push_back(memory);
+
     // What a forgotten log level or HUD would explain: everything not at its default.
     InfoSection settings{L"", L"Changed settings"};
     for (const auto& [name, value] : info.settings)
