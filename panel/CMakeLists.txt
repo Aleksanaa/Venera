@@ -12,7 +12,7 @@ set_source_files_properties(panel.rc PROPERTIES COMPILE_DEFINITIONS
     "VENERA_VERSION=${PROJECT_VERSION};VENERA_VERSION_RC=${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
 target_include_directories(venera-panel PRIVATE tests/shaders)
 # d3dkmthk.h, which MinGW lacks, from the SDK, searched after MinGW's headers as in umd/
-set_source_files_properties(tests/d3d11.cpp PROPERTIES COMPILE_OPTIONS
+set_source_files_properties(sysinfo.cpp tests/d3d11.cpp PROPERTIES COMPILE_OPTIONS
     "-idirafter;${VENERA_WINKITS_DIR}/sdk/c/Include/10.0.26100.0/shared")
 # gdi32 first: d3d11.dll also exports D3DKMT entry points, stubs that succeed without asking the KMD, and the first
 # library naming a symbol is the one bound.

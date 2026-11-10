@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // What the panel reads in its own process: the VirtIO GPU and its driver (SetupAPI, the driver's registry key, the
-// device's problem code), Venera as Apps & features lists it, test signing, the displays on the adapter, and the guest:
-// the virtual machine from the firmware's SMBIOS tables, Windows, the processors, memory, page files, mice and keyboards.
+// device's problem code), what the KMD says the host offers, Venera as Apps & features lists it, test signing, the
+// displays on the adapter, and the guest: the virtual machine from the firmware's SMBIOS tables, Windows, the
+// processors, memory, page files, mice and keyboards.
 #include "panel.h"
 
 #include <initguid.h>  // defines the class GUIDs and property keys below
@@ -13,6 +14,9 @@
 #include <setupapi.h>
 #include <shellscalingapi.h>
 #include <winternl.h>
+#include <d3dkmthk.h>
+
+#include "../umd/common/viogpu_abi.h"
 
 namespace panel {
 
@@ -83,6 +87,40 @@ void readDevice(SystemInfo& s)
         break;
     }
     SetupDiDestroyDeviceInfoList(set);
+}
+
+// The KMD's UMD-private adapter info, from the kernel adapter that answers as viogpu with its own LUID: an indirect
+// display (a remote control tool's virtual screen) forwards the query to the GPU, and answers with the GPU's LUID.
+void readKernelAdapter(SystemInfo& s)
+{
+    D3DKMT_ENUMADAPTERS2 e{};
+    if (D3DKMTEnumAdapters2(&e) < 0 || !e.NumAdapters)
+        return;
+    std::vector<D3DKMT_ADAPTERINFO> adapters(e.NumAdapters);
+    e.pAdapters = adapters.data();
+    if (D3DKMTEnumAdapters2(&e) < 0)
+        return;
+    for (ULONG i = 0; i < e.NumAdapters; i++) {
+        venera::viogpu::AdapterInfo info{};
+        D3DKMT_QUERYADAPTERINFO q{};
+        q.hAdapter = adapters[i].hAdapter;
+        q.Type = KMTQAITYPE_UMDRIVERPRIVATE;
+        q.pPrivateDriverData = &info;
+        q.PrivateDriverDataSize = sizeof(info);
+        if (!s.kmdAnswered && D3DKMTQueryAdapterInfo(&q) >= 0 && info.IamVioGPU == venera::viogpu::kIam &&
+            info.AdapterLuid.LowPart == adapters[i].AdapterLuid.LowPart &&
+            info.AdapterLuid.HighPart == adapters[i].AdapterLuid.HighPart) {
+            s.kmdAnswered = true;
+            s.supports3d = info.Flags.Supports3d;
+            s.venus = info.SupportedCapsetIDs & (1ull << 4);  // VIRTIO_GPU_CAPSET_VENUS
+            s.blob = info.Flags.has_resource_blob;
+            s.hostVisible = info.Flags.has_host_visible;
+            s.contextInit = info.Flags.has_context_init;
+            s.hostVisibleSize = info.HostVisibleSize;
+        }
+        D3DKMT_CLOSEADAPTER ca{adapters[i].hAdapter};
+        [[maybe_unused]] NTSTATUS closed = D3DKMTCloseAdapter(&ca);
+    }
 }
 
 bool testSigning()
@@ -311,6 +349,8 @@ SystemInfo readSystemInfo()
     if (swscanf(regString(HKEY_LOCAL_MACHINE, kUninstallKey, L"InstallDate").c_str(), L"%4u%2u%2u", &y, &m, &d) == 3)
         s.installDate = longDate(y, m, d);
     s.testSigning = testSigning();
+    if (s.ours)
+        readKernelAdapter(s);
     readMachine(s);
     s.windows = windowsVersion();
     readProcessors(s);

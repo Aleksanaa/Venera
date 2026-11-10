@@ -106,6 +106,23 @@ std::vector<InfoSection> describe(const SystemInfo& info, const ProbeResult* pro
             host.rows.push_back({L"Vulkan driver", vkDriver});
     } else
         host.rows.push_back({L"GPU", L"Unknown: Venus did not answer", true});
+    // The virtio-gpu device's options on QEMU's command line (docs/qemu.md), which the guest sees only as features.
+    if (info.kmdAnswered) {
+        auto feature = [&](const wchar_t* name, bool on, const wchar_t* off) {
+            host.rows.push_back({name, on ? L"On" : off, !on});
+        };
+        feature(L"3D acceleration", info.supports3d, L"Off: QEMU needs virtio-vga-gl or virtio-gpu-gl");
+        feature(L"Venus", info.venus, L"Off: add venus=on to the virtio-gpu device");
+        feature(L"Blob resources", info.blob, L"Off: add blob=on to the virtio-gpu device");
+        if (!info.hostVisible)
+            host.rows.push_back({L"Host memory window", L"None: add hostmem=4G to the virtio-gpu device", true});
+        else
+            host.rows.push_back(
+                {L"Host memory window", info.hostVisibleSize ? gigabytes(info.hostVisibleSize) : L"On"});
+        feature(L"Context init", info.contextInit, L"Off: the host needs virglrenderer 1.0 or newer");
+    } else if (info.ours) {
+        host.rows.push_back({L"Features", L"Unknown: the driver did not answer", true});
+    }
     out.push_back(host);
 
     InfoSection guest{L"", L"Guest"};

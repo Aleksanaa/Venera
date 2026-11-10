@@ -195,8 +195,8 @@ struct Display {
     UINT scale = 100;  // percent
 };
 
-// Read in the panel's own process: the registry, SetupAPI, the displays and the firmware's SMBIOS tables. Nothing
-// here loads a graphics driver, so it works whatever state the driver is in.
+// Read in the panel's own process: the registry, SetupAPI, the KMD, the displays and the firmware's SMBIOS tables.
+// Nothing here loads a graphics driver's user-mode part, so it works whatever state the driver is in.
 struct SystemInfo {
     // The VirtIO GPU and the driver Windows runs it with.
     bool deviceFound = false;
@@ -206,6 +206,11 @@ struct SystemInfo {
     // Venera as Apps & features lists it.
     std::wstring productVersion, installDate;
     bool testSigning = false;
+    // What the host's virtio-gpu offers, as Venera's KMD answers for its own adapter (kmdAnswered): QEMU's device
+    // options decide them. KMDs older than its HostVisibleSize leave the hostmem window's size 0.
+    bool kmdAnswered = false;
+    bool supports3d = false, venus = false, blob = false, hostVisible = false, contextInit = false;
+    ULONGLONG hostVisibleSize = 0;  // bytes
     // The guest. SMBIOS names the virtual machine (manufacturer and product) and its machine type, e.g. QEMU's
     // pc-q35-11.1: QEMU's own version is not visible to a guest, the machine type's is the nearest.
     std::wstring machine, machineType;

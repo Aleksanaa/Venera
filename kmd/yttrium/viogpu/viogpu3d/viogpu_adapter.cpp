@@ -714,8 +714,10 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 info->Flags.Reserved = 0;
                 info->Flags.requires_explicit_residency = VIOGPU_WDDM2 ? 1 : 0;
                 info->SupportedCapsetIDs = m_supportedCapsetIDs;
-                if (pQueryAdapterInfo->OutputDataSize >= sizeof(VIOGPU_ADAPTERINFO))
+                if (pQueryAdapterInfo->OutputDataSize >= FIELD_OFFSET(VIOGPU_ADAPTERINFO, HostVisibleSize))
                     info->AdapterLuid = m_AdapterLuid;
+                if (pQueryAdapterInfo->OutputDataSize >= sizeof(VIOGPU_ADAPTERINFO))
+                    info->HostVisibleSize = info->Flags.has_host_visible ? m_VioDev.shmem_len : 0;
                 return STATUS_SUCCESS;
             }
         case DXGKQAITYPE_DRIVERCAPS:

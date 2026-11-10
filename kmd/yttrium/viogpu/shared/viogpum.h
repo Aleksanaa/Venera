@@ -63,6 +63,7 @@ typedef struct _VIOGPU_ADAPTERINFO
     } Flags;
     ULONGLONG SupportedCapsetIDs;
     LUID AdapterLuid; // Filled only for callers whose buffer reaches it (Mesa's copy ends before it)
+    ULONGLONG HostVisibleSize; // The hostmem window's size, 0 without one; likewise filled only when reached
 } VIOGPU_ADAPTERINFO;
 
 // ================= ESCAPES
