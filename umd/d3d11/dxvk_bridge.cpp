@@ -66,10 +66,13 @@ Rc<DxvkAdapter> gpu(const Rc<DxvkInstance>& inst)
 }
 
 // DXVK lacks the target-independent rasterization of 11_1 and later, which mostly Direct2D uses (DWM included), so
-// processes with d2d1.dll loaded get 11_0.
+// processes with d2d1.dll loaded get 11_0, unless the exe exports VeneraDirect2DSoftwareOnly (the panel, whose
+// Direct2D never reaches us).
 D3D_FEATURE_LEVEL process_max_level()
 {
-    return GetModuleHandleW(L"d2d1.dll") ? D3D_FEATURE_LEVEL_11_0 : D3D_FEATURE_LEVEL_12_1;
+    if (!GetModuleHandleW(L"d2d1.dll") || GetProcAddress(GetModuleHandleW(nullptr), "VeneraDirect2DSoftwareOnly"))
+        return D3D_FEATURE_LEVEL_12_1;
+    return D3D_FEATURE_LEVEL_11_0;
 }
 
 } // namespace

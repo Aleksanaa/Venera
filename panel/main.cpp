@@ -649,6 +649,10 @@ bool restartElevated(HWND window, int page)
 
 }  // namespace panel
 
+// Our D3D11 UMD caps processes with d2d1.dll loaded at 11_0 (dxvk_bridge.cpp); the panel's Direct2D draws to software
+// DC targets only, so its tests get the device's highest level.
+extern "C" __declspec(dllexport) const int VeneraDirect2DSoftwareOnly = 1;
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
 {
     int argc = 0;
