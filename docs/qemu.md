@@ -34,12 +34,13 @@ starts (the forked child calls `setpgid`), so the guest's Venus context never ex
 `virgl blob create error: Invalid argument` and `virtio_gpu_virgl_process_cmd: ctrl 0x10c, error 0x1200` for every
 blob while the guest stays black.
 
-- **SDL** is pixel-exact on a fractionally scaled Wayland desktop if QEMU's environment has
-  `SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1`. SDL sizes the window in physical pixels and the guest's resolution matches
-  it. The hardware cursor shows a bit large, as SDL scales it by the host's display scale on top of the guest's own.
-  There is no menu bar; Ctrl+Alt+F toggles fullscreen and Ctrl+Alt+G releases the mouse.
+- **SDL** is the most recommended. Set `SDL_VIDEODRIVER=wayland` and `SDL_VIDEO_WAYLAND_SCALE_TO_DISPLAY=1` (makes
+  SDL 3 measure the window in physical pixels instead of logical ones) if you are using wayland. It's very smooth,
+  clear, and bug-free.
 - **GTK** has menus, but GTK 3 draws only at integer scales, so on a fractionally scaled display the compositor
   resamples the window and text looks slightly pixelated.
 
 For lower input latency, use virtio input devices (`-device virtio-keyboard-pci -device virtio-tablet-pci`) in place
 of the emulated PS/2 and USB ones (the guest needs virtio-win's `vioinput` driver).
+
+[run-qemu.sh](run-qemu.sh) is a reference script that I rely on. You may find helpful pieces there.

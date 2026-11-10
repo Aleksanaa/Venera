@@ -40,15 +40,8 @@ Tested with QEMU 11.1.1 and virglrenderer 1.3.0.
 
 Setup: [with libvirt (virt-manager)](docs/libvirt.md) or [with QEMU directly](docs/qemu.md).
 
-We aim for no host patches. However, each way of displaying the guest has a drawback:
-
-1. **virt-manager (libvirt + SPICE).** A bit laggy. After every frame, stock QEMU holds all of the guest's GPU
-   commands until the SPICE client has drawn it. QEMU needs yttrium's patch
-   ([cf3bba5c26](https://github.com/arehnman/yttrium-qemu/commit/cf3bba5c26), "ui: decouple GL presentation from
-   renderer blocking").
-2. **QEMU GTK** (`-display gtk,gl=on`). Smooth, but GTK 3 draws only at integer scales, so on a fractionally scaled
-   host display the compositor resamples the window and text looks slightly soft.
-3. **QEMU SDL** (`-display sdl,gl=on`). The best option out of the box, smooth and pixel-exact, but the hardware cursor shows a bit larger. SDL scales it twice, once by host scaling and once by guest.
+If you don't want to apply any patches on the host while getting the best experience, it's better
+to use a QEMU launch script with SDL. Nvidia GPUs need a set of patches applied to QEMU anyway.
 
 ### Guest
 
