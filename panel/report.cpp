@@ -138,8 +138,20 @@ std::vector<InfoSection> describe(const SystemInfo& info, const ProbeResult* pro
         auto count = [](DWORD n, const wchar_t* one) {
             return std::to_wstring(n) + L" " + one + (n == 1 ? L"" : L"s");
         };
-        guest.rows.push_back({L"Topology", count(info.sockets, L"socket") + L", " + count(info.cores, L"core") +
-                                                 L", " + count(info.threads, L"thread")});
+        // Two sockets of one core each: likely several sockets configured, of which Windows uses at most two. Fewer
+        // than four cores: applications race the drivers' translation threads for them. One socket of at least four
+        // cores is what to configure.
+        InfoRow topology{L"Topology", count(info.sockets, L"socket") + L", " + count(info.cores, L"core") + L", " +
+                                          count(info.threads, L"thread")};
+        if (info.sockets == 2 && info.cores == 2)
+            topology.warning = L"You likely configured each core as its own socket, and Windows uses at most 2: change "
+                               L"to 1 socket with at least 4 cores. ";
+        else if (info.cores < 4)
+            topology.warning = L"Give the virtual machine 1 socket with at least 4 cores. ";
+        if (info.cores < 4)
+            topology.warning += L"With fewer cores, applications race the drivers' translation threads for them, which "
+                                L"makes rendering slow and can leak memory";
+        guest.rows.push_back(topology);
     }
     if (info.memory)
         guest.rows.push_back(
@@ -197,8 +209,11 @@ std::wstring reportText(const std::vector<InfoSection>& sections)
     std::wstring text = L"Venera system information\r\n";
     for (const InfoSection& s : sections) {
         text += L"\r\n" + s.title + L"\r\n";
-        for (const InfoRow& r : s.rows)
+        for (const InfoRow& r : s.rows) {
             text += L"  " + r.key + L": " + r.value + L"\r\n";
+            if (!r.warning.empty())
+                text += L"    Warning: " + r.warning + L"\r\n";
+        }
     }
     return text;
 }

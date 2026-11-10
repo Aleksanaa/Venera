@@ -4,6 +4,8 @@
 // comes from the probe (probe.cpp), run in the background when the page is made and on "Check again".
 #include "panel.h"
 
+#include <algorithm>
+
 namespace panel {
 
 using namespace theme;
@@ -14,6 +16,29 @@ constexpr UINT kProbeDone = kPageMessage;
 constexpr UINT_PTR kCopiedTimer = kPageTimer;
 constexpr DWORD kProbeTimeoutMs = 20000;
 enum : int { kCopyId = kPageId, kCheckId, kExpanderId, kNameText = kPageId + 100, kValueText };
+
+// A row: its key, then its value in a column of its own, after an error icon when the value is a problem; a warning
+// on a line of its own below, indented, after a warning icon. Values and warnings wrap.
+constexpr float kValueX = 56 + 180;  // the values' column, from the card's left
+constexpr float kGlyphW = 24;        // an icon and its gap
+constexpr float kWarningIndent = 16;
+constexpr wchar_t kErrorGlyph[] = L"", kWarningGlyph[] = L"";  // StatusErrorFull, Warning (filled)
+
+float valueHeight(Ui& ui, const InfoRow& r, float w)
+{
+    float width = w - 16 - kValueX - (r.bad ? kGlyphW : 0);
+    return std::max(32.f, ui.textHeight(r.value, Ui::kBody, width) + 12);
+}
+
+float warningHeight(Ui& ui, const InfoRow& r, float w)
+{
+    if (r.warning.empty())
+        return 0;
+    float width = w - 16 - 56 - kWarningIndent - kGlyphW;
+    return std::max(28.f, ui.textHeight(r.warning, Ui::kBody, width) + 8);
+}
+
+float rowHeight(Ui& ui, const InfoRow& r, float w) { return valueHeight(ui, r, w) + warningHeight(ui, r, w); }
 
 class Overview : public Page {
 public:
@@ -64,7 +89,12 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
         const InfoSection& s = all[i];
         bool open = !collapsed_[i];
         int headerId = kExpanderId + int(i);
-        float h = 64 + (open ? 1 + 12 + s.rows.size() * 32 + 12 : 0);
+        float h = 64;
+        if (open) {
+            h += 1 + 12 + 12;
+            for (const InfoRow& r : s.rows)
+                h += rowHeight(ui, r, w);
+        }
         ui.card({x, y, x + w, y + h});
         if (ui.hover == headerId)
             ui.fill({x + 1, y + 1, x + w - 1, y + 64}, 4, kWhite, kCardHover - kCardFill);
@@ -79,10 +109,24 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
             ui.fill({x + 1, y + 64, x + w - 1, y + 65}, 0, kBlack, 0.25f);
             float ry = y + 65 + 12;
             for (const InfoRow& r : s.rows) {
-                ui.text(r.key, Ui::kBody, {x + 56, ry, x + 56 + 180, ry + 32}, kWhite, kTextSecondary);
-                ui.selectable(text++, r.value, Ui::kBody, {x + 56 + 180, ry, x + w - 16, ry + 32},
-                              r.bad ? kCritical : kWhite);
-                ry += 32;
+                ui.text(r.key, Ui::kBody, {x + 56, ry, x + kValueX, ry + 32}, kWhite, kTextSecondary);
+                float vx = x + kValueX;
+                if (r.bad) {
+                    ui.text(kErrorGlyph, Ui::kIcon, {vx, ry, vx + 16, ry + 32}, kCritical, 1);
+                    vx += kGlyphW;
+                }
+                float vh = valueHeight(ui, r, w);
+                ui.selectable(text++, r.value, Ui::kBody, {vx, ry, x + w - 16, ry + vh}, kWhite, kTextPrimary, 0, true);
+                ry += vh;
+                if (!r.warning.empty()) {
+                    // indented under the key, its icon on the first line
+                    float wx = x + 56 + kWarningIndent;
+                    float wh = warningHeight(ui, r, w);
+                    ui.text(kWarningGlyph, Ui::kIcon, {wx, ry, wx + 16, ry + 28}, kCaution, 1);
+                    ui.selectable(text++, r.warning, Ui::kBody, {wx + kGlyphW, ry, x + w - 16, ry + wh}, kWhite,
+                                  kTextSecondary, 0, true);
+                    ry += wh;
+                }
             }
         }
         y += h + 4;

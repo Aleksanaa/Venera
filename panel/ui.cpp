@@ -70,11 +70,13 @@ void Ui::init()
     }
 }
 
-IDWriteTextLayout* Ui::layout(const std::wstring& s, Font f, D2D1_RECT_F r) const
+IDWriteTextLayout* Ui::layout(const std::wstring& s, Font f, D2D1_RECT_F r, bool wrap) const
 {
     fonts_[f]->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     IDWriteTextLayout* l = nullptr;
     dw_->CreateTextLayout(s.c_str(), s.size(), fonts_[f], r.right - r.left, r.bottom - r.top, &l);
+    if (l && wrap)
+        l->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
     return l;
 }
 
@@ -86,10 +88,10 @@ const Ui::Selectable* Ui::findSelectable(int id) const
     return nullptr;
 }
 
-void Ui::selectable(int id, const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c, float a, int run)
+void Ui::selectable(int id, const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c, float a, int run, bool wrap)
 {
-    selectables_.push_back({{r.left, r.top - offset, r.right, r.bottom - offset}, id, s, f, run, clip_});
-    IDWriteTextLayout* l = layout(s, f, r);
+    selectables_.push_back({{r.left, r.top - offset, r.right, r.bottom - offset}, id, s, f, run, clip_, wrap});
+    IDWriteTextLayout* l = layout(s, f, r, wrap);
     if (!l)
         return;
     UINT32 start, end;
@@ -144,7 +146,7 @@ bool Ui::textAt(float x, float y, int* id, UINT32* pos) const
     for (const Selectable& s : selectables_) {
         if (x < s.r.left || x >= s.r.right || y < s.r.top || y >= s.r.bottom || y < s.clip.top || y >= s.clip.bottom)
             continue;
-        IDWriteTextLayout* l = layout(s.s, s.f, s.r);
+        IDWriteTextLayout* l = layout(s.s, s.f, s.r, s.wrap);
         if (!l)
             return false;
         DWRITE_TEXT_METRICS tm{};
@@ -203,7 +205,7 @@ void Ui::selectTo(float x, float y)
             return;
     }
     if (pos == UINT32(-1) || (y >= s->r.top && y < s->r.bottom)) {
-        IDWriteTextLayout* l = layout(s->s, s->f, s->r);
+        IDWriteTextLayout* l = layout(s->s, s->f, s->r, s->wrap);
         if (!l)
             return;
         BOOL trailing, inside;
@@ -311,6 +313,17 @@ float Ui::measure(const std::wstring& s, Font f)
     layout->GetMetrics(&m);
     layout->Release();
     return m.widthIncludingTrailingWhitespace;
+}
+
+float Ui::textHeight(const std::wstring& s, Font f, float width)
+{
+    IDWriteTextLayout* l = layout(s, f, {0, 0, width, 10000}, true);
+    if (!l)
+        return 0;
+    DWRITE_TEXT_METRICS m{};
+    l->GetMetrics(&m);
+    l->Release();
+    return m.height;
 }
 
 void Ui::hot(D2D1_RECT_F r, int id)

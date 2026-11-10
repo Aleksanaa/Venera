@@ -67,6 +67,8 @@ public:
     void text(const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c = theme::kWhite, float a = theme::kTextPrimary,
               DWRITE_TEXT_ALIGNMENT align = DWRITE_TEXT_ALIGNMENT_LEADING);
     float measure(const std::wstring& s, Font f);
+    // The height of `s` wrapped to `width`, as selectable draws it with `wrap`.
+    float textHeight(const std::wstring& s, Font f, float width);
 
     // Clickable areas, in window DIPs; `offset` is the scroll offset of what is being drawn.
     void hot(D2D1_RECT_F r, int id);
@@ -105,8 +107,9 @@ public:
     // in it with the mouse and copy. One selection at a time; `id` names the text across frames. Texts with the same
     // `run` (not 0) are lines of one text, like a log's: a selection can go from one to another, in the order of their
     // ids, which grow down the page.
+    // With `wrap`, it takes as many lines as r's width needs (textHeight), breaking words that do not fit one.
     void selectable(int id, const std::wstring& s, Font f, D2D1_RECT_F r, UINT32 c = theme::kWhite,
-                    float a = theme::kTextPrimary, int run = 0);
+                    float a = theme::kTextPrimary, int run = 0, bool wrap = false);
     // A run's lines by id, also those not drawn (scrolled away), for copying; false for an id that is not a line.
     void runText(int run, std::function<bool(int id, std::wstring* s)> text) { runs_[run] = std::move(text); }
     // The selectable text under a point (window DIPs) and the character position there.
@@ -127,8 +130,8 @@ public:
 private:
     IDWriteTextFormat* format(const wchar_t* family, float size, DWRITE_FONT_WEIGHT weight);
     bool hasFont(const wchar_t* family);
-    IDWriteTextLayout* layout(const std::wstring& s, Font f, D2D1_RECT_F r) const;
-    struct Selectable { D2D1_RECT_F r; int id; std::wstring s; Font f; int run; D2D1_RECT_F clip; };
+    IDWriteTextLayout* layout(const std::wstring& s, Font f, D2D1_RECT_F r, bool wrap = false) const;
+    struct Selectable { D2D1_RECT_F r; int id; std::wstring s; Font f; int run; D2D1_RECT_F clip; bool wrap; };
     const Selectable* findSelectable(int id) const;
     void select(int id, UINT32 anchor, UINT32 caret);
     void ends(int* firstId, UINT32* firstPos, int* lastId, UINT32* lastPos) const;
@@ -341,7 +344,9 @@ HWND findFpsOverlay();
 
 struct InfoRow {
     std::wstring key, value;
-    bool bad = false;  // something that does not work
+    bool bad = false;      // the value is what does not work, drawn after an error icon
+    std::wstring warning;  // what works but could work better, on a line of its own below the row after a warning
+                           // icon; not a problem for anyProblem
 };
 struct InfoSection {
     const wchar_t* icon;
