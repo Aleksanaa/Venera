@@ -43,24 +43,53 @@ Code Integrity determined that a process (...\chrome.exe) attempted to load
 Chrome's own `vulkan-1.dll` and `vk_swiftshader.dll` are refused in the same way, which is why chrome://gpu lists no
 Vulkan adapters either.
 
-Chrome has no switch, feature or policy that turns off only this check. The only way past it is to run the GPU process
-without its sandbox:
+The check is the `MITIGATION_FORCE_MS_SIGNED_BINS` mitigation, which Chromium applies once the process has started
+(`sandbox/policy/win/sandbox_win.cc`). One switch turns off only this check:
 
 ```
-chrome.exe --disable-gpu-sandbox
+chrome.exe --allow-third-party-modules
 ```
 
-This weakens Chrome's security: a bug in the GPU process can then be exploited with the user's full rights. Use it
-for testing, not for everyday browsing. Microsoft-signed drivers would remove the need for it, but that takes
-Microsoft's hardware signing program, which this project doesn't have.
+Chrome passes the switch on to the GPU process, which then leaves out the mitigation. The rest of the sandbox stays in
+place: chrome://gpu still shows "Sandboxed: true", and the GPU process loads `venera_d3d12.dll`. Renderers don't get
+the switch and keep their own signature checks. Chrome treats it as an unsupported flag, so it shows a warning bar
+when it starts.
+
+Running the GPU process without any sandbox, with `--disable-gpu-sandbox`, also works, but it weakens Chrome's
+security far more: a bug in the GPU process can then be exploited with the user's full rights.
 
 ## Enabling WebGPU
 
 Both are needed:
 
 1. `chrome://flags/#enable-unsafe-webgpu` set to Enabled.
-2. Chrome started with `--disable-gpu-sandbox`, for example from a shortcut. Close every Chrome window first, or the
-   switch is ignored.
+2. Chrome started with `--allow-third-party-modules`, for example from a shortcut. Close every Chrome window first,
+   or the switch is ignored.
 
 `requestAdapter()` then returns our adapter (backend D3D12, "VirtIO GPU (Venus) with Venera D3D10/11/12"), and
-devices can be created on it.
+devices can be created on it. Without the second switch, every `requestAdapter()` call returns null, including
+`forceFallbackAdapter`, even with the first one set.
+
+## Keeping the switch
+
+Chrome has no setting or policy for its command line, so `--allow-third-party-modules` has to go everywhere Chrome is
+started from:
+
+- The shortcuts: the Start menu's (`C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Google Chrome.lnk`), the
+  taskbar's (`%APPDATA%\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Google Chrome.lnk`) and the
+  desktop's (`C:\Users\Public\Desktop\Google Chrome.lnk`). Add the switch in Properties → Target, after the closing
+  quote of the path.
+- The commands Windows runs to open links and PDFs with Chrome, which start Chrome when it isn't running. They're the
+  default values of `HKEY_LOCAL_MACHINE\SOFTWARE\Classes\ChromeHTML\shell\open\command` and of
+  `...\ChromePDF\shell\open\command`:
+
+  ```
+  "C:\Program Files\Google\Chrome\Application\chrome.exe" --allow-third-party-modules --single-argument %1
+  ```
+
+Chrome reads its switches only when the first window starts. If Chrome is already running, launching it again with
+the switch only opens a new window, and the switch is ignored, so close every window first, including any Chrome left
+running in the background. chrome://gpu → Command Line shows whether the running browser has the switch.
+
+Chrome's installer may rewrite the shortcuts and the registry values when Chrome updates, so check them again
+after an update.
