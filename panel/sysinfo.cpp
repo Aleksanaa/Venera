@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // What the panel reads in its own process: the VirtIO GPU and its driver (SetupAPI, the driver's registry key, the
 // device's problem code), what the KMD says the host offers, Venera as Apps & features lists it, test signing, the
-// displays on the adapter, other Vulkan drivers, and the guest: the virtual machine from the firmware's SMBIOS tables,
-// Windows, the processors, memory, page files, mice and keyboards.
+// displays on the adapter, other Vulkan drivers, the drivers' changed settings, and the guest: the virtual machine
+// from the firmware's SMBIOS tables, Windows, the processors, memory, page files, mice and keyboards.
 #include "panel.h"
 
 #include <initguid.h>  // defines the class GUIDs and property keys below
@@ -324,6 +324,56 @@ std::vector<std::wstring> vulkanDrivers()
     return out;
 }
 
+// HKLM\SOFTWARE\Venera's values: a setting at its default has none (settingspage.cpp removes it).
+std::vector<std::pair<std::wstring, std::wstring>> driverSettings()
+{
+    std::vector<std::pair<std::wstring, std::wstring>> out;
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Venera", 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return out;
+    wchar_t name[256];
+    BYTE data[2048];
+    for (DWORD i = 0;; i++) {
+        DWORD nameLen = 256, type, size = sizeof(data) - sizeof(wchar_t);
+        LONG r = RegEnumValueW(key, i, name, &nameLen, nullptr, &type, data, &size);
+        if (r == ERROR_NO_MORE_ITEMS)
+            break;
+        if (r != ERROR_SUCCESS)
+            continue;
+        if (type == REG_DWORD && size == sizeof(DWORD))
+            out.push_back({name, std::to_wstring(*reinterpret_cast<DWORD*>(data))});
+        else if (type == REG_SZ || type == REG_EXPAND_SZ)
+            out.push_back({name, std::wstring(reinterpret_cast<wchar_t*>(data), size / sizeof(wchar_t)).c_str()});
+    }
+    RegCloseKey(key);
+    return out;
+}
+
+// The panel's environment, which Explorer gives every program it starts: the variables of the engines (DXVK,
+// vkd3d-proton), Mesa (Venus, zink), the Vulkan loader and our drivers.
+std::vector<std::pair<std::wstring, std::wstring>> driverEnvironment()
+{
+    static const wchar_t* const kPrefixes[] = {L"DXVK_", L"VKD3D_", L"VN_", L"MESA_", L"VENERA_", L"VK_", L"ZINK_",
+                                               L"GALLIUM_"};
+    std::vector<std::pair<std::wstring, std::wstring>> out;
+    wchar_t* block = GetEnvironmentStringsW();
+    if (!block)
+        return out;
+    for (const wchar_t* p = block; *p; p += wcslen(p) + 1) {
+        const wchar_t* eq = wcschr(p + 1, L'=');  // names of drive letters' directories start with '='
+        if (!eq)
+            continue;
+        std::wstring name(p, eq);
+        for (const wchar_t* prefix : kPrefixes)
+            if (!_wcsnicmp(name.c_str(), prefix, wcslen(prefix))) {
+                out.push_back({name, eq + 1});
+                break;
+            }
+    }
+    FreeEnvironmentStringsW(block);
+    return out;
+}
+
 }  // namespace
 
 HKEY openDriverKey(REGSAM access)
@@ -400,6 +450,8 @@ SystemInfo readSystemInfo()
     s.keyboards = devices(GUID_DEVCLASS_KEYBOARD);
     s.displays = readDisplays(s.ours ? s.driverDesc : std::wstring());
     s.otherVulkanDrivers = vulkanDrivers();
+    s.settings = driverSettings();
+    s.environment = driverEnvironment();
     return s;
 }
 

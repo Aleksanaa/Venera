@@ -227,6 +227,9 @@ struct SystemInfo {
     std::vector<Display> displays;
     // Vulkan drivers registered beside ours (whose manifest the loader finds through the adapter): their manifests.
     std::vector<std::wstring> otherVulkanDrivers;
+    // The drivers' settings changed from their defaults, by name: HKLM\SOFTWARE\Venera's values (umd/common/log.h),
+    // and the environment variables the drivers and the libraries in them read, which win over those.
+    std::vector<std::pair<std::wstring, std::wstring>> settings, environment;
 };
 SystemInfo readSystemInfo();
 // Venera's version as Apps & features lists it ("0.1.0.121.9e11c1e"), empty when it is not installed.

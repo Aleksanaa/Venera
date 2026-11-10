@@ -235,6 +235,16 @@ std::vector<InfoSection> describe(const SystemInfo& info, const ProbeResult* pro
     }
     apis.rows.push_back(gl);
     out.push_back(apis);
+
+    // What a forgotten log level or HUD would explain: everything not at its default.
+    InfoSection settings{L"", L"Changed settings"};
+    for (const auto& [name, value] : info.settings)
+        settings.rows.push_back({name, value});
+    for (const auto& [name, value] : info.environment)
+        settings.rows.push_back({name, value + L" (environment variable)"});
+    if (settings.rows.empty())
+        settings.rows.push_back({L"Settings", L"All at their defaults"});
+    out.push_back(settings);
     return out;
 }
 
