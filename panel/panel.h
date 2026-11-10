@@ -372,6 +372,9 @@ private:
 std::wstring formatLogLine(const LogLine& l);
 // The process runs as administrator.
 bool elevated();
+// Starts this exe again with `args`, as administrator through UAC unless this process is already, and returns its
+// process, which the caller closes; null with GetLastError's reason (ERROR_CANCELLED: UAC was turned down).
+HANDLE startSelf(HWND window, const std::wstring& args, int show = SW_SHOWNORMAL);
 // Starts the panel again as administrator, on page `page`, and closes this window; false when that did not start.
 bool restartElevated(HWND window, int page);
 

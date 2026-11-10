@@ -610,22 +610,30 @@ int Window::run(HINSTANCE inst, int show, int page)
 
 }  // namespace
 
-bool restartElevated(HWND window, int page)
+// The panel may run from a share, for which ShellExecuteEx would ask first whether to run it: it runs already.
+HANDLE startSelf(HWND window, const std::wstring& args, int show)
 {
     wchar_t self[MAX_PATH];
     GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring args = L"/page " + std::to_wstring(page);
     SHELLEXECUTEINFOW sei = {sizeof(sei)};
-    sei.lpVerb = L"runas";
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_NOZONECHECKS;
+    sei.lpVerb = elevated() ? nullptr : L"runas";
     sei.lpFile = self;
     sei.lpParameters = args.c_str();
     sei.hwnd = window;
-    sei.nShow = SW_SHOWNORMAL;
+    sei.nShow = show;
+    return ShellExecuteExW(&sei) ? sei.hProcess : nullptr;
+}
+
+bool restartElevated(HWND window, int page)
+{
     ReleaseMutex(g_instance);
-    if (!ShellExecuteExW(&sei)) {
+    HANDLE p = startSelf(window, L"/page " + std::to_wstring(page));
+    if (!p) {
         WaitForSingleObject(g_instance, 0);
         return false;
     }
+    CloseHandle(p);
     PostMessageW(window, WM_CLOSE, 0, 0);
     return true;
 }

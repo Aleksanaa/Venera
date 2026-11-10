@@ -181,23 +181,15 @@ void About::download()
 }
 
 // venera-panel /update as administrator, which says itself what went wrong; this panel closes once it started the
-// installer. Run from the click on Install: a UAC prompt asked for from elsewhere may wait behind the windows. The
-// panel may run from a share, for which ShellExecuteEx would ask first whether to run it: it runs already.
+// installer. Run from the click on Install: a UAC prompt asked for from elsewhere may wait behind the windows.
 void About::install(const std::wstring& path)
 {
     state_ = kInstalling;
     RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);  // before UAC holds this thread
-    wchar_t self[MAX_PATH];
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
     std::wstring args = std::wstring(L"/update ") + channelName(channel_) + L" /from \"" + path + L"\"";
-    SHELLEXECUTEINFOW sei = {sizeof(sei)};
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_NOZONECHECKS;
-    sei.lpVerb = L"runas";
-    sei.lpFile = self;
-    sei.lpParameters = args.c_str();
-    sei.hwnd = window_;
-    sei.nShow = SW_SHOWNORMAL;  // it has no window but its error message box, which SW_HIDE would hide
-    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+    // it has no window but its error message box, which SW_HIDE would hide
+    HANDLE process = startSelf(window_, args, SW_SHOWNORMAL);
+    if (!process) {
         fail(L"The update did not start", GetLastError() == ERROR_CANCELLED
                                               ? L"Updating needs administrator rights: the prompt was turned down."
                                               : L"Running venera-panel /update as administrator failed.");
@@ -205,7 +197,6 @@ void About::install(const std::wstring& path)
     }
     unsigned gen = ++gen_;
     HWND window = window_;
-    HANDLE process = sei.hProcess;
     std::thread([window, gen, process] {
         WaitForSingleObject(process, INFINITE);
         DWORD code = 1;

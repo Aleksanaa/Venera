@@ -36,7 +36,6 @@ private:
 
     bool overlayOn() const { return starting_ || findFpsOverlay(); }
     void startOverlay();
-    HANDLE runSelf(const wchar_t* args);
 
     HWND window_;
     HANDLE starting_ = nullptr;  // the overlay's process until its window shows (or it exits, when it could not start)
@@ -65,7 +64,7 @@ void Tools::click(int id)
     } else if (id == kDwmId) {
         if (elevated())
             restartDwm();
-        else if (HANDLE p = runSelf(L"/restart-dwm"))
+        else if (HANDLE p = startSelf(window_, L"/restart-dwm", SW_SHOWNOACTIVATE))
             CloseHandle(p);
     } else if (id == kFpsId) {
         if (HWND overlay = findFpsOverlay())
@@ -75,23 +74,8 @@ void Tools::click(int id)
     }
 }
 
-// venera-panel with `args`, through UAC when this panel runs without administrator rights; its process, or null.
-HANDLE Tools::runSelf(const wchar_t* args)
-{
-    wchar_t self[MAX_PATH];
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
-    SHELLEXECUTEINFOW sei = {sizeof(sei)};
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb = elevated() ? nullptr : L"runas";
-    sei.lpFile = self;
-    sei.lpParameters = args;
-    sei.hwnd = window_;
-    sei.nShow = SW_SHOWNOACTIVATE;
-    return ShellExecuteExW(&sei) ? sei.hProcess : nullptr;
-}
-
 // It reports its own errors.
-void Tools::startOverlay() { starting_ = runSelf(L"/fps"); }
+void Tools::startOverlay() { starting_ = startSelf(window_, L"/fps", SW_SHOWNOACTIVATE); }
 
 // The overlay's window comes and goes on its own: a repaint when the toggle would change.
 bool Tools::message(UINT msg, WPARAM wp, LPARAM)
