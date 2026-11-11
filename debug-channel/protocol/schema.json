@@ -6,6 +6,22 @@
   "properties": {"major": {"const": 1}},
   "oneOf": [
     {
+      "properties": {"type": {"const": "system.info.get"}, "request_id": {"type": "string"}},
+      "required": ["request_id"]
+    },
+    {
+      "properties": {
+        "type": {"const": "system.info.result"},
+        "request_id": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "collected_at": {"type": "string"},
+        "session_id": {"$ref": "#/$defs/nullableU32"},
+        "sections": {"type": "array", "items": {"$ref": "#/$defs/systemInfoSection"}},
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "required": ["request_id", "ok", "collected_at", "session_id", "sections"]
+    },
+    {
       "properties": {
         "type": {"const": "hello"},
         "role": {"type": "string"},
@@ -81,6 +97,16 @@
     }
   ],
   "$defs": {
+    "systemInfoSection": {
+      "type": "object", "required": ["title", "rows"],
+      "properties": {
+        "title": {"type": "string"},
+        "rows": {"type": "array", "items": {
+          "type": "object", "required": ["key", "value", "bad", "warning"],
+          "properties": {"key": {"type": "string"}, "value": {"type": "string"}, "bad": {"type": "boolean"}, "warning": {"type": "string"}}
+        }}
+      }
+    },
     "strings": {"type": "array", "items": {"type": "string"}},
     "u32": {"type": "integer", "minimum": 0, "maximum": 4294967295},
     "u64": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},

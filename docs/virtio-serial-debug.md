@@ -12,7 +12,7 @@ Venera / Mesa / DXVK / vkd3d → 各会话采集端 ┐
 
 来宾采用独立 Rust EXE，提供 Windows service 和 session helper 两种模式。服务启动时枚举全部已登录会话，再处理登录、注销、RDP、用户切换；仍保留的断开会话继续采集。服务按会话启动和回收 helper，分别报告会话状态与采集健康状态，失败可重启 helper。服务负责 Global DBWIN 与系统 ETW，helper 负责所属会话 DBWIN；session 0 的本地与 Global 空间重合，在该空间建立一次采集。
 
-服务统一汇聚、筛选、排队并持有专用端口。现有分辨率服务继续负责显示管理。panel 日志页和来宾 CLI 消费后台记录，服务与会话采集端管理 DBWIN。本机交接已采用 Windows 命名管道，实现入口为 `debug-channel/guest/src/windows/ipc.rs`。
+服务统一汇聚、筛选、排队并持有专用端口。现有分辨率服务继续负责显示管理。panel 日志页和来宾 CLI 消费后台记录，服务与会话采集端管理 DBWIN。helper 的本机交接采用 Windows 命名管道，实现入口为 `debug-channel/guest/src/windows/ipc.rs`。
 
 宿主采用 Rust 后台持续接收并保存，界面与 CLI 查询同一后台。查看工具退出时，采集、保存和筛选到期计时继续运行；记录来自后台持续采集。
 
@@ -73,35 +73,26 @@ DXVK/vkd3d 集中 logger 适配已实现，两个日志器已有 134/134 条完�
 
 本机转发开关独立于筛选。本机关闭立即停止新日志入队、清空待发送日志并取消当前日志写请求；已被传输层接受的字节按恢复语义处理。控制状态继续可查询，宿主修改筛选维持开关状态，再次开启由 Windows 本机操作。响应同时包含开关和有效筛选。
 
-## 4. 双向消息
+## 4. 公开串口协议
 
-单端口使用 UTF-8 JSONL，每记录携带整数 `major` 与字符串 `type`；示例 major 为 1。字符串换行转义，末尾 LF 分隔记录。未知附加字段忽略；同 major 未知类型计数并跳过。不兼容 major 明确报告协议错误并跳过对应记录，后续已知 major 的完整记录继续解析。
+VirtIO Serial 公共通道采用 UTF-8 JSONL，每行承载一条 JSON-RPC 2.0 消息或一组批量消息，协议契约由 OpenRPC 1.4.1 文档描述。方法包括 `endpoint.info`、`status.get`、`filter.set`、`filter.reset`、`system.info.get`、`rpc.discover`、`status.changed`、`log` 与 `gap`；端点发起请求时使用字符串 ID 和具名参数对象，通知携带方法名与参数。
 
-控制请求携带 `request_id`，响应返回同值；编号在发起方运行实例内唯一，待完成请求绑定当前连接。断连后执行结果待查询，重连以状态查询确认配置。hello 提供版本与能力，日志按自身 envelope 独立解析。
+`rpc.discover` 返回当前接收端的 OpenRPC 文档，便于查看端点方法与数据结构。序号、修订、计数、持续毫秒和 FILETIME 使用 DecimalU64 字符串表示；PID、线程 ID 和会话 ID 使用 JSON 整数。完整方法表、字段定义、示例与生成入口见 [Venera protocol v1](venera-protocol-v1.md)。
 
-| type | 方向 | 字段与语义 |
-|---|---|---|
-| `hello` | 双向 | `role/software_version/capabilities`，介绍端点。 |
-| `status.get` | host→guest | `request_id`，查询设备、采集、筛选和损失状态。 |
-| `status` | guest→host | `forwarding_enabled/revision/effective_filter/expires_at/health/loss`，状态变更通知。 |
-| `log` | guest→host | `stream_id/seq/observed_at/source_time/source/component/level/raw_level/session_id/process/tid/text`。 |
-| `filter.set` | host→guest | `request_id/filter`，可选 `duration_ms`，整份替换。panel 采用同一服务语义。 |
-| `filter.reset` | host→guest | `request_id`，恢复默认筛选及期限。 |
-| `request.result` | guest→host | `request_id/operation/ok`；成功返回有效配置、revision、期限、开关，查询附 `status`；失败附 `error.code/message` 与可用的当前状态。 |
-| `gap` | guest→host | `stream_id/reason/count`，可知时附 `first_seq/last_seq`，报告实际观测缺口。 |
+协议文档与双端接口由共享 Rust 类型生成并验证：
 
-以下每行分别为一条消息示例；字段约束以 `debug-channel/protocol/schema.json` 为准，设备健康状态示例见[来宾说明](virtio-serial-guest.md)：
+```bash
+cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema
+cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema -- --check
+```
+
+以下示例展示公开串口上的 JSON-RPC 2.0 请求、通知和端点发现：
 
 ```jsonl
-{"major":1,"type":"hello","role":"guest","software_version":"0.1.0","capabilities":["status","filter","gap"]}
-{"major":1,"type":"status.get","request_id":"host-1"}
-{"major":1,"type":"status","forwarding_enabled":true,"revision":0,"effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,"health":{"driver":"installed","controller":{"state":"running","problem":0},"port":"present","host":"connected"},"loss":{"queue_dropped":0}}
-{"major":1,"type":"filter.set","request_id":"host-2","filter":{"components":["dxvk"],"levels":["warning","error"],"targets":[{"kind":"process_instance","pid":4120,"start_time_filetime":"134124000000000000","include_descendants":true},{"kind":"exe_path","path":"C:\\Games\\demo.exe"}]},"duration_ms":60000}
-{"major":1,"type":"request.result","request_id":"host-2","operation":"filter.set","ok":true,"revision":1,"effective_filter":{"components":["dxvk"],"levels":["warning","error"],"targets":[{"kind":"process_instance","pid":4120,"start_time_filetime":"134124000000000000","include_descendants":true},{"kind":"exe_path","path":"C:\\Games\\demo.exe"}]},"expires_at":"2026-11-10T08:01:00Z","forwarding_enabled":true}
-{"major":1,"type":"log","stream_id":"guest-run-1","seq":42,"observed_at":"2026-11-10T08:00:01.123Z","source_time":null,"source":"dbwin","component":"dxvk","level":"warning","raw_level":"warn","session_id":2,"process":{"pid":4120,"start_time_filetime":"134124000000000000","exe_path":"C:\\Games\\demo.exe"},"tid":null,"text":"中文警告\n下一行"}
-{"major":1,"type":"gap","stream_id":"guest-run-1","reason":"queue_overflow","count":2,"first_seq":43,"last_seq":44}
-{"major":1,"type":"filter.reset","request_id":"host-3"}
-{"major":1,"type":"request.result","request_id":"host-3","operation":"filter.reset","ok":true,"revision":2,"effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,"forwarding_enabled":true}
+{"jsonrpc":"2.0","id":"host-1","method":"status.get","params":{}}
+{"jsonrpc":"2.0","method":"status.changed","params":{"forwarding_enabled":true,"revision":"0","effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,"health":{},"loss":{}}}
+{"jsonrpc":"2.0","id":"host-2","method":"rpc.discover","params":{}}
+{"jsonrpc":"2.0","method":"log","params":{"stream_id":"guest-run-1","seq":"42","component":"dxvk","level":"warning","text":"中文警告\n下一行"}}
 ```
 
 ### 元数据、时间与顺序
@@ -110,17 +101,17 @@ DXVK/vkd3d 集中 logger 适配已实现，两个日志器已有 134/134 条完�
 
 `observed_at` 为来宾采集 UTC 时间；`source_time` 仅在来源具有可解释时间时填写，并说明精度与来源。只有日内本地时刻的文本保留在原文。宿主添加 `received_at` 表示完整有效记录接收时间；时钟域可能偏移。入库按宿主接收顺序，时间排序作为另一种视图。
 
-`stream_id` 由服务启动 UTC 时间与进程 PID 组合。`seq` 在该运行内对筛选通过的日志于入队前递增，表示聚合到达顺序。筛选在编号前发生，已编号丢弃可报告范围；后台重启换 stream_id，链路重连保持。序号缺口说明已编号记录缺失，采集入口以前的损失依赖其他证据。
+`stream_id` 由服务启动 UTC 时间与进程 PID 组合。`seq` 在该运行内对筛选通过的日志于入队前递增，表示聚合到达顺序。筛选在编号前发生，已编号丢弃可报告范围；后台重启换 stream_id，链路重连保持。序号缺口说明已编号记录缺失，采集入口以前的损失依赖其他证据。协议中的序号字段使用 DecimalU64 字符串。
 
 ### 排队与连接恢复
 
 每方向使用串行 writer，短写按完成字节续写当前行；控制优先选择下一条待写消息，当前 JSON 行保持边界。日志/控制队列均有有限预算。控制拥塞返回繁忙；日志拥塞淘汰最旧的尚未写入记录，累计 gap 后择机发送。
 
-连接建立或 parser 重置后，接收方从收到的首字节累计至 LF，首段若为完整有效记录即正常消费；若为残留半行且解析失败，计数后在该 LF 边界恢复，继续解析后续行。发送方启动或观察重连后先发 LF，再发 hello，接收方跳过空行。断连清理未完成半行，writer 收拢/取消旧 pending I/O，随后从完整记录开始；完整的旧排队记录仍可能到达。每条记录可独立解析，hello 丢失时后续 log 继续消费。
+连接建立或 parser 重置后，接收方从收到的首字节累计至 LF，首段若为完整有效记录即正常消费；若为残留半行且解析失败，计数后在该 LF 边界恢复，继续解析后续行。连接建立后，双方通过 `endpoint.info` 与 `rpc.discover` 交换端点身份、软件版本、协议版本和接收接口；协商就绪后，宿主通过 `status.get` 获取状态。断连清理未完成半行，writer 收拢/取消旧 pending I/O，随后从完整记录开始；完整的旧排队记录仍可能到达。每条 JSON-RPC 记录可独立解析，端点发现消息延迟到达时后续日志通知继续消费。
 
 按字节分帧后严格解码 UTF-8/JSON；坏行计数后继续，超长行流式丢弃到 LF。当前单记录上限为 1 MiB，日志队列为 2048 条/8 MiB，控制队列为 64 条；native 重组为 128 条/1 MiB、等待 5 秒。完整参数与来源处理见[来宾说明](virtio-serial-guest.md)，压力与重连实验继续核验预算。
 
-分帧验证覆盖首条完整 hello/log 的正常消费、残留半行加 LF 后的恢复、前导空行、坏行与超长行后的有效记录，以及缺少 hello 时的日志消费；对 UTF-8 字节流的任意读取切点核对相同结果。真实断连下的缺口另由集成实验观测。
+分帧验证覆盖首条完整状态或日志记录的正常消费、残留半行加 LF 后的恢复、前导空行、坏行与超长行后的有效记录，以及连接建立后的日志消费；对 UTF-8 字节流的任意读取切点核对相同结果。真实断连下的缺口另由集成实验观测。
 
 交付为有限缓冲下持续尽力发送。guest 写完成代表传输层消费；宿主完整接收与 SQLite 事务提交分别观测。断连、崩溃、采集或队列压力可造成缺口，精确可知时报告数量，否则 `count:null` 并记录时段/原因。筛选、本机开关、连接变化与解析异常保存为状态历史。
 
@@ -136,7 +127,7 @@ r9 完整安装 `/S /with-vioserial` 已发布 `oem64.inf` 并注册生产服务
 
 驱动包就绪、控制器运行、命名端口出现、host 后端打开分别探测。服务供 panel 查询状态；panel 的 Debug channel 页已实际显示四项设备状态及默认 On。端口连接状态、宿主解析和提交进度分别观测。
 
-Rust 公共消息类型位于 `debug-channel/protocol/src/lib.rs`，机器可读 schema 为 `debug-channel/protocol/schema.json`，字面测试向量与 schema 检查位于 `debug-channel/protocol/tests`。依赖版本记录于 `debug-channel/Cargo.lock`，构建接点为 `flake.nix`、根 CMake、CI 和安装器载荷；Windows 来宾 EXE 与 Linux 宿主程序已有构建产物。
+Rust 公共消息类型位于 `debug-channel/protocol/src/lib.rs`，Venera protocol v1 的 OpenRPC 文档与 JSON Schema 由生成示例产出，字面测试向量与协议检查位于 `debug-channel/protocol/tests`。依赖版本记录于 `debug-channel/Cargo.lock`，构建接点为 `flake.nix`、根 CMake、CI 和安装器载荷；Windows 来宾 EXE 与 Linux 宿主程序已有构建产物。
 
 ## 6. 证据与待验证事项
 

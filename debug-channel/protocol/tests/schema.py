@@ -10,6 +10,12 @@ validator = Draft202012Validator(schema)
 vectors = [json.loads(line) for line in (root / "tests/vectors.jsonl").read_text().splitlines()]
 for message in vectors:
     validator.validate(message)
+panel_report = json.loads((root / "tests/panel-report.json").read_text())
+validator.validate({
+    "major": 1, "type": "system.info.result", "request_id": "panel-report",
+    "ok": True, "collected_at": "2026-11-11T00:00:00Z", "session_id": 2,
+    **panel_report,
+})
 
 valid = [json.loads(line) for line in (root / "tests/valid.jsonl").read_text().splitlines()]
 for case in valid:

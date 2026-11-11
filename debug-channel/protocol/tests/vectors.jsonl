@@ -7,3 +7,6 @@
 {"major":1,"type":"gap","stream_id":"guest-run-1","reason":"queue_overflow","count":2,"first_seq":43,"last_seq":44}
 {"major":1,"type":"filter.reset","request_id":"host-3"}
 {"major":1,"type":"request.result","request_id":"host-3","operation":"filter.reset","ok":false,"error":{"code":"busy","message":"Try again"}}
+{"major":1,"type":"system.info.get","request_id":"sys-1"}
+{"major":1,"type":"system.info.result","request_id":"sys-1","ok":true,"collected_at":"2026-11-11T00:00:00Z","session_id":1,"sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Unavailable","bad":true,"warning":"请检查图形驱动。\n重新启动 Windows 后重试。"}]}]}
+{"major":1,"type":"system.info.result","request_id":"sys-2","ok":false,"collected_at":"2026-11-11T00:00:00Z","session_id":null,"sections":[],"error":{"code":"timeout","message":"System report collection timed out"}}

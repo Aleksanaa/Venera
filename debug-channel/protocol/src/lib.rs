@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod v1;
+
 pub const MAJOR: u32 = 1;
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1024 * 1024;
 
@@ -28,6 +30,13 @@ pub enum Message {
     },
     #[serde(rename = "status.get")]
     StatusGet { request_id: String },
+    #[serde(rename = "system.info.get")]
+    SystemInfoGet { request_id: String },
+    #[serde(rename = "system.info.result")]
+    SystemInfoResult {
+        #[serde(flatten)]
+        result: SystemInfoResult,
+    },
     #[serde(rename = "status")]
     Status {
         #[serde(flatten)]
@@ -123,6 +132,29 @@ pub struct Status {
 pub struct RequestError {
     pub code: String,
     pub message: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SystemInfoRow {
+    pub key: String,
+    pub value: String,
+    pub bad: bool,
+    pub warning: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SystemInfoSection {
+    pub title: String,
+    pub rows: Vec<SystemInfoRow>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SystemInfoResult {
+    pub request_id: String,
+    pub ok: bool,
+    pub collected_at: String,
+    #[serde(deserialize_with = "integer::optional_u32")]
+    pub session_id: Option<u32>,
+    pub sections: Vec<SystemInfoSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<RequestError>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RequestResult {
@@ -221,6 +253,8 @@ pub fn decode(line: &[u8]) -> Result<Envelope, DecodeError> {
     if ![
         "hello",
         "status.get",
+        "system.info.get",
+        "system.info.result",
         "status",
         "filter.set",
         "filter.reset",

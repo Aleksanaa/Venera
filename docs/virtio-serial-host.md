@@ -108,15 +108,51 @@ venera-debug-host export --database /home/user/.local/share/venera/history.db \
 
 导出逐行生成 JSON，每行包含宿主接收 UTC 时间 `received_at` 与原始消息对象 `message`，保留消息的附加字段。导出开始时确定末尾位置，按接收顺序逐条读取当时仍保留的历史；后台在导出期间继续接收和淘汰，读取到某条记录之前已被淘汰的历史会跳过。入库编号持久递增，导出的截止位置对应开始时的历史批次。需要完整保存某个当前历史批次时，先停止服务，再运行导出。用户保存的文件独立于后台历史容量维护。
 
-## 共享 Rust 接口
+## 浏览器日志工作台
 
-来宾通过 `venera-debug-protocol` 路径依赖共享契约。主要类型为 `Envelope`、`Message`、`LogRecord`、`ProcessIdentity`、`Filter`、`Target`、`Status`、`RequestResult` 和 `RequestError`。
+工作台提供历史浏览、实时跟随、全文搜索和记录详情。可按组件、消息级别、程序路径或 PID，以及接收时间范围筛选历史，再将当前条件匹配的记录导出为 JSONL。记录详情显示完整正文、程序信息和原始记录。
 
-`Envelope::new(Message)` 创建版本 1 消息；`encode` 生成带 LF 的 UTF-8 JSONL，`decode` 解析单条消息。`Framer::new(max_bytes)`、`push` 与 `reset` 支持增量读取；`push_raw` 同时返回类型化消息和完整 JSON 对象。`DecodeError` 区分编码、JSON、版本、未知类型与行长度错误。
+构建宿主程序与前端：
 
-`matches_filter(&filter, &record, &ancestors)` 进行纯函数匹配。`ancestors` 由调用方提供当前规则生命周期内已确认的祖先进程实例；规则管理与实例跟踪由来宾维护。路径输入使用来宾查询后的完整路径；Windows 构建调用系统 ordinal 大小写比较，Linux 构建采用 Unicode 小写比较。
+```sh
+# 从仓库根目录运行
+nix develop --command cargo build --manifest-path debug-channel/Cargo.toml \
+  -p venera-debug-host --features web
+cd debug-channel/web
+corepack yarn install --immutable
+corepack yarn build
+cd ../..
+```
 
-机器可读契约见 `debug-channel/protocol/schema.json`；字面样本位于 `debug-channel/protocol/tests/vectors.jsonl`。
+启动工作台后，在浏览器打开 <http://127.0.0.1:8787>：
+
+```sh
+debug-channel/target/debug/venera-debug-host web \
+  --database .harness/vm-debug/live.sqlite \
+  --control .harness/vm-debug/host-control.sock \
+  --assets debug-channel/web/dist
+```
+
+将 `--database` 替换为接收后台使用的历史库路径。现有 `receive` 后台继续保存新记录，工作台显示同一份历史。开启实时跟随后，新记录会追加到列表；加载更早记录可向前浏览。页面筛选帮助查阅已保存的记录，Windows 控制面板中的调试通道设置管理采集与转发。
+
+工具栏中的筛选面板可展开并对照事件列表调整条件。表头分隔线调整列宽，列表与详情之间的分隔线调整详情区域宽度；分隔线也支持方向键操作。详情中的“概览”“元数据”“原始记录”分别展示正文与程序信息、完整字段及可复制的原始内容，内容区域支持滚动。
+
+侧边栏的“系统信息”通过 `--control` 指定的接收后台查询当前连接和 Windows 系统报告。控制路径应与 `receive --control` 一致。报告沿用 Venera Panel 的分区，展示驱动、图形宿主、客户机、图形 API、显存和设置，并标注采集时间与会话。刷新按钮重新采集报告。
+
+## Venera protocol v1
+
+宿主与来宾通过 VirtIO Serial 交换 UTF-8 JSONL。每行是一条 JSON-RPC 2.0 消息，公开接口文档采用 OpenRPC 1.4.1；方法包含 `status.get`、`filter.set`、`filter.reset`、`system.info.get`、`rpc.discover`、`status.changed`、`log` 与 `gap`。
+
+`rpc.discover` 返回当前端点的 OpenRPC 文档。请求使用字符串 ID 与具名参数对象，结果携带相同 ID，通知直接携带方法名和参数。序号、修订、计数、持续毫秒和 FILETIME 使用 DecimalU64 字符串；PID、线程 ID 和会话 ID 使用 JSON 整数。详细接收端、数据表示和验证入口见 [Venera protocol v1](venera-protocol-v1.md)。
+
+协议文档由共享 Rust 类型生成，生成与检查命令为：
+
+```bash
+cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema
+cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema -- --check
+```
+
+宿主后台将 JSON-RPC 消息解析为日志、状态、连接和缺口记录，持续写入 SQLite；浏览器工作台通过业务接口读取同一份历史并提供实时浏览、筛选、详情与 JSONL 导出。
 
 ## 验证
 

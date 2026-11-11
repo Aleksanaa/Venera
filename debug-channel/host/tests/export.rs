@@ -5,6 +5,48 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_venera-debug-host");
 
 #[test]
+fn export_mixed_history_keeps_rpc_notifications() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.db");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE events(id INTEGER PRIMARY KEY,received_at TEXT NOT NULL,message TEXT NOT NULL,raw_message TEXT)").unwrap();
+    let raw = "{\n \"jsonrpc\": \"2.0\", \"method\": \"log\", \"params\": {\"stream_id\":\"stream\",\"seq\":\"18446744073709551615\",\"observed_at\":\"2026-11-10T08:00:01Z\",\"source\":\"driver\",\"component\":\"UMD\",\"level\":\"ERROR\",\"raw_level\":\"error\",\"counter\":18446744073709551615,\"text\":\"中文  🙂\\nnext\"} }";
+    db.execute(
+        "INSERT INTO events VALUES(1,'2026-11-10T08:00:01Z',?1,?2)",
+        params![r#"{"type":"log","text":"projection"}"#, raw],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO events VALUES(2,'2026-11-10T08:00:02Z','{\"text\":\"legacy\"}',NULL)",
+        [],
+    )
+    .unwrap();
+    let output = Command::new(BIN)
+        .args(["export", "--database"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let rows: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            json!({"received_at":"2026-11-10T08:00:01Z","message":{"jsonrpc":"2.0","method":"log","params":{"stream_id":"stream","seq":"18446744073709551615","observed_at":"2026-11-10T08:00:01Z","source":"driver","component":"UMD","level":"ERROR","raw_level":"error","counter":18446744073709551615u64,"text":"中文  🙂\nnext"}}}),
+            json!({"received_at":"2026-11-10T08:00:02Z","message":{"text":"legacy"}}),
+        ]
+    );
+    assert!(text.contains("\"counter\":18446744073709551615"));
+}
+
+#[test]
 fn export_selects_received_time_interval_through_cli() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.db");

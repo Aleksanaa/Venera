@@ -3,6 +3,35 @@ use venera_debug_protocol::*;
 const VECTORS: &str = include_str!("vectors.jsonl");
 
 #[test]
+fn panel_report_rows_preserve_warning_text_and_findings() {
+    let report: serde_json::Value =
+        serde_json::from_str(include_str!("panel-report.json")).unwrap();
+    let sections: Vec<SystemInfoSection> =
+        serde_json::from_value(report["sections"].clone()).unwrap();
+    assert_eq!(
+        sections,
+        vec![SystemInfoSection {
+            title: "Host".into(),
+            rows: vec![
+                SystemInfoRow {
+                    key: "GPU".into(),
+                    value: "Unknown: Venus did not answer".into(),
+                    bad: true,
+                    warning: "请检查图形驱动。\n重新启动 Windows 后重试。".into()
+                },
+                SystemInfoRow {
+                    key: "Renderer".into(),
+                    value: "Venus".into(),
+                    bad: false,
+                    warning: "".into()
+                },
+            ],
+        }]
+    );
+    assert_eq!(serde_json::json!({"sections": sections}), report);
+}
+
+#[test]
 fn shared_schema_cases_decode_to_literal_fields() {
     for line in include_str!("valid.jsonl").lines() {
         let case: serde_json::Value = serde_json::from_str(line).unwrap();
@@ -125,6 +154,40 @@ fn expected_vectors() -> Vec<Envelope> {
                 error: Some(RequestError {
                     code: "busy".into(),
                     message: "Try again".into(),
+                }),
+            },
+        }),
+        Envelope::new(Message::SystemInfoGet {
+            request_id: "sys-1".into(),
+        }),
+        Envelope::new(Message::SystemInfoResult {
+            result: SystemInfoResult {
+                request_id: "sys-1".into(),
+                ok: true,
+                collected_at: "2026-11-11T00:00:00Z".into(),
+                session_id: Some(1),
+                sections: vec![SystemInfoSection {
+                    title: "Graphics".into(),
+                    rows: vec![SystemInfoRow {
+                        key: "Adapter".into(),
+                        value: "Unavailable".into(),
+                        bad: true,
+                        warning: "请检查图形驱动。\n重新启动 Windows 后重试。".into(),
+                    }],
+                }],
+                error: None,
+            },
+        }),
+        Envelope::new(Message::SystemInfoResult {
+            result: SystemInfoResult {
+                request_id: "sys-2".into(),
+                ok: false,
+                collected_at: "2026-11-11T00:00:00Z".into(),
+                session_id: None,
+                sections: vec![],
+                error: Some(RequestError {
+                    code: "timeout".into(),
+                    message: "System report collection timed out".into(),
                 }),
             },
         }),

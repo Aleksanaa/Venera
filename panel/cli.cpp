@@ -23,6 +23,7 @@ const wchar_t kHelp[] =
     L"  (none)     Open the control panel.\n"
     L"  /info      Print the system report: the driver, the host, the guest with its displays, and\n"
     L"             what each graphics API offers. The exit code is 1 when something in it does not work.\n"
+    L"      /json      print the report as UTF-8 JSON\n"
     L"  /probe     Try each graphics API on the VirtIO GPU and print what it found as key=value lines\n"
     L"             (the check behind /info).\n"
     L"  /test      List the tests.\n"
@@ -338,11 +339,15 @@ int runCommandLine(int argc, wchar_t** argv, int* page)
             return 0;
         }
         if (o == L"info") {
+            bool json = false;
+            for (int j = i + 1; j < argc; j++)
+                if (option(argv[j]) == L"json")
+                    json = true;
             Output out(STD_OUTPUT_HANDLE);
             SystemInfo info = readSystemInfo();
             ProbeResult probe = probeNow(kProbeTimeoutMs);
             std::vector<InfoSection> report = describe(info, &probe);
-            std::wstring text = reportText(report);
+            std::wstring text = json ? widen(reportJson(report)) + L"\n" : reportText(report);
             for (size_t p; (p = text.find(L"\r\n")) != std::wstring::npos;)
                 text.replace(p, 2, L"\n");
             out.print(text);
