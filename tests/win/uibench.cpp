@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Replays the same desktop interactions on every build, so UI smoothness can be compared between builds instead of
-// judged by feel. Each scenario runs for a fixed time; for each one it writes its start and end (system time, the
-// clock ETW timestamps use, so a trace taken meanwhile can be cut into scenarios), the frames DWM composed, and the
-// CPU time used by DWM and by the whole system.
+// judged by feel. Each scenario runs for a fixed time; for each one it writes its start and end (the TSC, the clock
+// venera-trace timestamps with, so a trace taken meanwhile can be cut into scenarios), the frames DWM composed, and
+// the CPU time used by DWM and by the whole system.
 //   uibench [--out FILE] [scenario...]
 // Scenarios (all of them, in this order, by default):
 //   idle    nothing for 5 s: what DWM costs on a still desktop
@@ -13,6 +13,7 @@
 // Run it in the interactive user's session (input and DWM animations need the user's desktop).
 #include <windows.h>
 #include <dwmapi.h>
+#include <intrin.h>
 #include <tlhelp32.h>
 
 #include <cmath>
@@ -107,7 +108,7 @@ DWORD dwm_pid()
 
 // What a scenario is measured by, taken before and after it.
 struct Sample {
-    uint64_t time;
+    uint64_t time, tsc;
     uint64_t frames, refreshes;
     uint64_t sys_idle, sys_kernel, sys_user;  // kernel includes idle
     uint64_t dwm_cpu;                         // 0 when DWM's times cannot be read
@@ -119,6 +120,7 @@ Sample sample()
 {
     Sample s = {};
     s.time = now_filetime();
+    s.tsc = __rdtsc();
     DWM_TIMING_INFO info = {};
     info.cbSize = sizeof(info);
     if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &info))) {
@@ -144,7 +146,7 @@ void report(const char* name, const Sample& a, const Sample& b)
     std::fprintf(out,
                  "scenario %s start=%llu end=%llu secs=%.2f dwm_frames=%llu dwm_fps=%.1f refreshes=%llu "
                  "dwm_cpu_ms=%.0f sys_busy_pct=%.1f\n",
-                 name, static_cast<unsigned long long>(a.time), static_cast<unsigned long long>(b.time), secs,
+                 name, static_cast<unsigned long long>(a.tsc), static_cast<unsigned long long>(b.tsc), secs,
                  static_cast<unsigned long long>(b.frames - a.frames), (b.frames - a.frames) / secs,
                  static_cast<unsigned long long>(b.refreshes - a.refreshes),
                  dwm ? (b.dwm_cpu - a.dwm_cpu) / 1e4 : -1.0, total ? 100.0 * busy / total : 0.0);
