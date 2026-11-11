@@ -1,0 +1,15 @@
+[package]
+name = "venera-debug-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+venera-debug-protocol.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+[dev-dependencies]
+tempfile = "3"

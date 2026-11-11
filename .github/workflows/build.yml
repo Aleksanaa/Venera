@@ -50,6 +50,15 @@ jobs:
       - name: Prepare the dev shell
         run: nix develop -c ccache -z
 
+      - name: Cache the VirtIO serial release
+        uses: actions/cache@v4
+        with:
+          path: build/vioserial-cache
+          key: virtio-win-0.1.302-1
+
+      - name: Fetch the VirtIO serial driver
+        run: nix develop -c scripts/fetch-vioserial.sh
+
       - name: Build the Venus ICD and the OpenGL driver
         run: nix develop -c icd/build.sh
 
@@ -68,7 +77,7 @@ jobs:
           # A tag's build is a release build; any other a develop build.
           release=${{ startsWith(github.ref, 'refs/tags/v') && 'ON' || 'OFF' }}
           nix develop -c sh -c "cmake -S . -B build/win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
-            -DVENERA_RELEASE=$release && cmake --build build/win"
+            -DVENERA_RELEASE=$release -DVENERA_VIOSERIAL_DIR=$PWD/build/vioserial/package && cmake --build build/win"
           version=$(cat build/win/setup/version.txt)
           echo "VERSION=$version" >> "$GITHUB_ENV"
           cp build/win/setup/venera-setup.exe "venera-setup-$version.exe"

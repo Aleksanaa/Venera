@@ -83,7 +83,9 @@ bool is_virtio_gpu(HDEVINFO set, SP_DEVINFO_DATA* dev);
 using Progress = std::function<void(int percent, const std::wstring& step)>;
 
 // install.cpp. Both return whether Windows needs a restart; both throw Failure.
-bool install(const SystemState& state, const std::wstring& version, const Progress& progress);
+bool install(const SystemState& state, const std::wstring& version, const Progress& progress, bool vioserial);
+bool vioserial_available();
+bool install_vioserial(const Progress& progress);
 bool uninstall(const Progress& progress);
 // At the boot after an install (`/cleanup`): removes the packages the install replaced, once the device runs on ours.
 void cleanup();
@@ -101,6 +103,8 @@ struct Page {
     std::wstring status;  // above the progress bar
     std::vector<std::pair<int, std::wstring>> buttons;  // right-aligned; the first is the default
     size_t default_index = 0;  // the button Enter presses
+    std::wstring option;
+    bool option_checked = true;
 };
 
 class Wizard {
@@ -109,6 +113,7 @@ public:
     ~Wizard();
     // Shows `page` until a button is pressed; returns its id (IDCANCEL for the window's close box).
     int ask(const Page& page);
+    bool option_checked() const;
     // Shows the progress page and runs `work` on a thread meanwhile; returns its result, or sets `error`.
     bool run(const std::wstring& heading, const std::wstring& subheading,
              const std::function<bool(const Progress&)>& work, std::wstring& error);

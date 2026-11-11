@@ -4,6 +4,7 @@
 # venera-panel.com (shim.c) is its console face for shells.
 enable_language(RC)
 add_executable(venera-panel WIN32 main.cpp ui.cpp overview.cpp testspage.cpp logspage.cpp logcapture.cpp
+    debugchannel.cpp debugpage.cpp
     settingspage.cpp toolspage.cpp aboutpage.cpp update.cpp fpsoverlay.cpp report.cpp sysinfo.cpp probe.cpp cli.cpp
     tests/runner.cpp tests/d3d12.cpp tests/d3d11.cpp tests/d3d9.cpp tests/vulkan.cpp panel.rc)
 target_compile_definitions(venera-panel PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00

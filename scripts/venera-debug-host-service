@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Render a Venera user service using deployment paths."""
+import argparse
+from pathlib import Path
+
+
+def quoted(value):
+    value = str(value)
+    if any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("deployment paths must contain printable characters")
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%').replace('$', '$$') + '"'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--binary', required=True, type=Path)
+    parser.add_argument('--socket', required=True, type=Path)
+    parser.add_argument('--control', required=True, type=Path)
+    parser.add_argument('--database', required=True, type=Path)
+    parser.add_argument('--max-bytes', required=True, type=int)
+    parser.add_argument('--output', required=True, type=Path)
+    args = parser.parse_args()
+    if args.max_bytes < 65536:
+        parser.error('--max-bytes must be at least 65536')
+    paths = [args.binary, args.socket, args.control, args.database]
+    if any(not path.is_absolute() for path in paths):
+        parser.error('deployment paths must be absolute')
+    command = [args.binary, 'receive', '--socket', args.socket, '--control', args.control,
+               '--database', args.database, '--max-bytes', args.max_bytes]
+    template = Path(__file__).resolve().parents[1] / 'debug-channel/host/systemd/venera-debug-host.service.in'
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(template.read_text().replace('@EXEC_START@', ' '.join(map(quoted, command))))
+    print(args.output)
+
+
+if __name__ == '__main__':
+    main()

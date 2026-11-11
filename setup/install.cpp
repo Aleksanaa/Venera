@@ -20,13 +20,17 @@
 // only serves PnP, which wants a publisher it trusts. That is why the certificate can be local: its private key is
 // created on this computer, cannot be exported, and nobody else holds one that Windows here trusts.
 #include "setup.h"
+#include "uninstaller-copy.h"
+#include "vioserial-state.h"
 
+#include <cfgmgr32.h>
 #include <cryptuiapi.h>
 #include <mscat.h>
 #include <ncrypt.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 #include <setupapi.h>
 #include <wincrypt.h>
 
@@ -60,9 +64,7 @@ std::wstring install_dir()
 
 // --- The payload
 
-// Applies image 1 of the WIM at `wim` into `dir` with Windows' WIMGAPI (wimgapi.dll in System32), which reads the solid
-// LZMS WIMs (ESD files) the build makes; `temp` is its scratch directory. MinGW has neither its header nor an import
-// library. Returns the error, 0 on success.
+// Applies image 1 with Windows' WIMGAPI; temp is its scratch directory.
 DWORD apply_wim(const std::wstring& wim, const std::wstring& dir, const std::wstring& temp)
 {
     using WimCreateFile = HANDLE(WINAPI*)(PCWSTR, DWORD, DWORD, DWORD, DWORD, PDWORD);
@@ -71,8 +73,11 @@ DWORD apply_wim(const std::wstring& wim, const std::wstring& dir, const std::wst
     using WimApplyImage = BOOL(WINAPI*)(HANDLE, PCWSTR, DWORD);
     using WimCloseHandle = BOOL(WINAPI*)(HANDLE);
     HMODULE lib = LoadLibraryExW(L"wimgapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!lib)
-        return GetLastError();
+    if (!lib) {
+        DWORD error = GetLastError();
+        log(L"Loading WIMGAPI failed: " + error_text(error));
+        return error;
+    }
     auto create_file = reinterpret_cast<WimCreateFile>(GetProcAddress(lib, "WIMCreateFile"));
     auto set_temporary_path = reinterpret_cast<WimSetTemporaryPath>(GetProcAddress(lib, "WIMSetTemporaryPath"));
     auto load_image = reinterpret_cast<WimLoadImage>(GetProcAddress(lib, "WIMLoadImage"));
@@ -84,14 +89,32 @@ DWORD apply_wim(const std::wstring& wim, const std::wstring& dir, const std::wst
         DWORD created = 0;
         HANDLE h = create_file(wim.c_str(), GENERIC_READ, OPEN_EXISTING, 0, 0, &created);
         HANDLE image = nullptr;
-        if (!h || !set_temporary_path(h, temp.c_str()) || !(image = load_image(h, 1)) ||
-            !apply_image(image, dir.c_str(), 0))
+        const wchar_t* stage = L"WIMCreateFile";
+        if (h) {
+            stage = L"WIMSetTemporaryPath";
+            if (set_temporary_path(h, temp.c_str())) {
+                stage = L"WIMLoadImage";
+                image = load_image(h, 1);
+                if (image) {
+                    stage = L"WIMApplyImage";
+                    if (apply_image(image, dir.c_str(), 0))
+                        stage = nullptr;
+                }
+            }
+        }
+        if (stage) {
             error = GetLastError();
+            log(format(L"%ls failed for %ls: %ls", stage, wim.c_str(), error_text(error).c_str()));
+        } else {
+            log(L"WIMApplyImage completed for " + wim);
+        }
         if (image)
             close_handle(image);
         if (h)
             close_handle(h);
     }
+    if (error == ERROR_PROC_NOT_FOUND)
+        log(L"Resolving WIMGAPI entry points failed: " + error_text(error));
     FreeLibrary(lib);
     return error;
 }
@@ -124,7 +147,8 @@ std::vector<std::wstring> unpack(const std::wstring& dir)
 
     std::vector<std::wstring> files;
     for (const auto& entry : fs::directory_iterator(dir))
-        files.push_back(entry.path().filename().wstring());
+        if (entry.is_regular_file())
+            files.push_back(entry.path().filename().wstring());
     log(format(L"Unpacked %zu files into %ls", files.size(), dir.c_str()));
     return files;
 }
@@ -440,6 +464,146 @@ void delete_our_service(const wchar_t* name)
         CloseServiceHandle(scm);
 }
 
+bool our_debug_command(const wchar_t* command)
+{
+    int count = 0;
+    auto args = command ? CommandLineToArgvW(command, &count) : nullptr;
+    bool ours = args && count == 2 &&
+                _wcsicmp(fs::path(args[0]).filename().c_str(), L"venera-debug-guest.exe") == 0 &&
+                _wcsicmp(args[1], L"service") == 0;
+    LocalFree(args);
+    return ours;
+}
+
+void stop_debug_service(bool remove)
+{
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm)
+        fail(L"Opening Windows services failed");
+    SC_HANDLE service = OpenServiceW(scm, L"VeneraDebugGuest",
+                                    SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_STOP | DELETE);
+    DWORD error = service ? ERROR_SUCCESS : GetLastError();
+    if (service) {
+        std::vector<BYTE> buf(8192);
+        DWORD size = 0;
+        auto config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data());
+        if (!QueryServiceConfigW(service, config, buf.size(), &size)) {
+            error = GetLastError();
+        } else if (!our_debug_command(config->lpBinaryPathName)) {
+            error = ERROR_SERVICE_EXISTS;
+        } else {
+            SERVICE_STATUS_PROCESS status{};
+            const ULONGLONG deadline = GetTickCount64() + 30000;
+            bool requested = false;
+            for (;;) {
+                if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                                          reinterpret_cast<BYTE*>(&status), sizeof(status), &size)) {
+                    error = GetLastError();
+                    break;
+                }
+                if (status.dwCurrentState == SERVICE_STOPPED)
+                    break;
+                if (!requested && status.dwCurrentState != SERVICE_STOP_PENDING) {
+                    SERVICE_STATUS ignored{};
+                    if (!ControlService(service, SERVICE_CONTROL_STOP, &ignored)) {
+                        error = GetLastError();
+                        if (error != ERROR_SERVICE_NOT_ACTIVE)
+                            break;
+                        error = ERROR_SUCCESS;
+                    }
+                    requested = true;
+                }
+                if (GetTickCount64() >= deadline) {
+                    error = ERROR_SERVICE_REQUEST_TIMEOUT;
+                    break;
+                }
+                Sleep(100);
+            }
+            if (!error && remove && !DeleteService(service))
+                error = GetLastError();
+        }
+        CloseServiceHandle(service);
+    }
+    CloseServiceHandle(scm);
+    if (error != ERROR_SUCCESS && error != ERROR_SERVICE_DOES_NOT_EXIST)
+        fail(remove ? L"Removing the debug collector failed" : L"Stopping the debug collector failed", error);
+}
+
+std::vector<wchar_t> serial_property(HDEVINFO set, SP_DEVINFO_DATA& dev, DWORD property)
+{
+    DWORD bytes = 0, type = 0;
+    SetupDiGetDeviceRegistryPropertyW(set, &dev, property, &type, nullptr, 0, &bytes);
+    if (!bytes)
+        return {};
+    std::vector<wchar_t> value(bytes / sizeof(wchar_t) + 2, L'\0');
+    if (!SetupDiGetDeviceRegistryPropertyW(set, &dev, property, &type,
+                                          reinterpret_cast<BYTE*>(value.data()), bytes, nullptr) ||
+        (type != REG_SZ && type != REG_MULTI_SZ))
+        return {};
+    return value;
+}
+
+bool serial_controllers_ready()
+{
+    HDEVINFO set = SetupDiGetClassDevsW(nullptr, L"PCI", nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (set == INVALID_HANDLE_VALUE) {
+        log(L"VirtIO serial controller enumeration failed: " + error_text(GetLastError()));
+        return false;
+    }
+    std::vector<vioserial::Controller> controllers;
+    SP_DEVINFO_DATA dev{sizeof(dev)};
+    DWORD enumeration_error = ERROR_SUCCESS;
+    for (DWORD index = 0;; ++index) {
+        if (!SetupDiEnumDeviceInfo(set, index, &dev)) {
+            enumeration_error = GetLastError();
+            break;
+        }
+        auto ids = serial_property(set, dev, SPDRP_HARDWAREID);
+        bool match = false;
+        for (const wchar_t* id = ids.data(); !ids.empty() && *id; id += wcslen(id) + 1)
+            match |= vioserial::matches(id);
+        if (!match) {
+            if (ids.empty()) {
+                wchar_t instance[MAX_DEVICE_ID_LEN]{};
+                SetupDiGetDeviceInstanceIdW(set, &dev, instance, ARRAYSIZE(instance), nullptr);
+                log(format(L"VirtIO serial hardware ID query failed for PCI device %ls", instance));
+                enumeration_error = ERROR_INVALID_DATA;
+                break;
+            }
+            continue;
+        }
+        auto service = serial_property(set, dev, SPDRP_SERVICE);
+        auto driver = serial_property(set, dev, SPDRP_DRIVER);
+        ULONG status = 0, problem = 0;
+        CONFIGRET cr = CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0);
+        controllers.push_back({!service.empty() && vioserial::equal_id(service.data(), L"VirtioSerial"),
+                               !driver.empty() && driver[0] != L'\0', cr == CR_SUCCESS,
+                               (status & DN_STARTED) != 0, problem});
+        wchar_t instance[MAX_DEVICE_ID_LEN]{};
+        SetupDiGetDeviceInstanceIdW(set, &dev, instance, ARRAYSIZE(instance), nullptr);
+        log(format(L"VirtIO serial controller %ls: hardware=%ls service=%ls driver=%ls status=0x%lx "
+                   L"problem=%lu query=%lu", instance, ids.data(), service.empty() ? L"" : service.data(),
+                   driver.empty() ? L"" : driver.data(), status, problem, static_cast<unsigned long>(cr)));
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    bool ready = vioserial::ready(controllers, enumeration_error == ERROR_NO_MORE_ITEMS);
+    log(format(L"VirtIO serial readiness: controllers=%zu enumeration=%lu ready=%u", controllers.size(),
+               enumeration_error, static_cast<unsigned>(ready)));
+    return ready;
+}
+
+bool add_vioserial(const std::wstring& dir)
+{
+    const auto inf = dir + L"\\vioserial\\vioser.inf";
+    if (!fs::is_regular_file(inf))
+        fail(L"The VirtIO serial driver package is unavailable in this installer", ERROR_FILE_NOT_FOUND);
+    DWORD code = run(L"pnputil.exe", L"/add-driver \"" + inf + L"\" /install");
+    bool ready = code == ERROR_NO_MORE_ITEMS && serial_controllers_ready();
+    if (!vioserial::accepted(code, ready))
+        fail(L"Installing the VirtIO serial driver failed", code);
+    return code == ERROR_SUCCESS_REBOOT_REQUIRED || code == ERROR_SUCCESS_REBOOT_INITIATED;
+}
+
 // Earlier builds called the product vgd (and its settings key vgd3d12). Installing over one removes its uninstaller,
 // its Apps & features entry, its settings, log and staging directory, its certificate, and a cleanup it scheduled, so
 // that only Venera is left. Its driver package goes with the other packages the cleanup removes at the next boot.
@@ -489,8 +653,11 @@ void register_product(const std::wstring& version, DWORD size_kb)
     std::wstring exe = dir + L"\\" + kSetupName;
     std::error_code ec;
     fs::create_directories(dir, ec);
-    if (!fs::equivalent(self_path(), exe, ec) && !CopyFileW(self_path().c_str(), exe.c_str(), FALSE))
-        fail(L"Copying the uninstaller to " + exe + L" failed");
+    if (!fs::equivalent(self_path(), exe, ec)) {
+        DWORD error = copy_uninstaller(self_path().c_str(), exe.c_str());
+        if (error != ERROR_SUCCESS)
+            fail(L"Copying the uninstaller to " + exe + L" failed", error);
+    }
 
     HKEY key;
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
@@ -710,7 +877,29 @@ void schedule_cleanup()
 
 }  // namespace
 
-bool install(const SystemState& state, const std::wstring& version, const Progress& progress)
+bool vioserial_available()
+{
+#ifdef VENERA_HAS_VIOSERIAL
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool install_vioserial(const Progress& progress)
+{
+    const auto dir = staging_dir();
+    progress(10, L"Unpacking the VirtIO serial driver package");
+    unpack(dir);
+    progress(50, L"Installing the VirtIO serial driver");
+    bool restart = add_vioserial(dir);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    progress(100, L"Done");
+    return restart;
+}
+
+bool install(const SystemState& state, const std::wstring& version, const Progress& progress, bool vioserial)
 {
     std::wstring dir = staging_dir();
     progress(5, L"Unpacking the driver package");
@@ -718,6 +907,13 @@ bool install(const SystemState& state, const std::wstring& version, const Progre
     DWORD size_kb = 0;
     for (const auto& f : files)
         size_kb += fs::file_size(dir + L"\\" + f) / 1024;
+
+    if (vioserial) {
+        progress(15, L"Installing the VirtIO serial driver");
+        add_vioserial(dir);
+    }
+    progress(20, L"Stopping the debug collector for the update");
+    stop_debug_service(false);
 
     progress(25, state.cert_exists ? L"Checking the signing certificate" : L"Creating the signing certificate");
     PCCERT_CONTEXT cert = signing_cert();
@@ -787,6 +983,8 @@ void cleanup()
 
 bool uninstall(const Progress& progress)
 {
+    progress(5, L"Removing the debug collector");
+    stop_debug_service(true);
     progress(10, L"Switching the VirtIO GPU to Microsoft Basic Display, from the next boot");
     int devices = install_on_devices(inf_dir() + L"\\display.inf", true);
     log(format(L"Switched %d VirtIO GPU(s) to Microsoft Basic Display; it starts at the next boot", devices));

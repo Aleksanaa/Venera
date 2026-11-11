@@ -1,0 +1,14 @@
+[Unit]
+Description=Venera debug collection
+
+[Service]
+Type=simple
+RuntimeDirectory=venera
+RuntimeDirectoryPreserve=yes
+ExecStart=@EXEC_START@
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=default.target
