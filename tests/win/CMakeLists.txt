@@ -50,6 +50,6 @@ target_link_options(uibench PRIVATE -static -static-libgcc -static-libstdc++)
 
 # Records performance traces (tests/perf/vtrace.py drives it).
 add_executable(venera-trace venera-trace.cpp)
-target_link_libraries(venera-trace PRIVATE tdh advapi32)
+target_link_libraries(venera-trace PRIVATE tdh advapi32 nlohmann_json::nlohmann_json)
 target_compile_options(venera-trace PRIVATE -Wall -Wextra)
 target_link_options(venera-trace PRIVATE -static -static-libgcc -static-libstdc++)
