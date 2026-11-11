@@ -134,9 +134,6 @@ std::wstring debugQuote(const std::wstring& value) {
     }
     out.append(slashes*2,L'\\'); return out+L'"';
 }
-std::string debugJsonString(const std::wstring& value) {
-    return debugjson::quote(narrow(value));
-}
 DebugStatus queryDebug(const std::vector<std::wstring>& args) {
     DebugStatus result; std::string output;
     std::wstring error=run(args,15000,nullptr,[&](const std::string& line) { if(output.size()<2*1024*1024) output+=line; });

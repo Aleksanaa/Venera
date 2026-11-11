@@ -12,7 +12,6 @@ struct DebugStatus {
 };
 DebugStatus queryDebug(const std::vector<std::wstring>& args = {L"status", L"--json"});
 std::wstring debugQuote(const std::wstring& value);
-std::string debugJsonString(const std::wstring& value);
 class GuestLogs {
 public:
     ~GuestLogs() { stop(); }

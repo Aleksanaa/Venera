@@ -3,6 +3,7 @@
 # the graphics probe and the tests (tests/), which the window and the command line run as child processes of it.
 # venera-panel.com (shim.c) is its console face for shells.
 enable_language(RC)
+find_package(nlohmann_json CONFIG REQUIRED)
 add_executable(venera-panel WIN32 main.cpp ui.cpp overview.cpp testspage.cpp logspage.cpp logcapture.cpp
     debugchannel.cpp debugpage.cpp
     settingspage.cpp toolspage.cpp aboutpage.cpp update.cpp fpsoverlay.cpp report.cpp sysinfo.cpp probe.cpp cli.cpp
@@ -17,7 +18,7 @@ set_source_files_properties(sysinfo.cpp tests/d3d11.cpp PROPERTIES COMPILE_OPTIO
     "-idirafter;${VENERA_WINKITS_DIR}/sdk/c/Include/10.0.26100.0/shared")
 # gdi32 first: d3d11.dll also exports D3DKMT entry points, stubs that succeed without asking the KMD, and the first
 # library naming a symbol is the one bound.
-target_link_libraries(venera-panel PRIVATE venera-vulkan-headers venera-directx-headers gdi32
+target_link_libraries(venera-panel PRIVATE nlohmann_json::nlohmann_json venera-vulkan-headers venera-directx-headers gdi32
     d2d1 dwrite dwmapi d3d12 d3d11 d3d9 dxgi dxguid opengl32 setupapi cfgmgr32 shcore ntdll psapi user32 shell32
     advapi32 comdlg32 winhttp bcrypt version)
 target_link_options(venera-panel PRIVATE -municode -s -static -static-libgcc -static-libstdc++)

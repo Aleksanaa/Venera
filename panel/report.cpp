@@ -296,26 +296,16 @@ std::wstring reportText(const std::vector<InfoSection>& sections)
 
 std::string reportJson(const std::vector<InfoSection>& sections)
 {
-    std::string json = "{\"sections\":[";
-    bool firstSection = true;
+    auto entries = debugjson::Json::array();
     for (const InfoSection& s : sections) {
-        if (!firstSection)
-            json += ',';
-        firstSection = false;
-        json += "{\"title\":" + debugjson::quote(narrow(s.title)) + ",\"rows\":[";
-        bool firstRow = true;
+        auto rows = debugjson::Json::array();
         for (const InfoRow& r : s.rows) {
-            if (!firstRow)
-                json += ',';
-            firstRow = false;
-            json += "{\"key\":" + debugjson::quote(narrow(r.key)) +
-                    ",\"value\":" + debugjson::quote(narrow(r.value)) +
-                    ",\"bad\":" + (r.bad ? "true" : "false") +
-                    ",\"warning\":" + debugjson::quote(narrow(r.warning)) + "}";
+            rows.push_back({{"key", narrow(r.key)}, {"value", narrow(r.value)},
+                            {"bad", r.bad}, {"warning", narrow(r.warning)}});
         }
-        json += "]}";
+        entries.push_back({{"title", narrow(s.title)}, {"rows", std::move(rows)}});
     }
-    return json + "]}";
+    return debugjson::Json({{"sections", std::move(entries)}}).dump();
 }
 
 bool anyProblem(const std::vector<InfoSection>& sections)
