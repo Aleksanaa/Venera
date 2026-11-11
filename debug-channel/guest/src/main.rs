@@ -3,7 +3,12 @@ mod ancestry;
 #[cfg(any(windows, test))]
 mod collector;
 #[cfg(any(windows, test))]
+mod serial_connection;
+#[cfg(any(windows, test))]
 mod state;
+#[cfg(all(test, not(windows)))]
+#[path = "windows/system_info_pending.rs"]
+mod system_info_pending;
 #[cfg(windows)]
 mod windows;
 

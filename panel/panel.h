@@ -414,6 +414,7 @@ struct InfoSection {
 // `probe` null: the probe is still running.
 std::vector<InfoSection> describe(const SystemInfo& info, const ProbeResult* probe);
 std::wstring reportText(const std::vector<InfoSection>& sections);
+std::string reportJson(const std::vector<InfoSection>& sections);
 bool anyProblem(const std::vector<InfoSection>& sections);
 // The host GPU and its Vulkan driver from Venus' device name, "Virtio-GPU Venus (<GPU> (<driver>))".
 void hostGpu(const ProbeResult* probe, std::wstring& gpu, std::wstring& driver);

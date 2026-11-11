@@ -1,0 +1,525 @@
+{
+  "openrpc": "1.4.1",
+  "info": {
+    "title": "Venera guest",
+    "version": "1.0.0"
+  },
+  "methods": [
+    {
+      "name": "endpoint.info",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputEndpointInfo"
+        }
+      }
+    },
+    {
+      "name": "status.get",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputStatus"
+        }
+      }
+    },
+    {
+      "name": "filter.set",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "filter",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/InputFilter"
+          }
+        },
+        {
+          "name": "duration_ms",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputStatus"
+        }
+      }
+    },
+    {
+      "name": "filter.reset",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputStatus"
+        }
+      }
+    },
+    {
+      "name": "system.info.get",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputSystemInfo"
+        }
+      }
+    },
+    {
+      "name": "rpc.discover",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputDiscovery"
+        }
+      }
+    }
+  ],
+  "components": {
+    "schemas": {
+      "InputDecimalU64": {
+        "maxLength": 20,
+        "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$(?![\\s\\S])",
+        "type": "string"
+      },
+      "InputEmpty": {
+        "type": "object"
+      },
+      "InputFilter": {
+        "properties": {
+          "components": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "levels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/InputTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "components",
+          "levels",
+          "targets"
+        ],
+        "type": "object"
+      },
+      "InputFilterSet": {
+        "properties": {
+          "duration_ms": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "filter": {
+            "$ref": "#/components/schemas/InputFilter"
+          }
+        },
+        "required": [
+          "filter"
+        ],
+        "type": "object"
+      },
+      "InputTarget": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "include_descendants": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "process_instance",
+                "type": "string"
+              },
+              "pid": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_time_filetime": {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              }
+            },
+            "required": [
+              "kind",
+              "pid",
+              "start_time_filetime",
+              "include_descendants"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "exe_path",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "OutputContentDescriptor": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "schema": true
+        },
+        "required": [
+          "name",
+          "schema"
+        ],
+        "type": "object"
+      },
+      "OutputDecimalU64": {
+        "maxLength": 20,
+        "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$(?![\\s\\S])",
+        "type": "string"
+      },
+      "OutputDiscovery": {
+        "description": "The discovery document returned by the connected receiver.",
+        "properties": {
+          "components": {
+            "$ref": "#/components/schemas/OutputDiscoveryComponents"
+          },
+          "info": {
+            "$ref": "#/components/schemas/OutputDiscoveryInfo"
+          },
+          "methods": {
+            "items": {
+              "$ref": "#/components/schemas/OutputMethodDescriptor"
+            },
+            "type": "array"
+          },
+          "openrpc": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "openrpc",
+          "info",
+          "methods",
+          "components"
+        ],
+        "type": "object"
+      },
+      "OutputDiscoveryComponents": {
+        "properties": {
+          "schemas": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "schemas"
+        ],
+        "type": "object"
+      },
+      "OutputDiscoveryInfo": {
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "version"
+        ],
+        "type": "object"
+      },
+      "OutputEndpointInfo": {
+        "properties": {
+          "protocol_version": {
+            "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$(?![\\s\\S])",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/OutputEndpointRole"
+          },
+          "software_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "software_version",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      "OutputEndpointRole": {
+        "enum": [
+          "host",
+          "guest"
+        ],
+        "type": "string"
+      },
+      "OutputFilter": {
+        "properties": {
+          "components": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "levels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/OutputTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "components",
+          "levels",
+          "targets"
+        ],
+        "type": "object"
+      },
+      "OutputMethodDescriptor": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "paramStructure": {
+            "$ref": "#/components/schemas/OutputParamStructure"
+          },
+          "params": {
+            "items": {
+              "$ref": "#/components/schemas/OutputContentDescriptor"
+            },
+            "type": "array"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputContentDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "paramStructure",
+          "params"
+        ],
+        "type": "object"
+      },
+      "OutputParamStructure": {
+        "enum": [
+          "by-name"
+        ],
+        "type": "string"
+      },
+      "OutputStatus": {
+        "properties": {
+          "effective_filter": {
+            "$ref": "#/components/schemas/OutputFilter"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "forwarding_enabled": {
+            "type": "boolean"
+          },
+          "health": true,
+          "loss": true,
+          "revision": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          }
+        },
+        "required": [
+          "forwarding_enabled",
+          "revision",
+          "effective_filter",
+          "expires_at",
+          "health",
+          "loss"
+        ],
+        "type": "object"
+      },
+      "OutputSystemInfo": {
+        "properties": {
+          "collected_at": {
+            "type": "string"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/OutputSystemInfoSection"
+            },
+            "type": "array"
+          },
+          "session_id": {
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "collected_at",
+          "session_id",
+          "sections"
+        ],
+        "type": "object"
+      },
+      "OutputSystemInfoRow": {
+        "properties": {
+          "bad": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "warning": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value",
+          "bad",
+          "warning"
+        ],
+        "type": "object"
+      },
+      "OutputSystemInfoSection": {
+        "properties": {
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/OutputSystemInfoRow"
+            },
+            "type": "array"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "rows"
+        ],
+        "type": "object"
+      },
+      "OutputTarget": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "include_descendants": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "process_instance",
+                "type": "string"
+              },
+              "pid": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_time_filetime": {
+                "$ref": "#/components/schemas/OutputDecimalU64"
+              }
+            },
+            "required": [
+              "kind",
+              "pid",
+              "start_time_filetime",
+              "include_descendants"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "exe_path",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    }
+  }
+}

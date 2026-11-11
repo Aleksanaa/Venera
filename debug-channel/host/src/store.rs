@@ -1,5 +1,5 @@
 use rusqlite::{params, Connection, Error, ErrorCode, OptionalExtension};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{io::Write, path::Path};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -21,7 +21,17 @@ impl Store {
         }
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
-        db.execute_batch("PRAGMA page_size=4096; PRAGMA auto_vacuum=FULL; PRAGMA journal_mode=TRUNCATE; CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, message TEXT NOT NULL);")?;
+        db.execute_batch("PRAGMA page_size=4096; PRAGMA auto_vacuum=FULL; PRAGMA journal_mode=TRUNCATE; CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, message TEXT NOT NULL, raw_message TEXT);")?;
+        let has_raw: bool = db
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='raw_message'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v != 0)?;
+        if !has_raw {
+            db.execute("ALTER TABLE events ADD COLUMN raw_message TEXT", [])?;
+        }
         let auto: u32 = db.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
         if auto != 1 {
             return Err("database requires FULL auto_vacuum".into());
@@ -45,7 +55,7 @@ impl Store {
         )?;
         if !sql.to_uppercase().contains("AUTOINCREMENT") {
             loop {
-                match store.db.execute_batch("BEGIN IMMEDIATE; ALTER TABLE events RENAME TO events_previous; CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, message TEXT NOT NULL); INSERT INTO events SELECT * FROM events_previous ORDER BY id; DROP TABLE events_previous; COMMIT;") {
+                match store.db.execute_batch("BEGIN IMMEDIATE; ALTER TABLE events RENAME TO events_previous; CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, message TEXT NOT NULL, raw_message TEXT); INSERT INTO events(id,received_at,message,raw_message) SELECT id,received_at,message,raw_message FROM events_previous ORDER BY id; DROP TABLE events_previous; COMMIT;") {
                     Ok(()) => break,
                     Err(Error::SqliteFailure(error, _)) if error.code == ErrorCode::DiskFull => {
                         let _ = store.db.execute_batch("ROLLBACK");
@@ -61,12 +71,16 @@ impl Store {
         Ok(self.db.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT MAX(1,(SELECT COUNT(*)/10 FROM events)))", [])? > 0)
     }
     pub fn append(&self, message: &Value) -> Result<()> {
+        self.append_with_raw(message, None)
+    }
+    pub fn append_with_raw(&self, message: &Value, raw: Option<&str>) -> Result<()> {
         let text = serde_json::to_string(message)?;
+        let raw_text = raw.map(str::to_owned);
         let received = now();
         loop {
             match self.db.execute(
-                "INSERT INTO events(received_at,message) VALUES (?1,?2)",
-                params![received, text],
+                "INSERT INTO events(received_at,message,raw_message) VALUES (?1,?2,?3)",
+                params![received, text, raw_text],
             ) {
                 Ok(_) => return Ok(()),
                 Err(Error::SqliteFailure(e, _)) if e.code == ErrorCode::DiskFull => {
@@ -99,7 +113,7 @@ impl ExportRange {
         }
         Ok(range)
     }
-    fn contains(&self, received: &str) -> Result<bool> {
+    pub(super) fn contains(&self, received: &str) -> Result<bool> {
         if self.from.is_none() && self.until.is_none() {
             return Ok(true);
         }
@@ -112,11 +126,16 @@ impl ExportRange {
 pub fn export(path: &Path, out: &mut impl Write, range: &ExportRange) -> Result<()> {
     let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     db.busy_timeout(std::time::Duration::from_secs(2))?;
+    let has_raw = has_raw(&db)?;
     let upper: i64 = db.query_row("SELECT COALESCE(MAX(id),0) FROM events", [], |r| r.get(0))?;
     let mut last = 0i64;
     loop {
         let row: Option<(i64, String, String)> = db.query_row(
-            "SELECT id,received_at,message FROM events WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1",
+            if has_raw {
+                "SELECT id,received_at,COALESCE(raw_message,message) FROM events WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1"
+            } else {
+                "SELECT id,received_at,message FROM events WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1"
+            },
             params![last, upper], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).optional()?;
         let Some((id, received, message)) = row else {
@@ -126,16 +145,65 @@ pub fn export(path: &Path, out: &mut impl Write, range: &ExportRange) -> Result<
         if !range.contains(&received)? {
             continue;
         }
-        let value: Value = serde_json::from_str(&message)?;
-        serde_json::to_writer(&mut *out, &json!({"received_at":received,"message":value}))?;
-        out.write_all(b"\n")?;
+        let message = export_message(&message)?;
+        writeln!(
+            out,
+            "{{\"message\":{message},\"received_at\":{}}}",
+            serde_json::to_string(&received)?
+        )?;
     }
     Ok(())
+}
+
+pub(super) fn has_raw(db: &Connection) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='raw_message'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? != 0)
+}
+
+pub(super) fn export_message(raw: &str) -> Result<String> {
+    let _: Value = serde_json::from_str(raw)?;
+    // JSON line breaks occur between tokens; retain the original number tokens.
+    Ok(raw.lines().map(str::trim).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_history_conversion_preserves_raw_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.db");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA auto_vacuum=FULL; CREATE TABLE events(id INTEGER PRIMARY KEY,received_at TEXT NOT NULL,message TEXT NOT NULL,raw_message TEXT)").unwrap();
+        let raw = "{ \"jsonrpc\":\"2.0\", \"method\":\"gap\", \"params\":{\"stream_id\":\"流 🙂\",\"reason\":\"overflow\",\"count\":\"18446744073709551615\",\"first_seq\":null,\"last_seq\":null} }";
+        db.execute(
+            "INSERT INTO events VALUES(7,'2026-11-10T00:00:00Z','{\"type\":\"gap\"}',?1)",
+            [raw],
+        )
+        .unwrap();
+        drop(db);
+        let store = Store::open(&path, 131072).unwrap();
+        let saved: (String, String) = store
+            .db
+            .query_row(
+                "SELECT message,raw_message FROM events WHERE id=7",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, ("{\"type\":\"gap\"}".into(), raw.into()));
+        let mut bytes = Vec::new();
+        export(&path, &mut bytes, &ExportRange::default()).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap(),
+            json!({"received_at":"2026-11-10T00:00:00Z","message":{"jsonrpc":"2.0","method":"gap","params":{"stream_id":"流 🙂","reason":"overflow","count":"18446744073709551615","first_seq":null,"last_seq":null}}})
+        );
+    }
 
     #[test]
     fn legacy_history_conversion_obeys_the_page_budget() {

@@ -8,6 +8,436 @@ use venera_debug_protocol::{
     Envelope, Filter, Message, RequestError, RequestResult, Status, Target,
 };
 
+pub(crate) mod serial {
+    use super::*;
+    use serde_json::{json, Value};
+    use venera_debug_protocol::v1;
+
+    pub fn encode(envelope: &Envelope) -> Result<Vec<u8>, serde_json::Error> {
+        let value = match &envelope.body {
+            Message::Status { status } => {
+                json!({"jsonrpc":"2.0","method":"status.changed","params": status_v1(status)?})
+            }
+            Message::Log { record } => {
+                json!({"jsonrpc":"2.0","method":"log","params": log_v1(record)?})
+            }
+            Message::Gap {
+                stream_id,
+                reason,
+                count,
+                first_seq,
+                last_seq,
+            } => json!({
+                "jsonrpc":"2.0","method":"gap","params": v1::Gap { stream_id: stream_id.clone(), reason: reason.clone(), count: count.map(v1::DecimalU64), first_seq: first_seq.map(v1::DecimalU64), last_seq: last_seq.map(v1::DecimalU64) }
+            }),
+            Message::RequestResult { result } => response(result)?,
+            Message::SystemInfoResult { result } => system_response(result),
+            _ => {
+                return Err(serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "unsupported serial message",
+                )))
+            }
+        };
+        let mut bytes = serde_json::to_vec(&value)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    fn encoding_error(message: &str) -> serde_json::Error {
+        <serde_json::Error as serde::ser::Error>::custom(message)
+    }
+
+    fn status_v1(status: &Status) -> Result<v1::Status, serde_json::Error> {
+        let mut health = status.health.clone();
+        if let Some(sessions) = health
+            .get_mut("session_helper_loss")
+            .and_then(Value::as_object_mut)
+        {
+            for session in sessions.values_mut() {
+                decimal_counter(session, "dropped_total")?;
+                decimal_counter(session, "reported_total")?;
+            }
+        }
+        let mut loss = status.loss.clone();
+        for key in [
+            "queue_dropped",
+            "parse_errors",
+            "process_event_parse_errors",
+            "process_capture_queue_dropped",
+        ] {
+            decimal_counter(&mut loss, key)?;
+        }
+        Ok(v1::Status {
+            forwarding_enabled: status.forwarding_enabled,
+            revision: v1::DecimalU64(status.revision),
+            effective_filter: filter_v1(&status.effective_filter)?,
+            expires_at: status.expires_at.clone(),
+            health,
+            loss,
+        })
+    }
+
+    fn decimal_counter(object: &mut Value, key: &str) -> Result<(), serde_json::Error> {
+        if let Some(value) = object.get_mut(key) {
+            let count = value
+                .as_u64()
+                .ok_or_else(|| encoding_error("invalid internal status counter"))?;
+            *value = json!(v1::DecimalU64(count));
+        }
+        Ok(())
+    }
+
+    fn filter_v1(filter: &Filter) -> Result<v1::Filter, serde_json::Error> {
+        Ok(v1::Filter {
+            components: filter.components.clone(),
+            levels: filter.levels.clone(),
+            targets: filter
+                .targets
+                .iter()
+                .map(target_v1)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+    pub(crate) fn filter_legacy(filter: v1::Filter) -> Filter {
+        Filter {
+            components: filter.components,
+            levels: filter.levels,
+            targets: filter.targets.into_iter().map(target_legacy).collect(),
+        }
+    }
+    fn filetime_v1(value: &str) -> Result<v1::DecimalU64, serde_json::Error> {
+        value
+            .parse()
+            .map_err(|_| encoding_error("invalid internal FILETIME"))
+    }
+
+    fn target_v1(target: &Target) -> Result<v1::Target, serde_json::Error> {
+        Ok(match target {
+            Target::ExePath { path } => v1::Target::ExePath { path: path.clone() },
+            Target::ProcessInstance {
+                pid,
+                start_time_filetime,
+                include_descendants,
+            } => v1::Target::ProcessInstance {
+                pid: *pid,
+                start_time_filetime: filetime_v1(start_time_filetime)?,
+                include_descendants: *include_descendants,
+            },
+        })
+    }
+    fn target_legacy(target: v1::Target) -> Target {
+        match target {
+            v1::Target::ExePath { path } => Target::ExePath { path },
+            v1::Target::ProcessInstance {
+                pid,
+                start_time_filetime,
+                include_descendants,
+            } => Target::ProcessInstance {
+                pid,
+                start_time_filetime: start_time_filetime.0.to_string(),
+                include_descendants,
+            },
+        }
+    }
+    fn identity_v1(
+        identity: &venera_debug_protocol::ProcessIdentity,
+    ) -> Result<v1::ProcessIdentity, serde_json::Error> {
+        Ok(v1::ProcessIdentity {
+            pid: identity.pid,
+            start_time_filetime: identity
+                .start_time_filetime
+                .as_deref()
+                .map(filetime_v1)
+                .transpose()?,
+            exe_path: identity.exe_path.clone(),
+        })
+    }
+
+    fn log_v1(
+        record: &venera_debug_protocol::LogRecord,
+    ) -> Result<v1::LogRecord, serde_json::Error> {
+        Ok(v1::LogRecord {
+            stream_id: record.stream_id.clone(),
+            seq: v1::DecimalU64(record.seq),
+            observed_at: record.observed_at.clone(),
+            source_time: record.source_time.clone(),
+            source: record.source.clone(),
+            component: record.component.clone(),
+            level: record.level.clone(),
+            raw_level: record.raw_level.clone(),
+            session_id: record.session_id,
+            process: record.process.as_ref().map(identity_v1).transpose()?,
+            tid: record.tid,
+            text: record.text.clone(),
+        })
+    }
+
+    fn response(result: &RequestResult) -> Result<Value, serde_json::Error> {
+        Ok(if result.ok {
+            let status = result.status.as_ref().ok_or_else(|| {
+                encoding_error("successful serial response requires a status snapshot")
+            })?;
+            json!({"jsonrpc":"2.0","id":result.request_id,"result":status_v1(status)?})
+        } else {
+            json!({"jsonrpc":"2.0","id":result.request_id,"error":{"code":-32000,"message":result.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "Request failed".into()),"data":result.error}})
+        })
+    }
+    fn system_response(result: &venera_debug_protocol::SystemInfoResult) -> Value {
+        if result.ok {
+            json!({"jsonrpc":"2.0","id":result.request_id,"result":v1::SystemInfo { collected_at: result.collected_at.clone(), session_id: result.session_id, sections: result.sections.iter().map(|section| v1::SystemInfoSection { title: section.title.clone(), rows: section.rows.iter().map(|row| v1::SystemInfoRow { key: row.key.clone(), value: row.value.clone(), bad: row.bad, warning: row.warning.clone() }).collect() }).collect() }})
+        } else {
+            json!({"jsonrpc":"2.0","id":result.request_id,"error":{"code":-32000,"message":result.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "System report failed".into()),"data":result.error}})
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn filter_results_encode_current_health_and_loss() {
+            let mut state = State::new("run-1".into(), true);
+            state.status.health = json!({"port":"connected","session_helper_loss":{"2":{"pid":10852,"dropped_total":18446744073709551615u64,"reported_total":9}}});
+            state.status.loss = json!({"process_event_parse_errors":7,"process_capture_queue_dropped":8,"etw_events_lost":4,"process_tracking_overflow":true});
+            state.dropped = u64::MAX;
+            state.parse_errors = 3;
+            for (request, revision) in [
+                (
+                    Message::FilterSet {
+                        request_id: "set".into(),
+                        filter: Filter::default(),
+                        duration_ms: None,
+                    },
+                    "1",
+                ),
+                (
+                    Message::FilterReset {
+                        request_id: "reset".into(),
+                    },
+                    "2",
+                ),
+            ] {
+                let response = state.control(request, None).unwrap();
+                // Exercise the queued representation used by the serial transport.
+                state.queue_control(&response);
+                let queued = state.controls.pop_back().unwrap();
+                let response = venera_debug_protocol::decode(&queued).unwrap();
+                let value: Value = serde_json::from_slice(&encode(&response).unwrap()).unwrap();
+                assert_eq!(
+                    value["result"],
+                    json!({
+                        "forwarding_enabled":true,"revision":revision,"effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,
+                        "health":{"port":"connected","session_helper_loss":{"2":{"pid":10852,"dropped_total":"18446744073709551615","reported_total":"9"}}},
+                        "loss":{"queue_dropped":"18446744073709551615","parse_errors":"3","process_event_parse_errors":"7","process_capture_queue_dropped":"8","etw_events_lost":4,"process_tracking_overflow":true}
+                    })
+                );
+                let local = serde_json::to_value(response).unwrap();
+                assert_eq!(
+                    local["status"]["loss"]["queue_dropped"],
+                    json!(18446744073709551615u64)
+                );
+                assert_eq!(
+                    local["status"]["health"]["session_helper_loss"]["2"]["dropped_total"],
+                    json!(18446744073709551615u64)
+                );
+            }
+        }
+
+        #[test]
+        fn successful_results_require_a_status_snapshot() {
+            let mut state = State::new("run-1".into(), true);
+            let mut response = state.result("set".into(), "filter.set");
+            if let Message::RequestResult { result } = &mut response.body {
+                result.status = None;
+            }
+            assert_eq!(
+                encode(&response).unwrap_err().to_string(),
+                "successful serial response requires a status snapshot"
+            );
+        }
+
+        #[test]
+        fn status_notifications_encode_known_counters_and_preserve_other_values() {
+            let mut state = State::new("run-1".into(), true);
+            state.status.health = json!({"sessions":[2],"session_helper_loss":{"2":{"pid":4294967295u32,"dropped_total":4,"reported_total":3}},"vendor":{"value":42}});
+            state.dropped = 5;
+            state.parse_errors = 6;
+            let envelope = Envelope::new(Message::Status {
+                status: state.current(),
+            });
+            let value: Value = serde_json::from_slice(&encode(&envelope).unwrap()).unwrap();
+            assert_eq!(
+                value,
+                json!({"jsonrpc":"2.0","method":"status.changed","params":{
+                    "forwarding_enabled":true,"revision":"0","effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,
+                    "health":{"sessions":[2],"session_helper_loss":{"2":{"pid":4294967295u32,"dropped_total":"4","reported_total":"3"}},"vendor":{"value":42}},
+                    "loss":{"queue_dropped":"5","parse_errors":"6"}
+                }})
+            );
+            let mut invalid = envelope;
+            if let Message::Status { status } = &mut invalid.body {
+                status.loss["queue_dropped"] = json!(-1);
+            }
+            assert_eq!(
+                encode(&invalid).unwrap_err().to_string(),
+                "invalid internal status counter"
+            );
+        }
+
+        #[test]
+        fn filetime_encoding_preserves_full_range_and_reports_invalid_values() {
+            let mut state = State::new("run-1".into(), true);
+            for (input, expected) in [("0", "0"), ("18446744073709551615", "18446744073709551615")]
+            {
+                state.status.effective_filter.targets = vec![Target::ProcessInstance {
+                    pid: 7,
+                    start_time_filetime: input.into(),
+                    include_descendants: true,
+                }];
+                let value: Value = serde_json::from_slice(
+                    &encode(&Envelope::new(Message::Status {
+                        status: state.current(),
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    value["params"]["effective_filter"]["targets"][0],
+                    json!({"kind":"process_instance","pid":7,"start_time_filetime":expected,"include_descendants":true})
+                );
+            }
+            for input in ["yesterday", "18446744073709551616", "01", "+1"] {
+                state.status.effective_filter.targets = vec![Target::ProcessInstance {
+                    pid: 7,
+                    start_time_filetime: input.into(),
+                    include_descendants: true,
+                }];
+                assert_eq!(
+                    encode(&Envelope::new(Message::Status {
+                        status: state.current()
+                    }))
+                    .unwrap_err()
+                    .to_string(),
+                    "invalid internal FILETIME"
+                );
+            }
+            let mut envelope = Envelope::new(Message::Log {
+                record: venera_debug_protocol::LogRecord {
+                    stream_id: "stream-1".into(),
+                    seq: 9,
+                    observed_at: "2026-11-11T00:00:00Z".into(),
+                    source_time: None,
+                    source: "dbwin".into(),
+                    component: "venus".into(),
+                    level: "info".into(),
+                    raw_level: "info".into(),
+                    session_id: Some(2),
+                    process: Some(venera_debug_protocol::ProcessIdentity {
+                        pid: 7,
+                        start_time_filetime: None,
+                        exe_path: None,
+                    }),
+                    tid: Some(8),
+                    text: "ready".into(),
+                },
+            });
+            for (input, expected) in [
+                (None, Value::Null),
+                (Some("18446744073709551615"), json!("18446744073709551615")),
+            ] {
+                if let Message::Log { record } = &mut envelope.body {
+                    record.process.as_mut().unwrap().start_time_filetime = input.map(str::to_owned);
+                }
+                let value: Value = serde_json::from_slice(&encode(&envelope).unwrap()).unwrap();
+                assert_eq!(
+                    value["params"]["process"],
+                    json!({"pid":7,"start_time_filetime":expected,"exe_path":null})
+                );
+            }
+            if let Message::Log { record } = &mut envelope.body {
+                record.process.as_mut().unwrap().start_time_filetime = Some("yesterday".into());
+            }
+            assert_eq!(
+                encode(&envelope).unwrap_err().to_string(),
+                "invalid internal FILETIME"
+            );
+        }
+
+        #[test]
+        fn v1_status_request_and_result_preserve_string_correlation() {
+            let response = encode(&Envelope::new(Message::RequestResult {
+                result: RequestResult {
+                    request_id: "status-7".into(),
+                    operation: "status.get".into(),
+                    ok: true,
+                    revision: Some(3),
+                    effective_filter: Some(Filter::default()),
+                    expires_at: None,
+                    forwarding_enabled: Some(true),
+                    status: Some(Status {
+                        forwarding_enabled: true,
+                        revision: 3,
+                        effective_filter: Filter::default(),
+                        expires_at: None,
+                        health: json!({"port":"connected"}),
+                        loss: json!({}),
+                    }),
+                    error: None,
+                },
+            }))
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&response).unwrap(),
+                json!({
+                "jsonrpc":"2.0","id":"status-7","result":{"forwarding_enabled":true,"revision":"3","effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,"health":{"port":"connected"},"loss":{}
+            } })
+            );
+        }
+
+        #[test]
+        fn v1_notifications_use_method_names_and_decimal_sequences() {
+            let log = encode(&Envelope::new(Message::Log {
+                record: venera_debug_protocol::LogRecord {
+                    stream_id: "stream-1".into(),
+                    seq: 9,
+                    observed_at: "2026-11-11T00:00:00Z".into(),
+                    source_time: None,
+                    source: "dbwin".into(),
+                    component: "venus".into(),
+                    level: "info".into(),
+                    raw_level: "info".into(),
+                    session_id: Some(u32::MAX),
+                    process: None,
+                    tid: Some(7),
+                    text: "ready".into(),
+                },
+            }))
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&log).unwrap(),
+                json!({
+                    "jsonrpc":"2.0","method":"log","params":{"stream_id":"stream-1","seq":"9","observed_at":"2026-11-11T00:00:00Z","source_time":null,"source":"dbwin","component":"venus","level":"info","raw_level":"info","session_id":4294967295u64,"process":null,"tid":7,"text":"ready"}
+                })
+            );
+            let gap = encode(&Envelope::new(Message::Gap {
+                stream_id: "stream-1".into(),
+                reason: "transport_interrupted".into(),
+                count: Some(2),
+                first_seq: Some(8),
+                last_seq: Some(9),
+            }))
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&gap).unwrap(),
+                json!({
+                    "jsonrpc":"2.0","method":"gap","params":{"stream_id":"stream-1","reason":"transport_interrupted","count":"2","first_seq":"8","last_seq":"9"}
+                })
+            );
+        }
+    }
+}
+
 pub const LOG_RECORDS: usize = 2048;
 const LOG_BYTES: usize = 8 * 1024 * 1024;
 const CONTROL_RECORDS: usize = 64;

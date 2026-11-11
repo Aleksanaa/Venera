@@ -5,6 +5,7 @@ mod ipc;
 mod process;
 mod service;
 mod sessions;
+mod system_info;
 mod transport;
 
 use crate::{collector::Capture, state::State};

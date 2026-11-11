@@ -108,15 +108,51 @@ venera-debug-host export --database /home/user/.local/share/venera/history.db \
 
 Export generates JSON line by line. Each line contains host reception time in UTC as `received_at` and the original message object as `message`, preserving additional message fields. Export determines the end position at startup and reads the history still retained at that point in reception order. The background process continues receiving and evicting during export; history evicted before it is read is skipped. Storage IDs increase persistently, and the export cutoff identifies the history batch at startup. To preserve a complete current history batch, stop the service before exporting. User-saved files are maintained independently of the background history capacity.
 
-## Shared Rust Interface
+## Browser Log Workbench
 
-The guest shares the contract through the `venera-debug-protocol` path dependency. Main types are `Envelope`, `Message`, `LogRecord`, `ProcessIdentity`, `Filter`, `Target`, `Status`, `RequestResult`, and `RequestError`.
+The workbench provides history browsing, live following, full-text search, and record details. Filter history by component, message level, program path or PID, and reception-time range, then export records matching the current conditions as JSONL. Record details show the complete text, program information, and original record.
 
-`Envelope::new(Message)` creates a version 1 message; `encode` produces LF-terminated UTF-8 JSONL, and `decode` parses one message. `Framer::new(max_bytes)`, `push`, and `reset` support incremental reads; `push_raw` returns both the typed message and the complete JSON object. `DecodeError` distinguishes encoding, JSON, version, unknown-type, and line-length errors.
+Build the host program and frontend:
 
-`matches_filter(&filter, &record, &ancestors)` performs pure-function matching. The caller supplies `ancestors` as ancestor process instances confirmed within the current rule's lifetime; the guest maintains rule management and instance tracking. Path inputs use full paths queried by the guest. Windows builds use system ordinal case-insensitive comparison; Linux builds use Unicode lowercase comparison.
+```sh
+# Run from the repository root
+nix develop --command cargo build --manifest-path debug-channel/Cargo.toml \
+  -p venera-debug-host --features web
+cd debug-channel/web
+corepack yarn install --immutable
+corepack yarn build
+cd ../..
+```
 
-The machine-readable contract is `debug-channel/protocol/schema.json`; literal samples are in `debug-channel/protocol/tests/vectors.jsonl`.
+After starting the workbench, open <http://127.0.0.1:8787> in a browser:
+
+```sh
+debug-channel/target/debug/venera-debug-host web \
+  --database .harness/vm-debug/live.sqlite \
+  --control .harness/vm-debug/host-control.sock \
+  --assets debug-channel/web/dist
+```
+
+Replace `--database` with the history store path used by the receiver background process. The existing `receive` background process continues saving new records, and the workbench displays the same history. With live following enabled, new records append to the list; load earlier records to browse backward. Page filters help explore saved records, while the debug channel settings in the Windows control panel manage collection and forwarding.
+
+Expand the toolbar filter panel to adjust conditions alongside the event list. Header separators adjust column widths; the separator between the list and details adjusts the detail area width. Separators also support arrow keys. The Overview, Metadata, and Raw record detail views show text and program information, complete fields, and copyable original content, respectively; content areas support scrolling.
+
+The sidebar's System information queries the current connection and Windows system report through the receiver background process specified by `--control`. The control path should match `receive --control`. The report follows Venera Panel's sections, showing drivers, graphics host, guest, graphics APIs, video memory, and settings, with collection time and session. The refresh button collects a new report.
+
+## Venera protocol v1
+
+Host and guest exchange UTF-8 JSONL over VirtIO Serial. Each line is a JSON-RPC 2.0 message; public interface documents use OpenRPC 1.4.1. Methods include `status.get`, `filter.set`, `filter.reset`, `system.info.get`, `rpc.discover`, `status.changed`, `log`, and `gap`.
+
+`rpc.discover` returns the current endpoint's OpenRPC document. Requests use string IDs and named parameter objects, results carry the same ID, and notifications directly carry method names and parameters. Sequence numbers, revisions, counts, durations in milliseconds, and FILETIME use DecimalU64 strings; PIDs, thread IDs, and session IDs use JSON integers. See [Venera protocol v1](venera-protocol-v1.md) for receivers, data representation, and validation commands.
+
+Protocol documents are generated from shared Rust types. Generate and check them with:
+
+```bash
+cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema
+cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema -- --check
+```
+
+The host background process parses JSON-RPC messages into log, status, connection, and gap records, continuously writing them to SQLite. The browser workbench reads the same history through application interfaces and provides live browsing, filters, details, and JSONL export.
 
 ## Validation
 

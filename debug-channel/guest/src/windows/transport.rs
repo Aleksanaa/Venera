@@ -1,5 +1,7 @@
 use super::*;
-use venera_debug_protocol::{Envelope, Framer, Message};
+use crate::serial_connection::{self, Connection};
+use crate::state::serial;
+use venera_debug_protocol::{Envelope, Message};
 use windows_sys::{
     core::GUID,
     Win32::{
@@ -230,9 +232,11 @@ unsafe fn write_line(
     Ok(())
 }
 pub fn serve(state: Shared) {
+    let mut serial = Connection::default();
     while !stopped() {
         probe(&state);
-        let result = unsafe { connection(&state) };
+        let result = unsafe { connection(&state, &mut serial) };
+        serial.disconnect();
         {
             let mut shared = state.lock().unwrap();
             shared.controls.retain(|bytes| {
@@ -272,7 +276,7 @@ pub fn serve(state: Shared) {
         }
     }
 }
-unsafe fn connection(state: &Shared) -> io::Result<()> {
+unsafe fn connection(state: &Shared, serial: &mut Connection) -> io::Result<()> {
     let port = Handle(CreateFileW(
         wide(&format!("\\\\.\\Global\\{PORT}")).as_ptr(),
         GENERIC_READ | GENERIC_WRITE,
@@ -295,13 +299,12 @@ unsafe fn connection(state: &Shared) -> io::Result<()> {
     let mut buffer = [0u8; 16384];
     let mut pending = false;
     let mut connected = false;
-    let mut framer = Framer::new(venera_debug_protocol::DEFAULT_MAX_LINE_BYTES);
     let result = (|| -> io::Result<()> {
         while !stopped() {
             let host = info(port.0, state)?;
             if host != connected {
                 connected = host;
-                framer.reset();
+                serial.disconnect();
                 health(
                     state,
                     "host",
@@ -315,17 +318,10 @@ unsafe fn connection(state: &Shared) -> io::Result<()> {
                 }
                 if host {
                     write_line(port.0, b"\n", state, None)?;
-                    write_line(
-                        port.0,
-                        &venera_debug_protocol::encode(&Envelope::new(Message::Hello {
-                            role: "guest".into(),
-                            software_version: env!("CARGO_PKG_VERSION").into(),
-                            capabilities: vec!["status".into(), "filter".into(), "gap".into()],
-                        }))
-                        .unwrap(),
-                        state,
-                        None,
-                    )?;
+                    for request in serial.connect() {
+                        let bytes = serial_connection::line(&request)?;
+                        write_line(port.0, &bytes, state, None)?;
+                    }
                     state.lock().unwrap().notify();
                 }
             }
@@ -367,62 +363,66 @@ unsafe fn connection(state: &Shared) -> io::Result<()> {
                 if count == 0 {
                     return Err(io::ErrorKind::UnexpectedEof.into());
                 }
-                for decoded in framer.push(&buffer[..count as usize]) {
+                let received = serial.receive(&buffer[..count as usize], |message| {
+                    let expires = match &message {
+                        Message::FilterSet {
+                            duration_ms: Some(ms),
+                            ..
+                        } => Some(timestamp_after(*ms)),
+                        _ => None,
+                    };
                     let mut shared = state.lock().unwrap();
-                    match decoded {
-                        Ok(message) => {
-                            let expires = match &message.body {
-                                Message::FilterSet {
-                                    duration_ms: Some(ms),
-                                    ..
-                                } => Some(timestamp_after(*ms)),
-                                _ => None,
-                            };
-                            if shared.controls.len() >= 60 {
-                                let request = match &message.body {
-                                    Message::StatusGet { request_id } => {
-                                        Some((request_id.clone(), "status.get"))
-                                    }
-                                    Message::FilterSet { request_id, .. } => {
-                                        Some((request_id.clone(), "filter.set"))
-                                    }
-                                    Message::FilterReset { request_id } => {
-                                        Some((request_id.clone(), "filter.reset"))
-                                    }
-                                    _ => None,
-                                };
-                                if let Some((request_id, operation)) = request {
-                                    let mut response = shared.result(request_id, operation);
-                                    if let Message::RequestResult { result } = &mut response.body {
-                                        result.ok = false;
-                                        result.error = Some(venera_debug_protocol::RequestError {
-                                            code: "busy".into(),
-                                            message: "Control queue is busy; retry the request"
-                                                .into(),
-                                        });
-                                    }
-                                    drop(shared);
-                                    write_line(
-                                        port.0,
-                                        &venera_debug_protocol::encode(&response).unwrap(),
-                                        state,
-                                        None,
-                                    )?;
-                                }
-                                continue;
+                    if shared.controls.len() >= 60 {
+                        let (request_id, operation) = match &message {
+                            Message::StatusGet { request_id } => (request_id.clone(), "status.get"),
+                            Message::FilterSet { request_id, .. } => {
+                                (request_id.clone(), "filter.set")
                             }
-                            if let Some(response) = shared.control(message.body, expires) {
-                                shared.queue_control(&response);
+                            Message::FilterReset { request_id } => {
+                                (request_id.clone(), "filter.reset")
                             }
+                            _ => return None,
+                        };
+                        let mut response = shared.result(request_id, operation);
+                        if let Message::RequestResult { result } = &mut response.body {
+                            result.ok = false;
+                            result.error = Some(venera_debug_protocol::RequestError {
+                                code: "busy".into(),
+                                message: "Control queue is busy; retry the request".into(),
+                            });
                         }
-                        Err(_) => {
-                            shared.parse_errors += 1;
+                        Some(response)
+                    } else {
+                        shared.control(message, expires)
+                    }
+                });
+                if received.parse_errors != 0 {
+                    state.lock().unwrap().parse_errors += received.parse_errors;
+                }
+                for response in received.output {
+                    write_line(port.0, &serial_connection::line(&response)?, state, None)?;
+                }
+                for request_id in received.reports {
+                    if let Some(response) = system_info::request(state.clone(), request_id) {
+                        if let Some(value) = serial.report(&response) {
+                            write_line(port.0, &serial_connection::line(&value)?, state, None)?;
                         }
                     }
                 }
             }
             let next = state.lock().unwrap().next_line();
             if let Some((generation, bytes)) = next {
+                let envelope = venera_debug_protocol::decode(&bytes)
+                    .map_err(|_| io::ErrorKind::InvalidData)?;
+                let bytes = if matches!(envelope.body, Message::SystemInfoResult { .. }) {
+                    match serial.report(&envelope) {
+                        Some(value) => serial_connection::line(&value)?,
+                        None => continue,
+                    }
+                } else {
+                    serial::encode(&envelope)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                };
                 if let Err(issue) = write_line(port.0, &bytes, state, generation) {
                     if generation.is_some()
                         && !stopped()

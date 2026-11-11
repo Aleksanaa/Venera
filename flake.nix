@@ -24,10 +24,11 @@
           cmake ninja pkg-config
           # Host Rust tools with standard libraries for Linux and Windows GNU.
           cargo mingw.buildPackages.rustc
+          nodejs_22 yarn-berry
           unzip osslsigncode wimlib curl openssl
           # Mesa (icd/build.sh): meson and its Python code generators.
           meson bison flex
-          (python3.withPackages (p: [ p.mako p.pyyaml p.packaging ]))
+          (python3.withPackages (p: [ p.mako p.pyyaml p.packaging p.jsonschema ]))
           # vkd3d-proton (third_party/vkd3d-proton): IDL headers and its internal GLSL shaders.
           widl glslang
           mingw.buildPackages.gcc

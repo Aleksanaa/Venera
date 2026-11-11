@@ -4,12 +4,13 @@
 #include <shlobj.h>
 #include <sstream>
 #include <cerrno>
+#include <algorithm>
 
 namespace panel {
 namespace {
 constexpr UINT kResult=kPageMessage+30;
 constexpr UINT_PTR kRefresh=kPageTimer+30;
-enum { Refresh=kPageId, Forward, Filter, Reset, Install };
+enum { Refresh=kPageId, Forward, Filter, Reset, Install, Details };
 struct FilterForm {
     std::string json;
     debugjson::Value current;
@@ -21,6 +22,15 @@ std::wstring selected(const debugjson::Value& values) {
         if(!text.empty()) text+=L", "; text+=widen(value.text);
     }
     return text.empty()?L"All":text;
+}
+std::wstring filterSummary(const debugjson::Value& filter) {
+    std::wstring summary=L"Components: "+selected(filter["components"])+L" · Message levels: "+selected(filter["levels"]);
+    for(const auto& target:filter["targets"].items) {
+        if(target["kind"].text=="exe_path") summary+=L"\nProgram: "+widen(target["path"].text);
+        else summary+=L"\nProcess "+widen(target["pid"].text)+(target["include_descendants"].boolean?L" and its child processes":L"");
+    }
+    if(filter["targets"].items.empty()) summary+=L"\nAll programs";
+    return summary;
 }
 std::wstring edit(HWND window,int id) {
     HWND control=GetDlgItem(window,id); int n=GetWindowTextLengthW(control);
@@ -113,34 +123,75 @@ public:
     ~DebugPage() override { KillTimer(window_,kRefresh); if(worker_.joinable()) worker_.join(); }
     const wchar_t* title() const override { return L"Debug channel"; }
     const wchar_t* icon() const override { return L""; }
-    bool animating() const override { return busy_; }
     void draw(Ui& ui,float x,float w,float& y) override {
-        auto row=[&](const std::wstring& title,const std::wstring& desc) {
-            return ui.settingsCard(x,y,w,L"",title,desc);
+        int textId=kPageId+100;
+        auto row=[&](const wchar_t* icon,const std::wstring& title,const std::wstring& desc,float reserve=0.f) {
+            auto heading=ui.wrap(title,Ui::kBody,w-72-reserve);
+            auto body=ui.wrap(desc,Ui::kCaption,w-72-reserve);
+            float h=std::max(68.f,heading.height+body.height+28);
+            ui.card({x,y,x+w,y+h});
+            ui.text(icon,Ui::kIconLarge,{x+16,y,x+36,y+h},theme::kWhite,1,DWRITE_TEXT_ALIGNMENT_CENTER);
+            float top=y+(h-heading.height-body.height-4)/2;
+            ui.selectable(textId++,heading,x+56,top);
+            ui.selectable(textId++,body,x+56,top+heading.height+4,theme::kWhite,theme::kTextSecondary);
+            float cy=y+h/2; y+=h+4; return cy;
         };
-        float cy=row(L"Send debug output to host",status_.valid?(status_.forwarding?L"On":L"Off"):L"Checking debug service…");
-        ui.toggle(x+w-20,cy,Forward,status_.forwarding,status_.valid&&!busy_);
+        float cy=row(L"\uE724",L"Send debug output to host",L"The host is the computer running this virtual machine.",100);
+        if(status_.valid) ui.toggle(x+w-20,cy,Forward,status_.forwarding,!applying_);
         if(!status_.error.empty())
-            ui.infoBar(x,w,y,Ui::Severity::kError,L"Debug service",status_.error);
+            ui.infoBar(x,w,y,Ui::Severity::kError,L"Debug service",
+                (stale_?L"Showing the last successful status.\n":L"")+status_.error.substr(0,status_.error.find(L'\n')));
+        if(applying_)
+            ui.infoBar(x,w,y,Ui::Severity::kInformational,L"",L"Applying changes…");
+        std::wstring connection;
         if(status_.valid) {
-            row(L"Serial driver",status_.driver);
-            row(L"Controller",status_.controller);
-            row(L"Debug port",status_.port);
-            row(L"Host connection",status_.host);
-            row(L"Current filter · Revision "+status_.revision,status_.filter);
-            if(!status_.expires.empty()) row(L"Filter expires",status_.expires);
-        }
-        if(!busy_) {
-            ui.button(L"Refresh",x,y,Refresh,false);
-            if(status_.valid) {
-                ui.button(L"Edit filter",x+110,y,Filter,true);
-                ui.button(L"Reset filter",x+235,y,Reset,false);
+            if(status_.host==L"connected") connection=L"Connected to the host";
+            else if(status_.host==L"waiting") connection=L"Waiting for the host to connect";
+            else if(status_.host==L"disconnected") connection=L"Host disconnected";
+            else if(status_.host==L"connecting") connection=L"Connecting to the host";
+            else connection=status_.host;
+            if(stale_) connection=L"Last successful status: "+connection;
+        } else connection=busy_?L"Checking…":L"Status unavailable";
+        row(L"\uE703",L"Host connection",connection);
+
+        float refreshW=ui.measure(L"Refresh",Ui::kBody)+40;
+        D2D1_RECT_F refreshRect={x,y,x+refreshW,y+32};
+        if(ui.pointer(Refresh).over) ui.fill(refreshRect,4,theme::kWhite,theme::kControlHover);
+        ui.text(L"\uE72C",Ui::kIcon,{x+8,y,x+24,y+32});
+        ui.text(L"Refresh",Ui::kBody,{x+32,y,x+refreshW,y+32});
+        ui.hot(refreshRect,Refresh); y+=40;
+        if(status_.valid) {
+            row(L"\uE71C",L"Receive filter",L"Choose which programs, components and message levels to receive.\n"+filterSummary(status_.effectiveFilter));
+            float bw=ui.button(L"Edit filter",x,y,Filter,true);
+            ui.button(L"Reset filter",x+bw+8,y,Reset,false); y+=40;
+            if(!status_.expires.empty()) row(L"\uE81C",L"Filter expires",status_.expires);
+            const wchar_t* icons[]={L"\uE7B8",L"\uE772",L"\uE71B",L"\uE703"};
+            const wchar_t* titles[]={L"Serial driver",L"Controller",L"Debug port",L"Host connection"};
+            const std::wstring* values[]={&status_.driver,&status_.controller,&status_.port,&status_.host};
+            Ui::Paragraph descriptions[4];
+            float heights[4],bodyH=16;
+            for(int i=0;i<4;i++) {
+                descriptions[i]=ui.wrap(*values[i],Ui::kCaption,w-72);
+                heights[i]=std::max(60.f,descriptions[i].height+36); bodyH+=heights[i];
             }
-            if(driverMissing_) ui.button(L"Install serial driver",x,y+44,Install,true);
-        } else ui.progressRing(x+16,y+16,24,-1);
-        y+=92;
+            float h=ui.expander(x,y,w,Details,detailsOpen_,bodyH);
+            ui.text(L"\uE71B",Ui::kIconLarge,{x+16,y,x+36,y+64});
+            ui.titleDesc(x+56,x+w-52,y+32,L"Connection details",stale_?L"Last successful status":L"Driver, devices and host");
+            if(detailsOpen_) {
+                float top=y+73;
+                for(int i=0;i<4;i++) {
+                    ui.text(icons[i],Ui::kIconLarge,{x+16,top,x+36,top+heights[i]});
+                    ui.text(titles[i],Ui::kBody,{x+56,top+6,x+w-16,top+26});
+                    ui.selectable(kPageId+200+i,descriptions[i],x+56,top+30,theme::kWhite,theme::kTextSecondary);
+                    top+=heights[i];
+                }
+            }
+            y+=h+4;
+        }
+        if(driverMissing_) { ui.button(L"Install serial driver",x,y,Install,true); y+=40; }
     }
     void click(int id) override {
+        if(id==Details) { detailsOpen_=!detailsOpen_; return; }
         if(busy_) return;
         if(id==Refresh) launch();
         if(id==Forward||id==Filter||id==Reset) {
@@ -153,7 +204,7 @@ public:
             if(id==Filter) {
                 FilterForm form;
                 form.current=status_.effectiveFilter;
-                form.summary=status_.filter;
+                form.summary=filterSummary(status_.effectiveFilter);
                 if(DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(500),window_,filterProc,reinterpret_cast<LPARAM>(&form))==1)
                     launch({},form.json);
             }
@@ -173,14 +224,19 @@ public:
         if(msg==WM_TIMER&&wp==kRefresh) { if(!busy_) launch(); return true; }
         if(msg!=kResult) return false;
         if(worker_.joinable()) worker_.join();
-        { std::lock_guard<std::mutex> lock(mutex_); status_=std::move(pending_); }
-        busy_=false;
-        driverMissing_=status_.driver==L"missing";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            driverMissing_=pending_.driver==L"missing";
+            if(pending_.valid) { status_=std::move(pending_); stale_=false; }
+            else { status_.error=std::move(pending_.error); stale_=status_.valid; }
+        }
+        busy_=false; applying_=false;
         return true;
     }
 private:
     void launch(std::vector<std::wstring> args={L"status",L"--json"},std::string filter={}) {
         if(worker_.joinable()) worker_.join(); busy_=true;
+        applying_=!filter.empty() || args!=std::vector<std::wstring>{L"status",L"--json"};
         worker_=std::thread([this,args=std::move(args),filter=std::move(filter)]() mutable {
             DebugStatus result; std::wstring file;
             if(!filter.empty()) {
@@ -210,7 +266,7 @@ private:
         });
     }
     HWND window_;
-    bool busy_=false,driverMissing_=false;
+    bool busy_=false,applying_=false,driverMissing_=false,stale_=false,detailsOpen_=false;
     DebugStatus status_,pending_;
     std::thread worker_;
     std::mutex mutex_;
