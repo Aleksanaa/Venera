@@ -150,7 +150,25 @@ jobs:
         run: |
           case "$VERSION" in "${GITHUB_REF_NAME#v}".*) ;; *)
             echo "Tag $GITHUB_REF_NAME does not match the version $VERSION"; exit 1 ;; esac
-          # The notes are the body of the tagged commit's message (everything after the subject line).
-          git log -1 --format=%b HEAD > notes.md
+          # The notes are the body of the tagged commit's message (everything after the subject line). GitHub keeps its
+          # line breaks, and a wrapped line starting with "11." would begin a list, so each paragraph or list item is
+          # joined onto one line. A line starts a new one after a blank line or heading, or with a bullet, quote or
+          # table row, or with a number when the block is a numbered list; code fences are kept as they are.
+          git log -1 --format=%b HEAD | awk '
+            /^```/ { if (cur != "") print cur; cur = ""; fence = !fence; print; next }
+            fence { print; next }
+            /^[[:space:]]*$/ { if (cur != "") print cur; cur = ""; print; next }
+            {
+              line = $0; sub(/^[[:space:]]+/, "", line)
+              item = line ~ /^([-*+] |>|\|)/; num = line ~ /^[0-9]+[.)] /
+              if (cur == "" || item || (num && ordered)) {
+                if (cur != "") print cur
+                cur = $0; ordered = num
+              } else
+                cur = cur " " line
+              if (line ~ /^#/) { print cur; cur = "" }
+            }
+            END { if (cur != "") print cur }
+          ' > notes.md
           gh release create "$GITHUB_REF_NAME" "venera-setup-$VERSION.exe" "venera-setup-$VERSION.iso" vioserial-LICENSE.txt \
             --title "Venera $VERSION" --notes-file notes.md

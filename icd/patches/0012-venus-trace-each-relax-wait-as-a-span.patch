@@ -1,0 +1,75 @@
+From: venera_d3d12
+Subject: venus: trace each relax wait as a span
+
+Venus waits for the host by polling (vn_relax: ring seqno and space, fences, semaphores, queries). Open a trace
+scope from vn_relax_init to vn_relax_fini, named after the wait's reason, so a trace shows how long each wait for
+the host took and what it waited for.
+
+diff -ruN b/src/virtio/vulkan/vn_common.c c/src/virtio/vulkan/vn_common.c
+--- b/src/virtio/vulkan/vn_common.c	2026-11-11 17:03:46.767382359 +0800
++++ c/src/virtio/vulkan/vn_common.c	2026-11-11 17:04:36.911085249 +0800
+@@ -155,6 +155,8 @@
+ void
+ vn_relax_fini(struct vn_relax_state *state)
+ {
++   if (state->traced)
++      _MESA_TRACE_END();
+    vn_watchdog_release(&state->instance->ring.watchdog);
+ }
+ 
+@@ -179,6 +181,27 @@
+    return "";
+ }
+ 
++/* The span of a wait, from vn_relax_init to vn_relax_fini. */
++static inline const char *
++vn_relax_trace_name(enum vn_relax_reason reason)
++{
++   switch (reason) {
++   case VN_RELAX_REASON_RING_SEQNO:
++      return "vn_relax ring seqno";
++   case VN_RELAX_REASON_TLS_RING_SEQNO:
++      return "vn_relax tls ring seqno";
++   case VN_RELAX_REASON_RING_SPACE:
++      return "vn_relax ring space";
++   case VN_RELAX_REASON_FENCE:
++      return "vn_relax fence";
++   case VN_RELAX_REASON_SEMAPHORE:
++      return "vn_relax semaphore";
++   case VN_RELAX_REASON_QUERY:
++      return "vn_relax query";
++   }
++   return "vn_relax";
++}
++
+ static struct vn_relax_profile
+ vn_relax_get_profile(enum vn_relax_reason reason)
+ {
+@@ -236,11 +259,16 @@
+    if (vn_watchdog_acquire(watchdog, true))
+       vn_ring_unset_status_bits(ring, VK_RING_STATUS_ALIVE_BIT_MESA);
+ 
++   const bool traced = _MESA_TRACE_SCOPE_ACTIVE(true);
++   if (traced)
++      _MESA_TRACE_BEGIN(vn_relax_trace_name(reason));
++
+    return (struct vn_relax_state){
+       .instance = instance,
+       .iter = 0,
+       .profile = vn_relax_get_profile(reason),
+       .reason_str = vn_relax_reason_string(reason),
++      .traced = traced,
+    };
+ }
+ 
+diff -ruN b/src/virtio/vulkan/vn_common.h c/src/virtio/vulkan/vn_common.h
+--- b/src/virtio/vulkan/vn_common.h	2026-11-11 17:03:46.767389342 +0800
++++ c/src/virtio/vulkan/vn_common.h	2026-11-11 17:04:36.908624423 +0800
+@@ -275,6 +275,7 @@
+    const struct vn_relax_profile profile;
+    const char *reason_str;
+    bool warn;
++   bool traced;
+ };
+ 
+ /* TLS ring

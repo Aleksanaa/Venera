@@ -7,9 +7,9 @@
 #               log
 #   Uninstall : run the installer's uninstall; the device falls back to Microsoft's basic display driver (reboot after)
 #   Status    : show the adapter, its driver and its UMD slots
-#   Perf      : run uibench's desktop scenarios in the logged-on user's session under a DxgKrnl and DWM ETW trace;
-#               writes the build installed, uibench's report and the trace (etl and csv) to -Out, which
-#               tests/perf/summarize.py reads
+#   Perf      : run uibench's desktop scenarios in the logged-on user's session under venera-trace; writes the build
+#               installed, uibench's report and the trace (trace.etl, events.jsonl) to -Out, which
+#               tests/perf/vtrace.py summary and perfetto read
 # Run from an elevated PowerShell:  powershell -ExecutionPolicy Bypass -File .\venera-test.ps1 Install
 # Run it from the build tree (build\win\tests\win): it finds setup\venera-setup.exe, panel\venera-panel.exe and
 # tests\win\*.exe in build\win.
@@ -164,14 +164,9 @@ switch ($Action) {
 
         $bench = Join-Path $Work 'uibench.exe'
         Copy-Item (Find-BuildFile 'tests\win\uibench.exe') $bench -Force
-        $etl = Join-Path $Work 'perf.etl'
-        $providers = Join-Path $Work 'perf-providers.txt'
-        @('"Microsoft-Windows-DxgKrnl" 0xFFFFFFFFFFFFFFFF 5', '"Microsoft-Windows-Dwm-Core" 0xFFFFFFFFFFFFFFFF 5') |
-            Set-Content $providers -Encoding ascii
-        & logman.exe stop veneraperf -ets 2>&1 | Out-Null
-        Remove-Item $etl -ErrorAction SilentlyContinue
-        & logman.exe create trace veneraperf -pf $providers -o $etl -bs 1024 -nb 64 512 -ets | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "logman could not start the trace ($LASTEXITCODE)" }
+        $tracer = Find-BuildFile 'tests\win\venera-trace.exe'
+        & $tracer start $Out
+        if ($LASTEXITCODE -ne 0) { throw "venera-trace could not start the trace ($LASTEXITCODE)" }
         $report = Join-Path $Out 'uibench.txt'
         $task = 'venerauibench'
         try {
@@ -187,20 +182,8 @@ switch ($Action) {
             }
         } finally {
             Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
-            & logman.exe stop veneraperf -ets | Out-Null
+            & $tracer stop
         }
-        Copy-Item $etl (Join-Path $Out 'perf.etl') -Force
-        & tracerpt.exe $etl -o (Join-Path $Out 'perf.csv') -of CSV -y | Out-Null
-        # tracerpt leaves these providers' events unnamed: their names and fields, by id and version, for the summary.
-        $events = foreach ($n in @('Microsoft-Windows-DxgKrnl', 'Microsoft-Windows-Dwm-Core')) {
-            foreach ($e in (Get-WinEvent -ListProvider $n).Events) {
-                $fields = @()
-                if ($e.Template) { $fields = @(([xml]$e.Template).template.data | ForEach-Object { $_.name }) }
-                [pscustomobject]@{ provider = $n; id = $e.Id; version = $e.Version; task = $e.Task.Name
-                                   opcode = $e.Opcode.Name; fields = $fields }
-            }
-        }
-        $events | ConvertTo-Json -Depth 3 -Compress | Set-Content (Join-Path $Out 'events.json') -Encoding utf8
         if (Test-Path $report) { Get-Content $report } else { Write-Host 'uibench wrote no report' -ForegroundColor Yellow }
         Write-Host "Results in $Out" -ForegroundColor Green
     }
