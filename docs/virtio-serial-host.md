@@ -137,7 +137,11 @@ Replace `--database` with the history store path used by the receiver background
 
 Expand the toolbar filter panel to adjust conditions alongside the event list. Header separators adjust column widths; the separator between the list and details adjusts the detail area width. Separators also support arrow keys. The Overview, Metadata, and Raw record detail views show text and program information, complete fields, and copyable original content, respectively; content areas support scrolling.
 
-The sidebar's System information queries the current connection and Windows system report through the receiver background process specified by `--control`. The control path should match `receive --control`. The report follows Venera Panel's sections, showing drivers, graphics host, guest, graphics APIs, video memory, and settings, with collection time and session. The refresh button collects a new report.
+The sidebar's System information queries the current connection and Windows system report through the receiver background process specified by `--control`. The control path should match `receive --control`. The connection card shows the actually negotiated debug channel protocol version and debug service version. The report follows Venera Panel's sections, showing drivers, graphics host, guest, graphics APIs, video memory, and settings, with collection time and session. A progress indicator appears during collection. Refresh retains the current report, then updates its content and time on completion.
+
+![Log workbench filters, event list, and details](images/debug-channel-logs.png)
+
+![System information connection versions and responsive report](images/debug-channel-system.png)
 
 ## Venera protocol v1
 
