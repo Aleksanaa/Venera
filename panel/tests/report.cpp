@@ -21,8 +21,8 @@ int main()
         {L"\ue701", L"Empty", {}}};
     assert(reportJson(sections) ==
            "{\"sections\":[{\"title\":\"系统 🚀\",\"rows\":[{\"key\":\"名\\\"称\","
-           "\"value\":\"第一行\\u000aC:\\\\GPU\\u0009\\\"ready\\\"\",\"bad\":false,\"warning\":\"\"},"
-           "{\"key\":\"API\",\"value\":\"Failed\",\"bad\":true,\"warning\":\"重试\\u000d\\u000a检查\"}]},"
+           "\"value\":\"第一行\\nC:\\\\GPU\\t\\\"ready\\\"\",\"bad\":false,\"warning\":\"\"},"
+           "{\"key\":\"API\",\"value\":\"Failed\",\"bad\":true,\"warning\":\"重试\\r\\n检查\"}]},"
            "{\"title\":\"Empty\",\"rows\":[]}]}");
     assert(reportJson({}) == "{\"sections\":[]}");
     assert(anyProblem(sections) == true);

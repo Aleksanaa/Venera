@@ -10,17 +10,20 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
   return()
 endif()
 
+find_package(nlohmann_json CONFIG REQUIRED)
+
 add_executable(vkprobe vkprobe.cpp)
 add_executable(source-runtime-venera source-runtime-venera.cpp
   ../../umd/common/log.cpp ../../umd/common/stacks.cpp)
 target_include_directories(source-runtime-venera PRIVATE ../../umd/common)
-target_link_libraries(source-runtime-venera PRIVATE advapi32)
+target_link_libraries(source-runtime-venera PRIVATE advapi32 nlohmann_json::nlohmann_json)
 target_link_options(source-runtime-venera PRIVATE -static -static-libgcc -static-libstdc++)
 add_executable(source-runtime-resolution source-runtime-resolution.cpp
   ../../kmd/yttrium/viogpu/shared/log.cpp)
 target_include_directories(source-runtime-resolution PRIVATE ../../kmd/yttrium/viogpu/shared)
 target_compile_definitions(source-runtime-resolution PRIVATE UNICODE _UNICODE)
 target_link_options(source-runtime-resolution PRIVATE -static -static-libgcc -static-libstdc++)
+target_link_libraries(source-runtime-resolution PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(vkprobe PRIVATE venera-vulkan-headers)
 target_link_options(vkprobe PRIVATE -static -static-libgcc -static-libstdc++)
 

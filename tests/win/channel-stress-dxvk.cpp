@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <cstdio>
 #include <string>
+#include <cmath>
+#include <nlohmann/json.hpp>
 
 namespace dxvk { Logger Logger::s_instance("channel-stress.log"); }
 
@@ -22,8 +24,8 @@ int main()
         ++calls;
     };
     emit("channel-stress marker literal");
-    std::printf("{\"phase\":\"marker\",\"pid\":%lu,\"bitness\":%u,\"calls\":%u}\n",
-                GetCurrentProcessId(), unsigned(sizeof(void*) * 8), calls);
+    std::puts(nlohmann::ordered_json({{"phase", "marker"}, {"pid", GetCurrentProcessId()},
+        {"bitness", unsigned(sizeof(void*) * 8)}, {"calls", calls}}).dump().c_str());
     std::fflush(stdout);
     for (unsigned sequence = 1; sequence <= 20000; ++sequence) {
         QueryPerformanceCounter(&end);
@@ -37,10 +39,13 @@ int main()
         ++numbered;
     }
     QueryPerformanceCounter(&end);
-    std::printf("{\"phase\":\"completed\",\"pid\":%lu,\"bitness\":%u,\"entry\":\"dxvk::Logger::info\","
-                "\"calls\":%u,\"numbered_calls\":%u,\"payload_bytes\":1024,\"elapsed_ms\":%.3f,\"max_call_ms\":%.3f}\n",
-                GetCurrentProcessId(), unsigned(sizeof(void*) * 8), calls, numbered,
-                double(end.QuadPart - start.QuadPart) * 1000 / double(frequency.QuadPart),
-                double(longest) * 1000 / double(frequency.QuadPart));
+    auto milliseconds = [&](LONGLONG ticks) {
+        return std::round(double(ticks) * 1000000 / double(frequency.QuadPart)) / 1000;
+    };
+    std::puts(nlohmann::ordered_json({{"phase", "completed"}, {"pid", GetCurrentProcessId()},
+        {"bitness", unsigned(sizeof(void*) * 8)}, {"entry", "dxvk::Logger::info"},
+        {"calls", calls}, {"numbered_calls", numbered}, {"payload_bytes", 1024},
+        {"elapsed_ms", milliseconds(end.QuadPart - start.QuadPart)},
+        {"max_call_ms", milliseconds(longest)}}).dump().c_str());
     return dxvk::Logger::logLevel() == dxvk::LogLevel::Info ? 0 : 2;
 }

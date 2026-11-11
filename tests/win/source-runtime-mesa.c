@@ -3,6 +3,7 @@
 #include "util/os_misc.h"
 #include <windows.h>
 #include <stdio.h>
+#include "source-runtime-json.h"
 
 int main(void)
 {
@@ -13,6 +14,6 @@ int main(void)
     mesa_log(MESA_LOG_INFO, "MESA-VIRTIO", "source-runtime mesa virtio info literal");
     os_log_message("source-runtime mesa os_log_message literal\n");
     os_log_message("MESA-VIRTIO: source-runtime mesa os virtio literal\n");
-    printf("{\"pid\":%lu,\"entry\":\"mesa_log/os_log_message\"}\n", (unsigned long)GetCurrentProcessId());
+    source_runtime_mesa_json((unsigned long)GetCurrentProcessId());
     return 0;
 }

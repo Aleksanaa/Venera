@@ -36,15 +36,16 @@ std::wstring edit(HWND window,int id) {
     HWND control=GetDlgItem(window,id); int n=GetWindowTextLengthW(control);
     std::wstring s(n+1,L'\0'); GetWindowTextW(control,s.data(),n+1); s.resize(n); return s;
 }
-std::string list(const std::wstring& text) {
-    if(text==L"All" || text.empty()) return "[]";
-    std::wistringstream stream(text); std::wstring item; std::string out="[";
+debugjson::Json list(const std::wstring& text) {
+    auto out=debugjson::Json::array();
+    if(text==L"All" || text.empty()) return out;
+    std::wistringstream stream(text); std::wstring item;
     while(std::getline(stream,item,L',')) {
         size_t first=item.find_first_not_of(L" \t"), last=item.find_last_not_of(L" \t");
         if(first==std::wstring::npos) continue;
-        if(out.size()>1) out+=','; out+=debugJsonString(item.substr(first,last-first+1));
+        out.push_back(narrow(item.substr(first,last-first+1)));
     }
-    return out+"]";
+    return out;
 }
 bool integer(const std::wstring& s, unsigned long long& n) {
     if(s.empty()||s.find_first_not_of(L"0123456789")!=std::wstring::npos) return false;
@@ -81,10 +82,10 @@ INT_PTR CALLBACK filterProc(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
         if(LOWORD(wp)==IDCANCEL) { EndDialog(window,0); return TRUE; }
         if(LOWORD(wp)==IDOK) {
             auto* form=reinterpret_cast<FilterForm*>(GetWindowLongPtrW(window,DWLP_USER));
-            std::string targets=debugjson::encode(form->current["targets"]); std::wstring error;
+            auto targets=form->current["targets"].json; std::wstring error;
             int mode=SendDlgItemMessageW(window,503,CB_GETCURSEL,0,0);
             auto target=edit(window,504); unsigned long long n=0;
-            if(mode==1) targets="[]";
+            if(mode==1) targets=debugjson::Json::array();
             if(mode==2) {
                 if(!integer(target,n)||!n||n>MAXDWORD) error=L"Enter a running process ID.";
                 else {
@@ -94,24 +95,24 @@ INT_PTR CALLBACK filterProc(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
                         error=L"The process creation time could not be read. Choose a running process.";
                     else {
                         ULARGE_INTEGER time; time.LowPart=created.dwLowDateTime; time.HighPart=created.dwHighDateTime;
-                        targets="[{\"kind\":\"process_instance\",\"pid\":"+std::to_string(n)+
-                            ",\"start_time_filetime\":\""+std::to_string(time.QuadPart)+"\",\"include_descendants\":true}]";
+                        targets=debugjson::Json::array({{{"kind","process_instance"},{"pid",n},
+                            {"start_time_filetime",std::to_string(time.QuadPart)},{"include_descendants",true}}});
                     }
                     if(process) CloseHandle(process);
                 }
             } else if(mode==3) {
                 if(target.size()<3 || !((target[1]==L':'&&(target[2]==L'\\'||target[2]==L'/')) || target.substr(0,2)==L"\\\\"))
                     error=L"Enter the complete executable path.";
-                else targets="[{\"kind\":\"exe_path\",\"path\":"+debugJsonString(target)+"}]";
+                else targets=debugjson::Json::array({{{"kind","exe_path"},{"path",narrow(target)}}});
             }
             std::wstring duration=edit(window,505); unsigned long long minutes=0;
             if(!duration.empty() && (!integer(duration,minutes)||!minutes||minutes>~0ull/60000))
                 error=L"Enter a positive number of minutes.";
             if(!error.empty()) { MessageBoxW(window,error.c_str(),L"Debug filter",MB_OK|MB_ICONWARNING); return TRUE; }
-            form->json="{\"filter\":{\"components\":"+list(edit(window,501))+",\"levels\":"+list(edit(window,502))+
-                       ",\"targets\":"+targets+"}";
-            if(minutes) form->json+=",\"duration_ms\":"+std::to_string(minutes*60000);
-            form->json+="}"; EndDialog(window,1); return TRUE;
+            debugjson::Json request={{"filter",{{"components",list(edit(window,501))},
+                {"levels",list(edit(window,502))},{"targets",targets}}}};
+            if(minutes) request["duration_ms"]=minutes*60000;
+            form->json=request.dump(); EndDialog(window,1); return TRUE;
         }
     }
     return FALSE;

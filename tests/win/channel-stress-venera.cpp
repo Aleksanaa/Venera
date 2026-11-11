@@ -2,6 +2,7 @@
 #include "log.h"
 #include <windows.h>
 #include <cstdio>
+#include <nlohmann/json.hpp>
 
 int main()
 {
@@ -12,7 +13,7 @@ int main()
     logf(LogLevel::info, "source-runtime venera info literal");
     logf(LogLevel::debug, "source-runtime venera debug literal");
     VENERA_VERBOSE("source-runtime venera verbose literal");
-    std::printf("{\"pid\":%lu,\"bitness\":%u,\"entry\":\"log_init/logf/VENERA_VERBOSE\",\"verbose\":%s}\n",
-                GetCurrentProcessId(), unsigned(sizeof(void*) * 8), verbose() ? "true" : "false");
+    std::puts(nlohmann::ordered_json({{"pid", GetCurrentProcessId()}, {"bitness", unsigned(sizeof(void*) * 8)},
+        {"entry", "log_init/logf/VENERA_VERBOSE"}, {"verbose", verbose()}}).dump().c_str());
     return 0;
 }

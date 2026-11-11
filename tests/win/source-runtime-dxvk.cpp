@@ -2,6 +2,7 @@
 #include "log/log.h"
 #include <windows.h>
 #include <cstdio>
+#include <nlohmann/json.hpp>
 
 namespace dxvk { Logger Logger::s_instance("source-runtime-dxvk.log"); }
 int main()
@@ -11,7 +12,7 @@ int main()
     dxvk::Logger::info("source-runtime dxvk info literal");
     dxvk::Logger::debug("source-runtime dxvk debug literal");
     dxvk::Logger::trace("source-runtime dxvk trace literal");
-    std::printf("{\"pid\":%lu,\"entry\":\"dxvk::Logger\",\"threshold\":%u}\n",
-                GetCurrentProcessId(), unsigned(dxvk::Logger::logLevel()));
+    std::puts(nlohmann::ordered_json({{"pid", GetCurrentProcessId()},
+        {"entry", "dxvk::Logger"}, {"threshold", unsigned(dxvk::Logger::logLevel())}}).dump().c_str());
     return 0;
 }

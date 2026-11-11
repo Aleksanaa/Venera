@@ -21,7 +21,7 @@
     in {
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
-          cmake ninja pkg-config
+          cmake ninja pkg-config nlohmann_json
           # Host Rust tools with standard libraries for Linux and Windows GNU.
           cargo mingw.buildPackages.rustc
           nodejs_22 yarn-berry
