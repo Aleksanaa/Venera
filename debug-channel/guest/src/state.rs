@@ -446,8 +446,8 @@ pub struct State {
     pub status: Status,
     forwarding_generation: u64,
     pub stream_id: String,
-    #[cfg(windows)]
     pub sequence: u64,
+    local_sequence: u64,
     deadline: Option<Instant>,
     pub filter_started_filetime: u64,
     pub controls: VecDeque<Vec<u8>>,
@@ -480,8 +480,8 @@ impl State {
             },
             stream_id,
             forwarding_generation: 0,
-            #[cfg(windows)]
             sequence: 0,
+            local_sequence: 0,
             deadline: None,
             filter_started_filetime: 0,
             controls: VecDeque::new(),
@@ -519,6 +519,66 @@ impl State {
     pub fn broadcast(&mut self, bytes: Vec<u8>) {
         self.subscribers
             .retain(|subscriber| subscriber.try_send(bytes.clone()).is_ok());
+    }
+    pub fn publish_capture(
+        &mut self,
+        capture: crate::collector::Capture,
+        class: Option<crate::collector::Classification>,
+        ancestors: &[venera_debug_protocol::ProcessIdentity],
+    ) {
+        let class = class.unwrap_or_else(|| crate::collector::Classification {
+            component: String::new(),
+            level: "unknown".into(),
+            raw_level: "unknown".into(),
+            tid: None,
+        });
+        if class.component == "probe" {
+            return;
+        }
+        self.local_sequence += 1;
+        let record = venera_debug_protocol::LogRecord {
+            stream_id: self.stream_id.clone(),
+            seq: self.local_sequence,
+            observed_at: capture.observed_at,
+            source_time: capture.source_time,
+            source: capture.source,
+            component: class.component,
+            level: class.level,
+            raw_level: capture.raw_level.unwrap_or(class.raw_level),
+            session_id: capture.session_id,
+            process: capture.process,
+            tid: capture.tid.or(class.tid),
+            text: capture.text,
+        };
+        let forward = venera_debug_protocol::matches_filter(
+            &self.status.effective_filter,
+            &record,
+            ancestors,
+        );
+        let mut envelope = Envelope::new(Message::Log { record });
+        let bytes = venera_debug_protocol::encode(&envelope).unwrap();
+        if bytes.len() <= venera_debug_protocol::DEFAULT_MAX_LINE_BYTES {
+            self.broadcast(bytes);
+        }
+        if !forward {
+            return;
+        }
+        self.sequence += 1;
+        if let Message::Log { record } = &mut envelope.body {
+            record.seq = self.sequence;
+        }
+        let bytes = venera_debug_protocol::encode(&envelope).unwrap();
+        if bytes.len() > venera_debug_protocol::DEFAULT_MAX_LINE_BYTES {
+            self.queue_control(&Envelope::new(Message::Gap {
+                stream_id: self.stream_id.clone(),
+                reason: "record_size_exceeded".into(),
+                count: Some(1),
+                first_seq: Some(self.sequence),
+                last_seq: Some(self.sequence),
+            }));
+            return;
+        }
+        self.enqueue_log(self.sequence, bytes);
     }
     pub fn set_forwarding(&mut self, enabled: bool) {
         if !enabled {
@@ -722,9 +782,204 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn program_capture(text: &str) -> crate::collector::Capture {
+        crate::collector::Capture {
+            pid: Some(42),
+            tid: None,
+            session_id: Some(2),
+            observed_at: "2026-11-12T00:00:00Z".into(),
+            observed_filetime: 100,
+            source_time: None,
+            source: "dbwin".into(),
+            text: text.into(),
+            raw_level: None,
+            process: Some(venera_debug_protocol::ProcessIdentity {
+                pid: 42,
+                start_time_filetime: Some("100".into()),
+                exe_path: Some("C:\\Tools\\ordinary.exe".into()),
+            }),
+            component: None,
+        }
+    }
+    fn publish(state: &mut State, text: &str) {
+        let capture = program_capture(text);
+        let class = crate::collector::classify_capture(&capture);
+        state.publish_capture(capture, class, &[]);
+    }
+    #[test]
+    fn ordinary_program_reaches_local_subscription_and_v1_serial_with_identity() {
+        let mut state = State::new("run-1".into(), true);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        state.subscribers.push(sender);
+        publish(&mut state, "ordinary program: hello 中文");
+        let bytes = receiver.recv().unwrap();
+        let local = venera_debug_protocol::decode(&bytes).unwrap();
+        assert_eq!(
+            serde_json::to_value(&local).unwrap(),
+            json!({"major":1,"type":"log","stream_id":"run-1","seq":1,
+                "observed_at":"2026-11-12T00:00:00Z","source_time":null,"source":"dbwin",
+                "component":"","level":"unknown","raw_level":"unknown","session_id":2,
+                "process":{"pid":42,"start_time_filetime":"100","exe_path":"C:\\Tools\\ordinary.exe"},
+                "tid":null,"text":"ordinary program: hello 中文"})
+        );
+        let (_, queued) = state.next_line().unwrap();
+        assert_eq!(queued, bytes);
+        let serial = serial::encode(&venera_debug_protocol::decode(&queued).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&serial).unwrap(),
+            json!({"jsonrpc":"2.0","method":"log","params":{
+                "stream_id":"run-1","seq":"1","observed_at":"2026-11-12T00:00:00Z",
+                "source_time":null,"source":"dbwin","component":"","level":"unknown",
+                "raw_level":"unknown","session_id":2,
+                "process":{"pid":42,"start_time_filetime":"100","exe_path":"C:\\Tools\\ordinary.exe"},
+                "tid":null,"text":"ordinary program: hello 中文"}})
+        );
+    }
+    #[test]
+    fn component_filter_forwards_selected_producer_and_local_subscription_keeps_all() {
+        let mut state = State::new("run-1".into(), true);
+        state.apply(
+            Filter {
+                components: vec!["venus".into()],
+                ..Filter::default()
+            },
+            None,
+            None,
+        );
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        state.subscribers.push(sender);
+        publish(&mut state, "ordinary program: hello");
+        publish(&mut state, "MESA: info: mesa ready");
+        publish(&mut state, "MESA-VIRTIO: debug: venus ready");
+        let local: Vec<_> = receiver
+            .try_iter()
+            .map(|bytes| {
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                (
+                    value["seq"].clone(),
+                    value["component"].clone(),
+                    value["text"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            local,
+            vec![
+                (json!(1), json!(""), json!("ordinary program: hello")),
+                (json!(2), json!("mesa"), json!("MESA: info: mesa ready")),
+                (
+                    json!(3),
+                    json!("venus"),
+                    json!("MESA-VIRTIO: debug: venus ready"),
+                ),
+            ]
+        );
+        publish(&mut state, "MESA-VIRTIO: info: venus next");
+        let mut forwarded = Vec::new();
+        while let Some((generation, bytes)) = state.next_line() {
+            if generation.is_some() {
+                let envelope = venera_debug_protocol::decode(&bytes).unwrap();
+                let serial = serial::encode(&envelope).unwrap();
+                forwarded.push(serde_json::from_slice::<serde_json::Value>(&serial).unwrap());
+            } else {
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(value["type"], "status");
+            }
+        }
+        assert_eq!(
+            forwarded,
+            vec![
+                json!({"jsonrpc":"2.0","method":"log","params":{
+                    "stream_id":"run-1","seq":"1","observed_at":"2026-11-12T00:00:00Z",
+                    "source_time":null,"source":"dbwin","component":"venus","level":"debug",
+                    "raw_level":"debug","session_id":2,
+                    "process":{"pid":42,"start_time_filetime":"100","exe_path":"C:\\Tools\\ordinary.exe"},
+                    "tid":null,"text":"MESA-VIRTIO: debug: venus ready"}}),
+                json!({"jsonrpc":"2.0","method":"log","params":{
+                    "stream_id":"run-1","seq":"2","observed_at":"2026-11-12T00:00:00Z",
+                    "source_time":null,"source":"dbwin","component":"venus","level":"info",
+                    "raw_level":"info","session_id":2,
+                    "process":{"pid":42,"start_time_filetime":"100","exe_path":"C:\\Tools\\ordinary.exe"},
+                    "tid":null,"text":"MESA-VIRTIO: info: venus next"}}),
+            ]
+        );
+    }
+    #[test]
+    fn local_subscription_keeps_program_output_with_host_level_target_and_forwarding_selection() {
+        let mut state = State::new("run-1".into(), true);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        state.subscribers.push(sender);
+        for filter in [
+            Filter {
+                levels: vec!["error".into()],
+                ..Filter::default()
+            },
+            Filter {
+                targets: vec![Target::ExePath {
+                    path: "C:\\Other.exe".into(),
+                }],
+                ..Filter::default()
+            },
+        ] {
+            state.status.effective_filter = filter;
+            publish(&mut state, "ordinary program: selected locally");
+        }
+        state.status.effective_filter = Filter::default();
+        state.status.forwarding_enabled = false;
+        publish(&mut state, "ordinary program: selected locally");
+        let local: Vec<_> = receiver
+            .try_iter()
+            .map(|bytes| {
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                (value["seq"].clone(), value["text"].clone())
+            })
+            .collect();
+        assert_eq!(
+            local,
+            vec![
+                (json!(1), json!("ordinary program: selected locally")),
+                (json!(2), json!("ordinary program: selected locally")),
+                (json!(3), json!("ordinary program: selected locally")),
+            ]
+        );
+        assert_eq!(state.next_line(), None);
+        state.status.forwarding_enabled = true;
+        publish(&mut state, "ordinary program: forwarding resumed");
+        let (_, bytes) = state.next_line().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            (value["seq"].clone(), value["text"].clone()),
+            (json!(2), json!("ordinary program: forwarding resumed"))
+        );
+    }
     fn next_gap(state: &mut State) -> serde_json::Value {
         let (_, bytes) = state.next_line().unwrap();
         serde_json::to_value(venera_debug_protocol::decode(&bytes).unwrap()).unwrap()
+    }
+    #[test]
+    fn selected_oversized_record_reports_its_wire_sequence_and_next_record_continues() {
+        let mut state = State::new("run-1".into(), true);
+        state.status.effective_filter.components = vec!["venus".into()];
+        let oversized = "x".repeat(venera_debug_protocol::DEFAULT_MAX_LINE_BYTES);
+        publish(&mut state, &oversized);
+        assert_eq!(state.next_line(), None);
+        publish(&mut state, &format!("MESA-VIRTIO: info: {oversized}"));
+        assert_eq!(
+            next_gap(&mut state),
+            json!({"major":1,"type":"gap","stream_id":"run-1",
+                "reason":"record_size_exceeded","count":1,"first_seq":1,"last_seq":1})
+        );
+        publish(&mut state, "MESA-VIRTIO: info: ready");
+        let (_, bytes) = state.next_line().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            (
+                value["seq"].clone(),
+                value["component"].clone(),
+                value["text"].clone(),
+            ),
+            (json!(2), json!("venus"), json!("MESA-VIRTIO: info: ready"))
+        );
     }
     #[test]
     fn helper_loss_retries_the_entire_unreported_delta_after_control_pressure() {
@@ -785,19 +1040,28 @@ mod tests {
     #[test]
     fn forwarding_restart_admits_new_lines_and_invalidates_inflight_generation() {
         let mut state = State::new("run-1".into(), true);
-        state.enqueue_log(1, b"old\n".to_vec());
+        publish(&mut state, "old");
         let (old, bytes) = state.next_line().unwrap();
-        assert_eq!(bytes, b"old\n");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            (value["seq"].clone(), value["text"].clone()),
+            (json!(1), json!("old"))
+        );
         assert!(state.write_allowed(old));
         state.set_forwarding(false);
         assert!(!state.write_allowed(old));
+        publish(&mut state, "selected while forwarding is off");
         state.set_forwarding(true);
         assert!(!state.write_allowed(old));
         assert!(state.write_allowed(None));
-        state.enqueue_log(2, b"new\n".to_vec());
+        publish(&mut state, "new");
         while let Some((generation, bytes)) = state.next_line() {
             if generation.is_some() {
-                assert_eq!(bytes, b"new\n");
+                let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(
+                    (value["seq"].clone(), value["text"].clone()),
+                    (json!(3), json!("new"))
+                );
                 assert!(state.write_allowed(generation));
                 assert_ne!(generation, old);
                 return;
