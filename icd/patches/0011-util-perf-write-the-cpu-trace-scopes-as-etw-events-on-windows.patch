@@ -1,0 +1,267 @@
+From: venera_d3d12
+Subject: util/perf: write the CPU trace scopes as ETW events on Windows
+
+Mesa's trace scopes (MESA_TRACE_SCOPE, VN_TRACE_FUNC, ...) compile to nothing on Windows, where neither Perfetto
+nor atrace exists. Write them through ETW instead, with Venera's provider
+{6ceeacf1-f746-4fe6-bff7-a596fede9b4e} in the layout Venera's UMDs use (begin: name, u64 value; end; counter:
+name, i64 value), so a Venera trace (tests/win/venera-trace.exe) shows the driver's scopes on the same timeline
+as the UMDs' events and the host's GPU work.
+
+While no session listens, a scope costs one flag test: it no longer formats its name, which every
+MESA_TRACE_SCOPE did before, with or without a backend.
+
+diff -ruN a/meson.build b/meson.build
+--- a/meson.build	2026-11-11 17:03:46.760845901 +0800
++++ b/meson.build	2026-11-11 17:04:20.176585583 +0800
+@@ -2347,6 +2347,12 @@
+   pre_args += '-DHAVE_GPUVIS'
+ endif
+ 
++# Windows: the CPU trace macros write ETW events (src/util/perf/u_etw.c).
++with_etw = host_machine.system() == 'windows' and not with_perfetto
++if with_etw
++  pre_args += '-DHAVE_ETW'
++endif
++
+ with_sysprof = get_option('sysprof')
+ if with_sysprof
+   dep_sysprof = dependency('sysprof-capture-4', version: '>= 49.0')
+diff -ruN a/src/util/meson.build b/src/util/meson.build
+--- a/src/util/meson.build	2026-11-11 17:03:46.763356720 +0800
++++ b/src/util/meson.build	2026-11-11 17:04:20.177809655 +0800
+@@ -315,6 +315,13 @@
+   )
+ endif
+ 
++if with_etw
++  files_mesa_util += files(
++    'perf/u_etw.c',
++    'perf/u_etw.h',
++  )
++endif
++
+ if with_sysprof
+   files_mesa_util += files(
+     'perf/u_sysprof.c',
+diff -ruN a/src/util/perf/cpu_trace.h b/src/util/perf/cpu_trace.h
+--- a/src/util/perf/cpu_trace.h	2026-11-11 17:03:46.764479872 +0800
++++ b/src/util/perf/cpu_trace.h	2026-11-11 17:04:20.171171485 +0800
+@@ -9,6 +9,7 @@
+ #include "u_perfetto.h"
+ #include "u_gpuvis.h"
+ #include "u_sysprof.h"
++#include "u_etw.h"
+ 
+ #include "util/detect_os.h"
+ #include "util/macros.h"
+@@ -60,6 +61,27 @@
+          util_perfetto_trace_full_end(name, track_id, clock, timestamp);            \
+    } while (0)
+ 
++#elif defined(HAVE_ETW)
++
++#define _MESA_TRACE_BEGIN(name)                                              \
++   do {                                                                      \
++      if (unlikely(util_etw_is_enabled()))                                   \
++         util_etw_begin(name);                                               \
++   } while (0)
++#define _MESA_TRACE_END()                                                    \
++   do {                                                                      \
++      if (unlikely(util_etw_is_enabled()))                                   \
++         util_etw_end();                                                     \
++   } while (0)
++#define _MESA_TRACE_FLOW_BEGIN(name, id) _MESA_TRACE_BEGIN(name)
++#define _MESA_TRACE_SET_COUNTER(name, value)                                 \
++   do {                                                                      \
++      if (unlikely(util_etw_is_enabled()))                                   \
++         util_etw_counter(name, value);                                      \
++   } while (0)
++#define _MESA_TRACE_TIMESTAMP_BEGIN(name, track_id, flow_id, clock, timestamp)
++#define _MESA_TRACE_TIMESTAMP_END(name, track_id, clock, timestamp)
++
+ /* NOTE: for now disable atrace for C++ to workaround a ndk bug with ordering
+  * between stdatomic.h and atomic.h.  See:
+  *
+@@ -119,6 +141,16 @@
+ 
+ #define _MESA_TRACE_SCOPE_MAX_NAME_LENGTH 4096
+ 
++/* Whether a scope opens: with ETW only while a session listens, which also
++ * skips formatting the name, and keeps begin and end paired when a session
++ * starts inside the scope.
++ */
++#if defined(HAVE_ETW)
++#define _MESA_TRACE_SCOPE_ACTIVE(cond) ((cond) && util_etw_is_enabled())
++#else
++#define _MESA_TRACE_SCOPE_ACTIVE(cond) (cond)
++#endif
++
+ #define _MESA_TRACE_SCOPE_VAR_CONCAT(name, suffix) name##suffix
+ #define _MESA_TRACE_SCOPE_VAR(suffix)                                        \
+    _MESA_TRACE_SCOPE_VAR_CONCAT(_mesa_trace_scope_, suffix)
+@@ -155,9 +187,9 @@
+ static inline struct _mesa_trace_scope
+ _mesa_trace_scope_begin_name(bool cond, const char *name)
+ {
+-   struct _mesa_trace_scope scope = { .cond = cond };
++   struct _mesa_trace_scope scope = { .cond = _MESA_TRACE_SCOPE_ACTIVE(cond) };
+ 
+-   if (unlikely(cond)) {
++   if (unlikely(scope.cond)) {
+       _MESA_TRACE_BEGIN(name);
+       _MESA_GPUVIS_TRACE_BEGIN(name);
+       _MESA_SYSPROF_TRACE_BEGIN(scope.sysprof_trace, name);
+@@ -170,9 +202,9 @@
+ static inline struct _mesa_trace_scope
+ _mesa_trace_scope_begin(bool cond, const char *format, ...)
+ {
+-   struct _mesa_trace_scope scope = { .cond = cond };
++   struct _mesa_trace_scope scope = { .cond = _MESA_TRACE_SCOPE_ACTIVE(cond) };
+ 
+-   if (unlikely(cond)) {
++   if (unlikely(scope.cond)) {
+       char name[_MESA_TRACE_SCOPE_MAX_NAME_LENGTH];
+       va_list args;
+ 
+@@ -195,9 +227,9 @@
+                              const char *name,
+                              struct mesa_trace_flow *flow)
+ {
+-   struct _mesa_trace_scope scope = { .cond = cond };
++   struct _mesa_trace_scope scope = { .cond = _MESA_TRACE_SCOPE_ACTIVE(cond) };
+ 
+-   if (unlikely(cond)) {
++   if (unlikely(scope.cond)) {
+       if (flow->id == 0) {
+          flow->id = util_perfetto_next_id();
+          flow->start_time = os_time_get_nano();
+diff -ruN a/src/util/perf/u_etw.c b/src/util/perf/u_etw.c
+--- a/src/util/perf/u_etw.c	1970-01-01 08:00:00.000000000 +0800
++++ b/src/util/perf/u_etw.c	2026-11-11 17:04:02.116984196 +0800
+@@ -0,0 +1,78 @@
++/*
++ * Copyright 2026 Venera contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++#include "u_etw.h"
++
++#include <windows.h>
++
++#include <evntprov.h>
++#include <evntrace.h>
++#include <string.h>
++
++bool util_etw_enabled;
++
++static const GUID provider = {
++   0x6ceeacf1, 0xf746, 0x4fe6, {0xbf, 0xf7, 0xa5, 0x96, 0xfe, 0xde, 0x9b, 0x4e}};
++
++static REGHANDLE handle;
++
++static void NTAPI
++on_enable(LPCGUID source, ULONG is_enabled, UCHAR level, ULONGLONG any,
++          ULONGLONG all, PEVENT_FILTER_DESCRIPTOR filter, PVOID context)
++{
++   /* a state capture leaves the provider enabled */
++   if (is_enabled != EVENT_CONTROL_CODE_CAPTURE_STATE)
++      p_atomic_set(&util_etw_enabled,
++                   is_enabled != EVENT_CONTROL_CODE_DISABLE_PROVIDER);
++}
++
++/* For the module's lifetime: ETW calls on_enable, so the registration must
++ * be gone before the module unloads.
++ */
++__attribute__((constructor)) static void
++util_etw_register(void)
++{
++   EventRegister(&provider, on_enable, NULL, &handle);
++}
++
++__attribute__((destructor)) static void
++util_etw_unregister(void)
++{
++   p_atomic_set(&util_etw_enabled, false);
++   EventUnregister(handle);
++}
++
++static void
++write_event(USHORT id, ULONG count, EVENT_DATA_DESCRIPTOR *data)
++{
++   EVENT_DESCRIPTOR d;
++   EventDescCreate(&d, id, 0, 0, 4 /* information */, 0, 0, 0);
++   EventWrite(handle, &d, count, data);
++}
++
++void
++util_etw_begin(const char *name)
++{
++   const uint64_t value = 0;
++   EVENT_DATA_DESCRIPTOR d[2];
++   EventDataDescCreate(&d[0], name, strlen(name) + 1);
++   EventDataDescCreate(&d[1], &value, sizeof(value));
++   write_event(1, 2, d);
++}
++
++void
++util_etw_end(void)
++{
++   write_event(2, 0, NULL);
++}
++
++void
++util_etw_counter(const char *name, int64_t value)
++{
++   EVENT_DATA_DESCRIPTOR d[2];
++   EventDataDescCreate(&d[0], name, strlen(name) + 1);
++   EventDataDescCreate(&d[1], &value, sizeof(value));
++   write_event(4, 2, d);
++}
+diff -ruN a/src/util/perf/u_etw.h b/src/util/perf/u_etw.h
+--- a/src/util/perf/u_etw.h	1970-01-01 08:00:00.000000000 +0800
++++ b/src/util/perf/u_etw.h	2026-11-11 17:03:54.673917165 +0800
+@@ -0,0 +1,44 @@
++/*
++ * Copyright 2026 Venera contributors
++ * SPDX-License-Identifier: MIT
++ */
++
++/* Mesa's CPU trace scopes as ETW events on Windows, through Venera's
++ * provider {6ceeacf1-f746-4fe6-bff7-a596fede9b4e}: begin (id 1: name, u64
++ * value), end (id 2) and counter (id 4: name, i64 value), in the layout
++ * Venera's UMDs write (umd/common/trace.h).
++ */
++
++#ifndef U_ETW_H
++#define U_ETW_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#include "util/u_atomic.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifdef HAVE_ETW
++
++extern bool util_etw_enabled;
++
++static inline bool
++util_etw_is_enabled(void)
++{
++   return p_atomic_read_relaxed(&util_etw_enabled);
++}
++
++void util_etw_begin(const char *name);
++void util_etw_end(void);
++void util_etw_counter(const char *name, int64_t value);
++
++#endif /* HAVE_ETW */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* U_ETW_H */
