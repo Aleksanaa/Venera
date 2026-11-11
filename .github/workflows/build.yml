@@ -21,6 +21,10 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CCACHE_MAXSIZE: 2G
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CARGO_HOME: ${{ github.workspace }}/build/cargo-home
+      CARGO_TARGET_DIR: ${{ github.workspace }}/build/debug-channel
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,6 +32,9 @@ jobs:
           fetch-depth: 0  # the commit count is part of the version
 
       - uses: cachix/install-nix-action@v31
+
+      - name: Configure the compiler cache
+        run: echo "CCACHE_DIR=$HOME/.cache/ccache" >> "$GITHUB_ENV"
 
       - name: Cache the WDK and SDK headers
         uses: actions/cache@v4
@@ -38,22 +45,43 @@ jobs:
       - name: Fetch the WDK and SDK headers
         run: cmake/fetch-winkits.sh
 
-      # The dev shell's ccache wraps the MinGW compilers (Mesa, DXVK, vkd3d-proton, the UMDs). A cache is saved per
-      # commit and the newest one restored, so pull requests start from main's.
+      # Seed each commit with the newest compiler cache for this toolchain.
       - name: Cache the compiler output
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
-          key: ccache-${{ github.sha }}
-          restore-keys: ccache-
+          key: ccache-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'cmake/*.cmake', 'cmake/fetch-winkits.sh', 'icd/build.sh') }}-${{ github.sha }}
+          restore-keys: |
+            ccache-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock', 'cmake/*.cmake', 'cmake/fetch-winkits.sh', 'icd/build.sh') }}-
+            ccache-
+
+      - name: Cache Cargo downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/cargo-home/registry/index
+            build/cargo-home/registry/cache
+            build/cargo-home/git/db
+          key: cargo-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('debug-channel/Cargo.lock') }}
+          restore-keys: |
+            cargo-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache Rust build output
+        uses: actions/cache@v4
+        with:
+          path: build/debug-channel
+          key: cargo-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}-${{ hashFiles('debug-channel/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            cargo-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}-${{ hashFiles('debug-channel/Cargo.lock') }}-
+            cargo-target-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}-
 
       - name: Prepare the dev shell
         run: nix develop -c ccache -z
 
       - name: Validate the protocol contract
         run: |
-          nix develop -c cargo test --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --features schema
-          nix develop -c cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema -- --check
+          nix develop -c cargo test --locked --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --features schema
+          nix develop -c cargo run --locked --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema -- --check
 
       - uses: actions/setup-python@v5
         with:
