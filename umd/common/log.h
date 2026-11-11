@@ -1,4 +1,17 @@
 // SPDX-License-Identifier: MIT
+// The log, for what happened; trace.h, for when and for how long.
+//
+// Log what explains behaviour: failures, fallbacks taken, capability answers, which path a process took (the first few
+// presents), anomalies someone has to read (a wait stalled for seconds). Users often have it on before a problem
+// shows, so it is what we get without asking for a trace. A line costs formatting, a lock shared by all threads and a
+// file write (tens of us): log only what happens rarely, never per frame, batch or wait (VENERA_VERBOSE lines are
+// correctness answers, high-volume only while asked for).
+//
+// Trace what measures it: per-frame, per-batch and per-wait timing, where the timestamp is the information. Traces cost
+// a flag test unless a session records, and are read on a timeline, never as text.
+//
+// An event goes to one of them. An error stays a log line even where its time also shows on the timeline (the wait
+// it happened in is a span already).
 #pragma once
 
 #include <initializer_list>

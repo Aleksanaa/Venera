@@ -36,6 +36,7 @@ add_library(venera-umd-common STATIC
     common/shared_surface.cpp
     common/shader_container.cpp
     common/stacks.cpp
+    common/trace.cpp
     common/vulkan_device.cpp
     common/vulkan_icd.cpp)
 target_include_directories(venera-umd-common PUBLIC common)

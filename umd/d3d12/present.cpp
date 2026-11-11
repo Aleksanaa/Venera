@@ -20,6 +20,7 @@
 #include "objects.h"
 #include "kmt.h"
 #include "shared_surface.h"
+#include "trace.h"
 #include "viogpu_abi.h"
 
 #include <atomic>
@@ -270,6 +271,7 @@ bool make_resident(Device& d, PresentCopies& pc, D3DKMT_HANDLE allocation)
 // its earlier work, and waits until that and all earlier work is complete; that copy's allocation, or 0.
 D3DKMT_HANDLE copy_for_present(Device& d, CommandQueueObject& q, const D3D12DDI_ARG_PRESENTSURFACE& surface)
 {
+    trace::Scope span("d3d12.present_copy");
     ID3D12Resource* src = resource_of(surface.hSurface);
     if (!src)
         return 0;
@@ -387,6 +389,7 @@ void APIENTRY present(D3D12DDI_HCOMMANDLIST hl, D3D12DDI_HCOMMANDQUEUE hq, const
     const D3DKMT_HANDLE dst = allocation_of(args->hDstResource);
     static std::atomic<unsigned> count{0};
     const unsigned n = count.fetch_add(1, std::memory_order_relaxed);
+    trace::Scope span("d3d12.present", n);
     if (hl.pDrvPrivate)
         object<CommandListObject>(hl)->present_only = true;   // we record nothing into it
     bool copied = false;

@@ -3,6 +3,7 @@
 #include "device.h"
 #include "ddi_slots.h"
 #include "stubs.h"
+#include "trace.h"
 
 namespace venera::umd {
 
@@ -86,6 +87,7 @@ void Device::flush_clears()
 
 HRESULT Device::wait_idle()
 {
+    trace::Scope span("d3d11.wait_idle");
     // DXVK sets the event when the flushed submission completes, by its own submission tracking. Not an ID3D11Fence:
     // DXVK's ID3D11Fence signals never completed here (their timeline semaphores stayed at 0 on the host;
     // d3d11probe's fence test reproduces it).

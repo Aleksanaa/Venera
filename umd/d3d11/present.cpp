@@ -8,6 +8,7 @@
 #include "device.h"
 #include "device_memory.h"
 #include "shared_surface.h"
+#include "trace.h"
 
 #include <atomic>
 
@@ -411,6 +412,7 @@ namespace {
 
 HRESULT present_callback(Device& d, D3DKMT_HANDLE src, D3DKMT_HANDLE dst, void* dxgi_context)
 {
+    trace::Scope span("dxgi.PresentCb");
     DXGIDDICB_PRESENT p{};
     p.hSrcAllocation = src;
     p.hDstAllocation = dst;
@@ -476,6 +478,7 @@ BltRing* blt_ring_for(Device& d, ResourceObject& src)
 // Waits until the GPU has done the copy into stage `i`: usually already, a frame after it was submitted.
 HRESULT wait_for_copy(Device& d, BltRing& ring, unsigned i)
 {
+    trace::Scope span("d3d11.wait_for_copy");
     const DWORD start = GetTickCount();
     HRESULT hr;
     while ((hr = d.ctx->GetData(ring.copied[i].get(), nullptr, 0, 0)) == S_FALSE) {
@@ -518,6 +521,7 @@ HRESULT APIENTRY present(DXGI_DDI_ARG_PRESENT* a)
     const D3DKMT_HANDLE src = allocation_of(a->hSurfaceToPresent), dst = allocation_of(a->hDstResource);
     static std::atomic<unsigned> count{0};
     const unsigned n = count.fetch_add(1, std::memory_order_relaxed);
+    trace::Scope span("d3d11.present", n);
     if (!src) {
         VENERA_WARN("Present: surface %p has no allocation", reinterpret_cast<void*>(a->hSurfaceToPresent));
         return E_INVALIDARG;

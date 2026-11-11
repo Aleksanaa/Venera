@@ -2,6 +2,7 @@
 #include "queue_bridge.h"
 #include "device.h"
 #include "log.h"
+#include "trace.h"
 
 namespace venera::umd {
 
@@ -94,8 +95,8 @@ bool QueueBridge::create_kernel_fence(D3DKMT_HANDLE* out)
 void QueueBridge::execute(UINT count, ID3D12CommandList* const* lists)
 {
     const uint64_t value = ++next_;
-    if (verbose())
-        VENERA_TRACE("queue: execute %llu: %u lists", static_cast<unsigned long long>(value), count);
+    trace::Scope span("d3d12.execute", value);
+    trace::instant("d3d12.queued", trace::id_of(this), value);
     if (blocking_) {
         queue_->ExecuteCommandLists(count, lists);
         queue_->Signal(finished_.get(), value);
@@ -117,9 +118,12 @@ void QueueBridge::execute(UINT count, ID3D12CommandList* const* lists)
         VENERA_WARN("ExecuteCommandLists: gate signal %llu failed: 0x%08lx", static_cast<unsigned long long>(value),
                     hr);
 
-    queue_->Wait(open_.get(), value);
-    queue_->ExecuteCommandLists(count, lists);
-    queue_->Signal(finished_.get(), value);
+    {
+        trace::Scope submit("vkd3d.ExecuteCommandLists", count);
+        queue_->Wait(open_.get(), value);
+        queue_->ExecuteCommandLists(count, lists);
+        queue_->Signal(finished_.get(), value);
+    }
     {
         std::lock_guard g(lock_);
         gates_.push_back(value);
@@ -163,6 +167,7 @@ bool QueueBridge::wait_from_cpu(D3DKMT_HANDLE fence, uint64_t value)
 
 void QueueBridge::wait_idle()
 {
+    trace::Scope span("d3d12.wait_idle", next_);
     if (!blocking_ && next_)
         wait_from_cpu(done_, next_);
 }
@@ -180,6 +185,7 @@ void QueueBridge::gate_loop()
             gates_.pop_front();
         }
         wait_from_cpu(gate_, value);   // on failure, open anyway rather than deadlock the runtime
+        trace::instant("d3d12.open", trace::id_of(this), value);
         open_->Signal(value);
     }
 }
@@ -203,15 +209,13 @@ void QueueBridge::completion_loop()
                 if (stop_)
                     break;
             }
+        trace::instant("d3d12.finished", trace::id_of(this), value);
         D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMCPU s{};
         s.ObjectCount = 1;
         s.ObjectHandleArray = &done_;
         s.FenceValueArray = &value;
-        if (verbose())
-            VENERA_TRACE("queue: done %llu: signalling", static_cast<unsigned long long>(value));
         HRESULT hr = device_.kt_callbacks->pfnSignalSynchronizationObjectFromCpuCb(device_.rt_device.handle, &s);
-        if (verbose())
-            VENERA_TRACE("queue: done %llu: signalled (0x%08lx)", static_cast<unsigned long long>(value), hr);
+        trace::instant("d3d12.done", trace::id_of(this), value);
         if (FAILED(hr))
             VENERA_WARN("queue: done signal %llu failed: 0x%08lx", static_cast<unsigned long long>(value), hr);
     }
