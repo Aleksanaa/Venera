@@ -5,14 +5,13 @@
 ## 构建与运行
 
 ```sh
-cd debug-channel
-cargo build --release -p venera-debug-host
+nix develop -c scripts/build workbench
 ```
 
 QEMU 为专用 virtserialport 提供 Unix socket listener，后台连接该路径并持续重连：
 
 ```sh
-venera-debug-host receive \
+build/debug-channel/release/venera-debug-host receive \
   --socket /run/user/1000/venera-debug.sock \
   --control /run/user/1000/venera-control.sock \
   --database /home/user/.local/share/venera/history.db \
@@ -28,8 +27,8 @@ venera-debug-host receive \
 从仓库根目录运行，选择可访问的 QEMU socket 路径。以下命令将编译产物放在用户程序目录，并渲染服务模板中的启动命令：
 
 ```sh
-nix develop --command cargo build --manifest-path debug-channel/Cargo.toml --release -p venera-debug-host
-install -Dm755 debug-channel/target/release/venera-debug-host "$HOME/.local/bin/venera-debug-host"
+nix develop -c scripts/build workbench
+install -Dm755 build/debug-channel/release/venera-debug-host "$HOME/.local/bin/venera-debug-host"
 mkdir -p "$HOME/.local/share/venera" "$XDG_RUNTIME_DIR/venera"
 python3 scripts/venera-debug-host-service \
   --binary "$HOME/.local/bin/venera-debug-host" \
@@ -116,18 +115,13 @@ venera-debug-host export --database /home/user/.local/share/venera/history.db \
 
 ```sh
 # 从仓库根目录运行
-nix develop --command cargo build --manifest-path debug-channel/Cargo.toml \
-  -p venera-debug-host --features web
-cd debug-channel/web
-corepack yarn install --immutable
-corepack yarn build
-cd ../..
+nix develop -c scripts/build workbench
 ```
 
 启动工作台后，在浏览器打开 <http://127.0.0.1:8787>：
 
 ```sh
-debug-channel/target/debug/venera-debug-host web \
+build/debug-channel/release/venera-debug-host web \
   --database .harness/vm-debug/live.sqlite \
   --control .harness/vm-debug/host-control.sock \
   --assets debug-channel/web/dist
@@ -152,8 +146,8 @@ debug-channel/target/debug/venera-debug-host web \
 协议文档由共享 Rust 类型生成，生成与检查命令为：
 
 ```bash
-cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema
-cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema -- --check
+nix develop -c cargo run --locked --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema
+nix develop -c scripts/build check
 ```
 
 宿主后台将 JSON-RPC 消息解析为日志、状态、连接和缺口记录，持续写入 SQLite；浏览器工作台通过业务接口读取同一份历史并提供实时浏览、筛选、详情与 JSONL 导出。
@@ -161,20 +155,7 @@ cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --ex
 ## 验证
 
 ```sh
-cd debug-channel
-cargo fmt --check
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-python3 protocol/tests/schema.py
-python3 host/tests/deployment.py
+nix develop -c scripts/build check
 ```
 
-schema 验证脚本使用 Python `jsonschema`。Rust 测试覆盖字节切分、异常行恢复、筛选匹配，以及真实 Unix socket、CLI 控制、重连、重启、SQLite 淘汰与导出。
-
-从仓库根目录运行宿主集成检查：
-
-```sh
-nix develop --command cargo test --manifest-path debug-channel/Cargo.toml -p venera-debug-host
-python3 debug-channel/host/tests/deployment.py
-```
+此入口使用 Nix 提供的 Python `jsonschema` 验证两组 Schema，检查生成的协议文档与服务部署，并执行前端类型检查、测试、代码检查及构建。Rust 工作区测试启用宿主 Web 与协议 Schema 功能，覆盖字节切分、异常行恢复、筛选匹配，以及真实 Unix socket、CLI 控制、重连、重启、SQLite 淘汰与导出。

@@ -10,13 +10,19 @@ The package contains `vioser.inf`, `vioser.sys`, `vioser.cat` and its license no
 
 ## Build and install
 
-After preparing the KMD and Mesa outputs described in the [build instructions](../README.md#building), run from the repository root inside `nix develop`:
+From the repository root, use the certificate described in the [build instructions](../README.md#building):
 
 ```sh
-scripts/fetch-vioserial.sh
+export VENERA_KMD_SIGN_PFX=/absolute/path/to/existing-test-signing.pfx
+nix develop -c scripts/build installer
+```
+
+The versioned installer, ISO and accompanying notices are in `build/release/`. To select a custom VirtIO serial package after preparing the component outputs, configure CMake inside `nix develop`:
+
+```sh
 cmake -S . -B build/win -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
-  -DVENERA_VIOSERIAL_DIR="$PWD/build/vioserial/package"
+  -DVENERA_VIOSERIAL_DIR=/absolute/path/to/vioserial/package
 cmake --build build/win --target venera-setup
 ```
 
@@ -37,12 +43,6 @@ The selected release's `LICENSE.txt` contains BSD three-clause terms and copyrig
 - Binary distributions reproduce the copyright notice, conditions and disclaimer in their documentation or accompanying materials.
 - Use of the copyright holders' or contributors' names to endorse derived products requires prior written permission.
 
-Publish the extracted `LICENSE.txt` unchanged alongside the installer or ISO. The GitHub build workflow includes it as `vioserial-LICENSE.txt` in the ISO, build artifact and release assets. The installer also carries this notice within its embedded payload; its temporary installation staging directory is cleaned up after installation. For example, prepare a local release directory with:
-
-```sh
-mkdir -p build/release
-cp build/win/setup/venera-setup.exe build/release/
-cp build/vioserial/package/LICENSE.txt build/release/vioserial-LICENSE.txt
-```
+Publish the extracted `LICENSE.txt` unchanged alongside the installer or ISO. The build entry includes it as `build/release/vioserial-LICENSE.txt` and inside the ISO; the GitHub workflow publishes it with the build artifact and release assets. The installer also carries this notice within its embedded payload; its temporary installation staging directory is cleaned up after installation.
 
 The [vioserial source](https://github.com/virtio-win/kvm-guest-drivers-windows/blob/master/vioserial/sys/Driver.c) carries the corresponding three-clause notice. The release package's included notices accompany the particular binaries being distributed. Other components in Venera and in the full virtio-win ISO retain their respective licenses and copyright notices.
