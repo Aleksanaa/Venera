@@ -27,6 +27,8 @@ constexpr int kButtonPrimary = 100, kButtonReboot = 102;
 
 struct Options {
     bool silent = false, uninstall = false, test_signing = false, cleanup = false;
+    bool vioserial_only = false;
+    int vioserial = -1;
 };
 
 std::wstring version, build_id;
@@ -147,7 +149,7 @@ std::wstring warnings(const SystemState& s)
     return w;
 }
 
-bool confirm_install(const SystemState& s)
+bool confirm_install(const SystemState& s, bool& vioserial)
 {
     std::wstring heading, action = L"Install";
     if (s.installed_version.empty()) {
@@ -181,12 +183,23 @@ bool confirm_install(const SystemState& s)
     if (!w.empty())
         text += L"\n\nWarnings:" + w;
     text += L"\n\nThe new driver starts at the next reboot; the drivers it replaces are removed then.";
-    return wizard->ask({heading, {}, text, L"Ready.",
-                        {{kButtonPrimary, action}, {IDCANCEL, L"Cancel"}}}) == kButtonPrimary;
+    Page page{heading, {}, text, L"Ready.", {{kButtonPrimary, action}, {IDCANCEL, L"Cancel"}}};
+    if (vioserial_available()) {
+        page.option = L"Install the VirtIO serial driver for debug logging";
+        page.option_checked = vioserial;
+    }
+    bool confirmed = wizard->ask(page) == kButtonPrimary;
+    vioserial = vioserial_available() && wizard->option_checked();
+    return confirmed;
 }
 
 int run_install(const Options& opts)
 {
+    bool vioserial = vioserial_available() && opts.vioserial != 0;
+    if (opts.silent && opts.vioserial == -1)
+        fail(L"Choose /with-vioserial or /skip-vioserial for unattended installation", ERROR_INVALID_PARAMETER);
+    if (opts.vioserial == 1 && !vioserial_available())
+        fail(L"The VirtIO serial driver package is unavailable in this installer", ERROR_FILE_NOT_FOUND);
     SystemState s = inspect();
     log(s.summary());
     if (!s.x64 || s.build < 22000)
@@ -209,10 +222,21 @@ int run_install(const Options& opts)
     std::wstring w = warnings(s);
     if (!w.empty())
         log(L"Warnings:" + w);
-    if (wizard && !confirm_install(s))
+    if (wizard && !confirm_install(s, vioserial))
         return kCancelled;
-    return run_work(L"Installing Venera " + version, [&s](const Progress& p) { return install(s, version, p); },
+    return run_work(L"Installing Venera " + version, [&s, vioserial](const Progress& p) { return install(s, version, p, vioserial); },
                     L"Venera " + version + L" is installed");
+}
+
+int run_vioserial()
+{
+    if (!vioserial_available())
+        fail(L"The VirtIO serial driver package is unavailable in this installer", ERROR_FILE_NOT_FOUND);
+    if (wizard && wizard->ask({L"Install the VirtIO serial driver", {},
+                              L"Connect Venera debug logging to the virtual machine's VirtIO serial controller.",
+                              L"Ready.", {{kButtonPrimary, L"Install"}, {IDCANCEL, L"Cancel"}}}) != kButtonPrimary)
+        return kCancelled;
+    return run_work(L"Installing the VirtIO serial driver", install_vioserial, L"The VirtIO serial driver is installed");
 }
 
 int run_uninstall()
@@ -414,15 +438,28 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             opts.test_signing = true;
         else if (_wcsicmp(a.c_str(), L"/cleanup") == 0)
             opts.cleanup = opts.silent = true;
+        else if (_wcsicmp(a.c_str(), L"/vioserial") == 0)
+            opts.vioserial_only = true;
+        else if (_wcsicmp(a.c_str(), L"/with-vioserial") == 0)
+            opts.vioserial = 1;
+        else if (_wcsicmp(a.c_str(), L"/skip-vioserial") == 0)
+            opts.vioserial = 0;
         else {
             MessageBoxW(nullptr,
-                        L"venera-setup.exe [/S] [/testsigning]\n    Install or update; /S silently; /testsigning with "
-                        L"/S: turn test signing on if it is off.\n\nvenera-setup.exe /uninstall [/S]",
+                         L"venera-setup.exe [/S /with-vioserial | /S /skip-vioserial] [/testsigning]\n    Install or update; /S silently; /testsigning with "
+                         L"/S: turn test signing on if it is off.\n\nvenera-setup.exe /uninstall [/S]\n\n"
+                         L"venera-setup.exe /vioserial [/S]\n    Install the VirtIO serial driver.",
                         kTitle, MB_ICONINFORMATION);
             return a == L"/?" ? kDone : ERROR_INVALID_PARAMETER;
         }
     }
     LocalFree(argv);
+    if (static_cast<int>(opts.uninstall) + static_cast<int>(opts.cleanup) +
+            static_cast<int>(opts.vioserial_only) > 1) {
+        if (!opts.silent)
+            MessageBoxW(nullptr, L"Choose an installation task.", kTitle, MB_ICONINFORMATION);
+        return ERROR_INVALID_PARAMETER;
+    }
     log(format(L"venera-setup %ls (%ls): %ls", version.c_str(), build_id.c_str(), GetCommandLineW()));
 
     HANDLE instance = CreateMutexW(nullptr, TRUE, L"Global\\venera-setup");
@@ -440,7 +477,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             cleanup();
             code = kDone;
         } else {
-            code = opts.uninstall ? run_uninstall() : run_install(opts);
+            code = opts.vioserial_only ? run_vioserial() : opts.uninstall ? run_uninstall() : run_install(opts);
         }
     } catch (const Failure& f) {
         log(L"Failed: " + f.message);

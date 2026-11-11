@@ -4,6 +4,7 @@
 // The exe is a GUI program, which consoles do not wait for; venera-panel.com (shim.c) is the console program a shell
 // finds first, and runs the exe with its own console and handles.
 #include "panel.h"
+#include "debugchannel.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -30,8 +31,7 @@ const wchar_t kHelp[] =
     L"             group (d3d12), a test in one (d3d12.copy) or all. The exit code is 1 when one fails.\n"
     L"      /verbose   also print the output of those that pass\n"
     L"      /debug     turn the D3D12 debug layer on (needs the Graphics Tools optional feature)\n"
-    L"  /log       Print what the drivers log, as they log it, until Ctrl+C. Run as administrator for the\n"
-    L"             kernel driver's messages and services' output too.\n"
+    L"  /log       Follow driver messages from the debug service until Ctrl+C.\n"
     L"      /all       every program's debug output, not only the drivers'\n"
     L"  /set       List the settings, as on the Settings page, with their values and the values they take.\n"
     L"  /set NAME VALUE...\n"
@@ -196,19 +196,16 @@ int followLog(bool all)
     Output out(STD_OUTPUT_HANDLE), err(STD_ERROR_HANDLE);
     g_quit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     SetConsoleCtrlHandler([](DWORD) -> BOOL { return SetEvent(g_quit); }, TRUE);
-    LogCapture capture;
+    GuestLogs capture;
     capture.start([&](LogLine&& l) {
         if (all || !l.component.empty())
             out.print(formatLogLine(l) + L"\n");
     });
-    for (const std::wstring& e : {capture.userError, capture.kernelError})
-        if (!e.empty())
-            err.print(e + L".\n");
-    if (!capture.userError.empty() && !capture.kernelError.empty())
-        return 1;
-    WaitForSingleObject(g_quit, INFINITE);
+    while (capture.running() && WaitForSingleObject(g_quit, 100) != WAIT_OBJECT_0) {}
+    std::wstring error = capture.error();
     capture.stop();
-    return 0;
+    if (!error.empty()) err.print(error + L"\n");
+    return error.empty() ? 0 : 1;
 }
 
 // /update [CHANNEL] [/from FILE]: FILE is what the About page downloaded. Exits 0 when the installer started or Venera

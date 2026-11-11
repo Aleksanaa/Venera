@@ -1,0 +1,9 @@
+{"major":1,"type":"hello","role":"guest","software_version":"0.1.0","capabilities":["status","filter","gap"]}
+{"major":1,"type":"status.get","request_id":"host-1"}
+{"major":1,"type":"status","forwarding_enabled":true,"revision":0,"effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,"health":{"port":"present"},"loss":{"queue_dropped":0}}
+{"major":1,"type":"filter.set","request_id":"host-2","filter":{"components":["dxvk"],"levels":["warning"],"targets":[{"kind":"process_instance","pid":4120,"start_time_filetime":"134124000000000000","include_descendants":true},{"kind":"exe_path","path":"C:\\Games\\demo.exe"}]},"duration_ms":60000}
+{"major":1,"type":"request.result","request_id":"host-2","operation":"filter.set","ok":true,"revision":1,"effective_filter":{"components":["dxvk"],"levels":["warning"],"targets":[]},"expires_at":"2026-11-10T08:01:00Z","forwarding_enabled":true}
+{"major":1,"type":"log","stream_id":"guest-run-1","seq":42,"observed_at":"2026-11-10T08:00:01.123Z","source_time":null,"source":"dbwin","component":"dxvk","level":"warning","raw_level":"warn","session_id":2,"process":{"pid":4120,"start_time_filetime":"134124000000000000","exe_path":"C:\\Games\\demo.exe"},"tid":null,"text":"中文警告\n下一行"}
+{"major":1,"type":"gap","stream_id":"guest-run-1","reason":"queue_overflow","count":2,"first_seq":43,"last_seq":44}
+{"major":1,"type":"filter.reset","request_id":"host-3"}
+{"major":1,"type":"request.result","request_id":"host-3","operation":"filter.reset","ok":false,"error":{"code":"busy","message":"Try again"}}

@@ -22,7 +22,9 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
           cmake ninja pkg-config
-          unzip osslsigncode wimlib
+          # Host Rust tools with standard libraries for Linux and Windows GNU.
+          cargo mingw.buildPackages.rustc
+          unzip osslsigncode wimlib curl openssl
           # Mesa (icd/build.sh): meson and its Python code generators.
           meson bison flex
           (python3.withPackages (p: [ p.mako p.pyyaml p.packaging ]))
@@ -48,6 +50,9 @@
         VENERA_MINGW_MCFG_LIB = "${mcfg}/lib";
         VENERA_MINGW32_MCFG_INCLUDE = "${mcfg32.dev}/include";
         VENERA_MINGW32_MCFG_LIB = "${mcfg32}/lib";
+
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "${mingw.buildPackages.gcc}/bin/x86_64-w64-mingw32-gcc";
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${mingw.windows.pthreads}/lib";
 
         # Read by cmake/clang-cl-kmd.cmake. Not on PATH: unwrapped clang would shadow the host cc/cpp.
         VENERA_CLANG_CL = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang-cl";

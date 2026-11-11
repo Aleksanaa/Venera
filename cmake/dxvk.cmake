@@ -4,7 +4,16 @@
 # dev shell. Only the D3D11 parts are built: no D3D9/D3D8, and no DLLs (dxvk-objects.sh).
 
 set(DXVK_SRC "${CMAKE_SOURCE_DIR}/third_party/dxvk")
-set(DXVK_BUILD "${CMAKE_BINARY_DIR}/dxvk")
+set(DXVK_BUILD "${CMAKE_BINARY_DIR}/dxvk-debug-output")
+
+find_program(VENERA_PATCH patch REQUIRED)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/patches/debug-output/dxvk.patch")
+file(COPY "${DXVK_SRC}/" DESTINATION "${DXVK_BUILD}/source" PATTERN ".git" EXCLUDE)
+file(COPY_FILE "${DXVK_SRC}/src/util/log/log.cpp" "${DXVK_BUILD}/source/src/util/log/log.cpp")
+execute_process(COMMAND "${VENERA_PATCH}" -p1 -i "${CMAKE_SOURCE_DIR}/patches/debug-output/dxvk.patch"
+    WORKING_DIRECTORY "${DXVK_BUILD}/source" COMMAND_ERROR_IS_FATAL ANY)
+set(DXVK_SRC "${DXVK_BUILD}/source")
 
 venera_meson_cross_file("${DXVK_BUILD}/cross.ini")
 venera_meson_setup(dxvk "${DXVK_SRC}" "${DXVK_BUILD}/meson" "${DXVK_BUILD}/cross.ini"

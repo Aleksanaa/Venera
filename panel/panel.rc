@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include <windows.h>
 1 24 "panel.manifest"
 // The logo (docs/venera.svg), from 16 to 256 pixels: the exe's icon, and the window's.
 1 ICON "../docs/venera.ico"
@@ -30,4 +31,24 @@ BEGIN
   BEGIN
     VALUE "Translation", 0x409, 1200
   END
+END
+500 DIALOGEX 0, 0, 340, 308
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Debug filter"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Components (comma separated)", -1, 12, 10, 310, 12
+    COMBOBOX 501, 12, 24, 316, 100, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Levels (comma separated)", -1, 12, 48, 310, 12
+    COMBOBOX 502, 12, 62, 316, 100, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Programs", -1, 12, 86, 310, 12
+    COMBOBOX 503, 12, 100, 316, 70, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Process ID or complete executable path", -1, 12, 126, 310, 12
+    EDITTEXT 504, 12, 140, 316, 16, ES_AUTOHSCROLL
+    LTEXT "Duration in minutes (optional)", -1, 12, 166, 310, 12
+    EDITTEXT 505, 12, 180, 316, 16, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT "Current selection", -1, 12, 204, 316, 12
+    EDITTEXT 506, 12, 218, 316, 52, ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL
+    DEFPUSHBUTTON "Apply", IDOK, 200, 280, 60, 18
+    PUSHBUTTON "Cancel", IDCANCEL, 268, 280, 60, 18
 END

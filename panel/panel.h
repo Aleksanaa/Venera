@@ -237,6 +237,7 @@ std::unique_ptr<Page> makeLogs(HWND window);
 std::unique_ptr<Page> makeTests(HWND window);
 std::unique_ptr<Page> makeTools(HWND window);
 std::unique_ptr<Page> makeAbout(HWND window);
+std::unique_ptr<Page> makeDebug(HWND window);
 
 // ---- what the panel reads about the system (sysinfo.cpp) ----------------------------------------------------------
 

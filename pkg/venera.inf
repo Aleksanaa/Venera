@@ -36,6 +36,7 @@ venera_vulkan_virtio_32.json = 1
 viogpu_wgl_32.dll      = 1
 vgpusrv.exe            = 1
 viogpuap.exe           = 1
+venera-debug-guest.exe = 1
 
 [DestinationDirs]
 DefaultDestDir = 13   ; DriverStore
@@ -66,6 +67,7 @@ venera_vulkan_virtio_32.json
 viogpu_wgl_32.dll
 vgpusrv.exe
 viogpuap.exe
+venera-debug-guest.exe
 
 [VENERA_Inst.NT.Services]
 ; The service keeps yttrium's name, so installing over its package moves the device to our driver.
@@ -73,6 +75,7 @@ AddService = VioGpu3D, 0x00000002, VENERA_Service, VENERA_EventLog   ; SPSVCINST
 ; The guest follows the viewer window: vgpusrv starts viogpuap (next to it) in each session, which waits for the
 ; KMD's resolution event and applies the size the host asks for. yttrium's name, so it replaces yttrium's service.
 AddService = vgpusrv,  0x00000800, VENERA_Resolution_Service              ; SPSVCINST_STARTSERVICE
+AddService = VeneraDebugGuest, 0x00000800, VENERA_Debug_Service
 
 [VENERA_Inst.NT.HW]
 AddReg = VENERA_PCI_MSIX
@@ -89,6 +92,13 @@ ServiceType   = 0x10   ; SERVICE_WIN32_OWN_PROCESS
 StartType     = 2      ; SERVICE_AUTO_START
 ErrorControl  = 1      ; SERVICE_ERROR_NORMAL
 ServiceBinary = %13%\vgpusrv.exe
+
+[VENERA_Debug_Service]
+DisplayName   = "Venera debug collector"
+ServiceType   = 0x10
+StartType     = 2
+ErrorControl  = 1
+ServiceBinary = """%13%\venera-debug-guest.exe"" service"
 
 [VENERA_EventLog]
 AddReg = VENERA_EventLog.AddReg

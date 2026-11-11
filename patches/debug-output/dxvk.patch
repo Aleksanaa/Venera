@@ -1,0 +1,45 @@
+--- a/src/util/log/log.cpp
++++ b/src/util/log/log.cpp
+@@ -5,6 +5,32 @@
+ #include "../util_env.h"
+ 
+ namespace dxvk {
++#ifdef _WIN32
++  static void debugOutput(LogLevel level, const std::string& message) {
++    static volatile LONG sequence = 0;
++    static const char* levels[] = { "trace", "debug", "info", "warn", "err" };
++    static const char hex[] = "0123456789abcdef";
++    const unsigned long id = static_cast<unsigned long>(InterlockedIncrement(&sequence));
++    constexpr size_t chunkSize = 1400;
++    const size_t parts = std::max(size_t(1), (message.size() + chunkSize - 1) / chunkSize);
++    for (size_t part = 0; part < parts; ++part) {
++      std::string record = "VDBG1|dxvk|";
++      record += levels[static_cast<unsigned>(level)];
++      record += "|default|" + std::to_string(GetCurrentThreadId());
++      record += "|" + std::to_string(id);
++      record += "|" + std::to_string(part + 1);
++      record += "|" + std::to_string(parts) + "|";
++      const size_t end = std::min(message.size(), (part + 1) * chunkSize);
++      for (size_t i = part * chunkSize; i < end; ++i) {
++        const unsigned char byte = message[i];
++        record += hex[byte >> 4];
++        record += hex[byte & 15];
++      }
++      OutputDebugStringA(record.c_str());
++    }
++  }
++#endif
++
+   
+   Logger::Logger(const std::string& fileName)
+   : m_minLevel(getMinLogLevel()), m_fileName(fileName) {
+@@ -47,6 +73,9 @@
+   void Logger::emitMsg(LogLevel level, const std::string& message) {
+     if (level >= m_minLevel) {
+       std::lock_guard<dxvk::mutex> lock(m_mutex);
++#ifdef _WIN32
++      debugOutput(level, message);
++#endif
+       
+       static std::array<const char*, 5> s_prefixes
+         = {{ "trace: ", "debug: ", "info:  ", "warn:  ", "err:   " }};

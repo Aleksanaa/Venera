@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Logs: what the drivers print, live (LogCapture). Start begins a capture, which keeps going until Stop or the panel
-// closes. Without administrator rights it sees only this session's programs, and an InfoBar offers to restart the
-// panel elevated, for the kernel driver's messages and services' output.
+// Live debug-service subscription and local display filters.
 #include "panel.h"
+#include "debugchannel.h"
 
 #include <commdlg.h>
 #include <shlobj.h>
@@ -41,8 +40,8 @@ struct Line : LogLine {
 
 class Logs : public Page {
 public:
-    explicit Logs(HWND window) : window_(window) {}
-    ~Logs() override { capture_.stop(); }
+    explicit Logs(HWND window) : window_(window) { SetTimer(window_, kPageTimer + 31, 500, nullptr); }
+    ~Logs() override { KillTimer(window_, kPageTimer + 31); capture_.stop(); }
     const wchar_t* title() const override { return L"Logs"; }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui, float x, float w, float& y) override;
@@ -58,13 +57,11 @@ private:
         return filter_ == kAll || (!l.component.empty() && l.level >= filter_ - kDrivers);
     }
     void exportLog();
-    void elevate();
 
     HWND window_;
-    LogCapture capture_;
-    bool admin_ = elevated();
+    GuestLogs capture_;
     SYSTEMTIME since_ = {};
-    int filter_ = kDrivers;
+    int filter_ = kAll;
     std::deque<Line> lines_;
     unsigned seq_ = 0;
     std::mutex mutex_;
@@ -78,12 +75,15 @@ void Logs::start()
         std::lock_guard<std::mutex> lock(mutex_);
         if (pending_.empty())
             PostMessageW(window_, kLines, 0, 0);
-        pending_.push_back(std::move(l));
+        if (pending_.size() < kMaxLines)
+            pending_.push_back(std::move(l));
     });
 }
 
-bool Logs::message(UINT msg, WPARAM, LPARAM)
+bool Logs::message(UINT msg, WPARAM wp, LPARAM)
 {
+    if (msg == WM_TIMER && wp == kPageTimer + 31)
+        return true;
     if (msg != kLines)
         return false;
     std::vector<LogLine> got;
@@ -101,26 +101,18 @@ bool Logs::message(UINT msg, WPARAM, LPARAM)
 void Logs::draw(Ui& ui, float x, float w, float& y)
 {
     if (capture_.running()) {
-        std::wstring desc = L"Since " + clock(since_, false) + L", from " +
-                            (capture_.kernelError.empty() ? L"programs, services and the kernel"
-                                                          : L"programs in this session");
-        float cy = ui.settingsCard(x, y, w, L"", L"Capturing debug output", desc, kCritical);
+        std::wstring desc = L"Since " + clock(since_, false);
+        float cy = ui.settingsCard(x, y, w, L"", L"Following debug output", desc, kCritical);
         ui.buttonRight(L"Stop", x + w - 16, cy, kCaptureId, false);
     } else {
-        float cy = ui.settingsCard(x, y, w, L"", L"Capture debug output",
-                                   L"What the drivers print while programs use the GPU");
+        float cy = ui.settingsCard(x, y, w, L"", L"Follow debug output",
+                                   L"Live messages from the debug service");
         ui.buttonRight(L"Start", x + w - 16, cy, kCaptureId, true);
     }
 
-    // InfoBars for what the capture cannot see.
-    if (!admin_)
-        ui.infoBar(x, w, y, Ui::Severity::kInformational, L"",
-                   L"Restart as administrator to also see the kernel driver's messages and services' output.",
-                   L"Restart as administrator", kElevateId);
-    if (capture_.running() && !capture_.userError.empty())
-        ui.infoBar(x, w, y, Ui::Severity::kError, L"", capture_.userError + L".");
-    if (capture_.running() && admin_ && !capture_.kernelError.empty())
-        ui.infoBar(x, w, y, Ui::Severity::kError, L"", capture_.kernelError + L".");
+    std::wstring error = capture_.error();
+    if (!error.empty())
+        ui.infoBar(x, w, y, Ui::Severity::kError, L"", error);
     y += 16;
 
     // SelectorBar for which lines, actions on the right
@@ -203,8 +195,6 @@ void Logs::click(int id)
         lines_.clear();
     } else if (id == kExportId) {
         exportLog();
-    } else if (id == kElevateId) {
-        elevate();
     }
 }
 
@@ -237,16 +227,6 @@ void Logs::exportLog()
     DWORD written;
     WriteFile(f, utf8.data(), DWORD(utf8.size()), &written, nullptr);
     CloseHandle(f);
-}
-
-// The panel again as administrator, on this page. This one lets go of debug output first: only one program can
-// read it.
-void Logs::elevate()
-{
-    bool was = capture_.running();
-    capture_.stop();
-    if (!restartElevated(window_, 2) && was)
-        start();
 }
 
 }  // namespace

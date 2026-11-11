@@ -41,10 +41,12 @@ foreach(f IN LISTS FILES)
   get_filename_component(name "${f}" NAME)
   file(COPY_FILE "${f}" "${pkg}/${name}")
 endforeach()
+if(VIOSERIAL_DIR)
+  file(COPY "${VIOSERIAL_DIR}/" DESTINATION "${pkg}/vioserial")
+endif()
 
-# Solid LZMS compresses the files together, so each *_32.dll mostly costs what differs from its 64-bit twin: about 40%
-# smaller than a cabinet's MSZIP. wimlib's default 64 MiB chunks are the largest Windows' WIMGAPI reads.
-execute_process(COMMAND "${WIMLIB}" capture "${pkg}" "${OUT_DIR}/payload.wim.tmp" Venera --solid
+# LZX with the default 32 KiB chunks is applied by Windows' WIMGAPI.
+execute_process(COMMAND "${WIMLIB}" capture "${pkg}" "${OUT_DIR}/payload.wim.tmp" Venera --compress=LZX
                 OUTPUT_QUIET RESULT_VARIABLE r)
 if(NOT r EQUAL 0)
   message(FATAL_ERROR "wimlib-imagex capture failed")

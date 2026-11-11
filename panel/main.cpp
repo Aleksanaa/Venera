@@ -3,6 +3,7 @@
 // WinUI's ScrollBar, a dark title bar, and per-monitor DPI. With a command it runs that instead (cli.cpp).
 //   venera-panel.exe [/page N]
 #include "panel.h"
+#include "debugchannel.h"
 
 #include <windowsx.h>
 #include <dwmapi.h>
@@ -582,6 +583,7 @@ int Window::run(HINSTANCE inst, int show, int page)
     pages_.push_back(makeTests(hwnd_));
     pages_.push_back(makeTools(hwnd_));
     pages_.push_back(makeAbout(hwnd_));
+    pages_.push_back(makeDebug(hwnd_));
     page_ = std::clamp<size_t>(page, 0, pages_.size() - 1);
     scroll_.assign(pages_.size(), 0);
     target_.assign(pages_.size(), 0);
