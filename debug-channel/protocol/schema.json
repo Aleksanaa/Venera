@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Venera debug message",
+  "type": "object",
+  "required": ["major", "type"],
+  "properties": {"major": {"const": 1}},
+  "oneOf": [
+    {
+      "properties": {"type": {"const": "system.info.get"}, "request_id": {"type": "string"}},
+      "required": ["request_id"]
+    },
+    {
+      "properties": {
+        "type": {"const": "system.info.result"},
+        "request_id": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "collected_at": {"type": "string"},
+        "session_id": {"$ref": "#/$defs/nullableU32"},
+        "sections": {"type": "array", "items": {"$ref": "#/$defs/systemInfoSection"}},
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "required": ["request_id", "ok", "collected_at", "session_id", "sections"]
+    },
+    {
+      "properties": {
+        "type": {"const": "hello"},
+        "role": {"type": "string"},
+        "software_version": {"type": "string"},
+        "capabilities": {"$ref": "#/$defs/strings"}
+      },
+      "required": ["role", "software_version", "capabilities"]
+    },
+    {
+      "properties": {"type": {"const": "status.get"}, "request_id": {"type": "string"}},
+      "required": ["request_id"]
+    },
+    {
+      "properties": {"type": {"const": "status"}},
+      "$ref": "#/$defs/status"
+    },
+    {
+      "properties": {
+        "type": {"const": "filter.set"},
+        "request_id": {"type": "string"},
+        "filter": {"$ref": "#/$defs/filter"},
+        "duration_ms": {"$ref": "#/$defs/nullableU64"}
+      },
+      "required": ["request_id", "filter"]
+    },
+    {
+      "properties": {"type": {"const": "filter.reset"}, "request_id": {"type": "string"}},
+      "required": ["request_id"]
+    },
+    {
+      "properties": {
+        "type": {"const": "request.result"},
+        "request_id": {"type": "string"},
+        "operation": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "revision": {"$ref": "#/$defs/nullableU64"},
+        "effective_filter": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/filter"}]},
+        "expires_at": {"type": ["string", "null"]},
+        "forwarding_enabled": {"type": ["boolean", "null"]},
+        "status": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/status"}]},
+        "error": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/error"}]}
+      },
+      "required": ["request_id", "operation", "ok"]
+    },
+    {
+      "properties": {
+        "type": {"const": "log"},
+        "stream_id": {"type": "string"},
+        "seq": {"$ref": "#/$defs/u64"},
+        "observed_at": {"type": "string"},
+        "source_time": {"type": ["string", "null"]},
+        "source": {"type": "string"},
+        "component": {"type": "string"},
+        "level": {"type": "string"},
+        "raw_level": {"type": "string"},
+        "session_id": {"$ref": "#/$defs/nullableU32"},
+        "process": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/process"}]},
+        "tid": {"$ref": "#/$defs/nullableU32"},
+        "text": {"type": "string"}
+      },
+      "required": ["stream_id", "seq", "observed_at", "source", "component", "level", "raw_level", "text"]
+    },
+    {
+      "properties": {
+        "type": {"const": "gap"},
+        "stream_id": {"type": "string"},
+        "reason": {"type": "string"},
+        "count": {"$ref": "#/$defs/nullableU64"},
+        "first_seq": {"$ref": "#/$defs/nullableU64"},
+        "last_seq": {"$ref": "#/$defs/nullableU64"}
+      },
+      "required": ["stream_id", "reason"]
+    }
+  ],
+  "$defs": {
+    "systemInfoSection": {
+      "type": "object", "required": ["title", "rows"],
+      "properties": {
+        "title": {"type": "string"},
+        "rows": {"type": "array", "items": {
+          "type": "object", "required": ["key", "value", "bad", "warning"],
+          "properties": {"key": {"type": "string"}, "value": {"type": "string"}, "bad": {"type": "boolean"}, "warning": {"type": "string"}}
+        }}
+      }
+    },
+    "strings": {"type": "array", "items": {"type": "string"}},
+    "u32": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+    "u64": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+    "nullableU64": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/u64"}]},
+    "nullableU32": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/u32"}]},
+    "process": {
+      "type": "object", "required": ["pid"],
+      "properties": {
+        "pid": {"$ref": "#/$defs/u32"},
+        "start_time_filetime": {"type": ["string", "null"]},
+        "exe_path": {"type": ["string", "null"]}
+      }
+    },
+    "filter": {
+      "type": "object", "required": ["components", "levels", "targets"],
+      "properties": {
+        "components": {"$ref": "#/$defs/strings"},
+        "levels": {"$ref": "#/$defs/strings"},
+        "targets": {"type": "array", "items": {"oneOf": [
+          {
+            "type": "object", "required": ["kind", "pid", "start_time_filetime", "include_descendants"],
+            "properties": {
+              "kind": {"const": "process_instance"}, "pid": {"$ref": "#/$defs/u32"},
+              "start_time_filetime": {"type": "string"}, "include_descendants": {"type": "boolean"}
+            }
+          },
+          {
+            "type": "object", "required": ["kind", "path"],
+            "properties": {"kind": {"const": "exe_path"}, "path": {"type": "string"}}
+          }
+        ]}}
+      }
+    },
+    "status": {
+      "type": "object", "required": ["forwarding_enabled", "revision", "effective_filter", "health", "loss"],
+      "properties": {
+        "forwarding_enabled": {"type": "boolean"}, "revision": {"$ref": "#/$defs/u64"},
+        "effective_filter": {"$ref": "#/$defs/filter"}, "expires_at": {"type": ["string", "null"]},
+        "health": {}, "loss": {}
+      }
+    },
+    "error": {
+      "type": "object", "required": ["code", "message"],
+      "properties": {"code": {"type": "string"}, "message": {"type": "string"}}
+    }
+  }
+}

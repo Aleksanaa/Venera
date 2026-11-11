@@ -1,0 +1,1 @@
+{"sections":[{"title":"Host","rows":[{"key":"GPU","value":"Unknown: Venus did not answer","bad":true,"warning":"请检查图形驱动。\n重新启动 Windows 后重试。"},{"key":"Renderer","value":"Venus","bad":false,"warning":""}]}]}

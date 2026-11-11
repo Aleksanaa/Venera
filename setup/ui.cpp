@@ -20,7 +20,7 @@ constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBO
 
 struct Wizard::Impl {
     HWND hwnd = nullptr;
-    HWND title, subtitle, status, bar, log_view, version_label;
+    HWND title, subtitle, status, bar, log_view, version_label, option;
     std::vector<HWND> buttons;
     HFONT font = nullptr, bold = nullptr, mono = nullptr;
     HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
@@ -54,6 +54,7 @@ struct Wizard::Impl {
                            FIXED_PITCH, L"Consolas");
         for (HWND c : {subtitle, status, version_label})
             SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+        SendMessageW(option, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
         for (HWND b : buttons)
             SendMessageW(b, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
         SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(bold), FALSE);
@@ -85,7 +86,9 @@ struct Wizard::Impl {
         int top = px(kBanner) + m, bottom = h - px(52) - m / 2;
         MoveWindow(status, m, top, w - 2 * m, px(20), TRUE);
         MoveWindow(bar, m, top + px(24), w - 2 * m, px(18), TRUE);
-        MoveWindow(log_view, m, top + px(50), w - 2 * m, bottom - top - px(50), TRUE);
+        const int option_height = (GetWindowLongPtrW(option, GWL_STYLE) & WS_VISIBLE) ? px(30) : 0;
+        MoveWindow(log_view, m, top + px(50), w - 2 * m, bottom - top - px(50) - option_height, TRUE);
+        MoveWindow(option, m, bottom - px(28), w - 2 * m, px(24), TRUE);
         int y = h - px(10) - px(kButtonH);
         int x = w - m;
         for (auto it = buttons.rbegin(); it != buttons.rend(); ++it) {
@@ -102,6 +105,9 @@ struct Wizard::Impl {
         SetWindowTextW(title, page.heading.c_str());
         SetWindowTextW(subtitle, page.subheading.c_str());
         SetWindowTextW(status, page.status.c_str());
+        SetWindowTextW(option, page.option.c_str());
+        SendMessageW(option, BM_SETCHECK, page.option_checked ? BST_CHECKED : BST_UNCHECKED, 0);
+        ShowWindow(option, page.option.empty() ? SW_HIDE : SW_SHOW);
         if (!page.text.empty())
             log(page.text);
         for (HWND b : buttons)
@@ -242,6 +248,7 @@ Wizard::Wizard(const std::wstring& version) : impl(new Impl)
                          WS_EX_CLIENTEDGE, kLog);
     SendMessageW(d.log_view, EM_SETLIMITTEXT, 0, 0);
     d.version_label = d.child(L"STATIC", WS_VISIBLE | SS_NOPREFIX, 0, kVersion);
+    d.option = d.child(L"BUTTON", WS_TABSTOP | BS_AUTOCHECKBOX, 0, 1007);
     SetWindowTextW(d.version_label, (L"Venera " + version).c_str());
 
     // Sized and centred for the DPI of the monitor it opened on.
@@ -281,6 +288,11 @@ int Wizard::ask(const Page& page)
     impl->result = 0;
     impl->pump();
     return impl->result ? impl->result : IDCANCEL;
+}
+
+bool Wizard::option_checked() const
+{
+    return SendMessageW(impl->option, BM_GETCHECK, 0, 0) == BST_CHECKED;
 }
 
 bool Wizard::run(const std::wstring& heading, const std::wstring& subheading,

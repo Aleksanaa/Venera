@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$root"
+
+usage() {
+  cat <<'EOF'
+Usage: nix develop -c scripts/build [all|installer|workbench|check]
+
+  all         Build the installer, ISO and browser workbench (default)
+  installer   Build Windows components and package build/release
+  workbench   Build the release host and debug-channel/web/dist
+  check       Run Rust, schema, deployment and frontend checks
+
+Installer builds use VENERA_KMD_SIGN_PFX, an existing empty-password
+test-signing PFX. VENERA_RELEASE defaults to OFF.
+EOF
+}
+
+target=${1:-all}
+if [[ $# -gt 1 ]]; then
+  usage >&2
+  exit 2
+fi
+case "$target" in
+  -h|--help) usage; exit 0 ;;
+  all|installer|workbench|check) ;;
+  *) printf 'Unknown build target: %s\n' "$target" >&2; usage >&2; exit 2 ;;
+esac
+
+export CARGO_HOME=${CARGO_HOME:-$root/build/cargo-home}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/build/debug-channel}
+
+installer() {
+  if [[ -z ${VENERA_KMD_SIGN_PFX:-} || ! -f "$VENERA_KMD_SIGN_PFX" ]]; then
+    echo 'Set VENERA_KMD_SIGN_PFX to an existing test-signing PFX file.' >&2
+    exit 1
+  fi
+  cmake/fetch-winkits.sh
+  scripts/fetch-vioserial.sh
+  icd/build.sh
+  cmake -S kmd -B build/kmd -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="$root/cmake/clang-cl-kmd.cmake" \
+    -DVENERA_KMD_SIGN_PFX="$VENERA_KMD_SIGN_PFX"
+  cmake --build build/kmd
+  cmake -S . -B build/win -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
+    -DVENERA_RELEASE="${VENERA_RELEASE:-OFF}" \
+    -DVENERA_VIOSERIAL_DIR="$root/build/vioserial/package"
+  cmake --build build/win
+  local version
+  if [[ ! -s build/win/setup/version.txt ]]; then
+    echo 'Build version is missing: build/win/setup/version.txt' >&2
+    exit 1
+  fi
+  version=$(cat build/win/setup/version.txt)
+  if [[ ! $version =~ ^[0-9][0-9A-Za-z.+_-]*$ ]]; then
+    echo 'Build version has an invalid format: build/win/setup/version.txt' >&2
+    exit 1
+  fi
+  mkdir -p build/release
+  cp build/win/setup/venera-setup.exe "build/release/venera-setup-$version.exe"
+  cp -f build/vioserial/package/LICENSE.txt build/release/vioserial-LICENSE.txt
+  cp -f docs/third-party/nlohmann-json-LICENSE.txt build/release/nlohmann-json-LICENSE.txt
+  (
+    cd build/release
+    xorriso -as mkisofs -J -joliet-long -R -V VENERA \
+      -o "venera-setup-$version.iso" "venera-setup-$version.exe" \
+      vioserial-LICENSE.txt nlohmann-json-LICENSE.txt
+  )
+}
+
+frontend() {
+  (
+    cd debug-channel/web
+    yarn install --immutable
+    if [[ $target == check ]]; then
+      yarn typecheck
+      yarn test
+      yarn lint
+    fi
+    yarn build
+  )
+}
+
+workbench() {
+  cargo build --locked --release --manifest-path debug-channel/Cargo.toml \
+    -p venera-debug-host --features web
+  frontend
+}
+
+check() {
+  python3 scripts/tests/build.py
+  cargo test --locked --manifest-path debug-channel/Cargo.toml --workspace \
+    --features venera-debug-host/web,venera-debug-protocol/schema
+  cargo run --locked --manifest-path debug-channel/Cargo.toml \
+    -p venera-debug-protocol --example generate-v1 --features schema -- --check
+  python3 debug-channel/protocol/tests/schema.py
+  python3 debug-channel/protocol/tests/v1_schema.py
+  python3 debug-channel/host/tests/deployment.py
+  frontend
+}
+
+case "$target" in
+  all) installer; workbench ;;
+  *) "$target" ;;
+esac

@@ -22,7 +22,9 @@
 #include <intrin.h>
 #include <tdh.h>
 #include <tlhelp32.h>
+#include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -44,6 +46,8 @@ struct EventIdFilter {
 constexpr ULONG kEventFilterTypeEventId = 0x80000200;
 
 namespace {
+
+using Json = nlohmann::ordered_json;
 
 const wchar_t kSession[] = L"venera-trace";
 
@@ -77,22 +81,27 @@ std::string utf8(const wchar_t* s)
     return out;
 }
 
-std::string json_string(const std::string& s)
+void emitJson(FILE* out, const Json& value)
 {
-    std::string out = "\"";
-    for (unsigned char c : s) {
-        if (c == '"' || c == '\\') {
-            out += '\\';
-            out += static_cast<char>(c);
-        } else if (c < 0x20) {
-            char esc[8];
-            std::snprintf(esc, sizeof(esc), "\\u%04x", c);
-            out += esc;
-        } else {
-            out += static_cast<char>(c);
-        }
-    }
-    return out + "\"";
+    std::fputs(value.dump().c_str(), out);
+    std::fputc('\n', out);
+}
+
+void write_process(FILE* out, DWORD pid, const std::string& name)
+{
+    emitJson(out, {{"k", "proc"}, {"pid", pid}, {"name", name}});
+}
+
+void write_thread(FILE* out, DWORD pid, DWORD tid, const std::string& name)
+{
+    emitJson(out, {{"k", "thread"}, {"pid", pid}, {"tid", tid}, {"name", name}});
+}
+
+void write_etw(FILE* out, const EVENT_HEADER& h, const char* provider, const std::string& event, Json fields)
+{
+    emitJson(out, {{"k", "etw"}, {"t", static_cast<uint64_t>(h.TimeStamp.QuadPart)},
+        {"pid", h.ProcessId}, {"tid", h.ThreadId}, {"p", provider}, {"id", h.EventDescriptor.Id},
+        {"ev", event}, {"f", std::move(fields)}});
 }
 
 // --- Session -------------------------------------------------------------------------------------------------------
@@ -174,8 +183,7 @@ void write_names(FILE* out)
     PROCESSENTRY32W pe{};
     pe.dwSize = sizeof(pe);
     for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
-        std::fprintf(out, "{\"k\":\"proc\",\"pid\":%lu,\"name\":%s}\n", pe.th32ProcessID,
-                     json_string(utf8(pe.szExeFile)).c_str());
+        write_process(out, pe.th32ProcessID, utf8(pe.szExeFile));
     THREADENTRY32 te{};
     te.dwSize = sizeof(te);
     for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
@@ -184,8 +192,7 @@ void write_names(FILE* out)
             continue;
         wchar_t* desc = nullptr;
         if (SUCCEEDED(GetThreadDescription(t, &desc)) && desc && desc[0])
-            std::fprintf(out, "{\"k\":\"thread\",\"pid\":%lu,\"tid\":%lu,\"name\":%s}\n", te.th32OwnerProcessID,
-                         te.th32ThreadID, json_string(utf8(desc)).c_str());
+            write_thread(out, te.th32OwnerProcessID, te.th32ThreadID, utf8(desc));
         LocalFree(desc);
         CloseHandle(t);
     }
@@ -260,28 +267,26 @@ struct Decoder {
         const EVENT_HEADER& h = r.EventHeader;
         const unsigned long long t = h.TimeStamp.QuadPart;
         if (h.EventDescriptor.Id == 2) {
-            std::fprintf(out, "{\"k\":\"end\",\"t\":%llu,\"pid\":%lu,\"tid\":%lu}\n", t, h.ProcessId, h.ThreadId);
+            emitJson(out, {{"k", "end"}, {"t", t}, {"pid", h.ProcessId}, {"tid", h.ThreadId}});
             return;
         }
         const size_t len = strnlen(data, size);
         const size_t ints = len < size ? (size - len - 1) / 8 : 0;
         uint64_t v[2] = {};
         std::memcpy(v, data + len + 1, (ints < 2 ? ints : 2) * 8);
-        const std::string name = json_string(std::string(data, len));
+        const std::string name(data, len);
         switch (h.EventDescriptor.Id) {
         case 1:
-            std::fprintf(out, "{\"k\":\"begin\",\"t\":%llu,\"pid\":%lu,\"tid\":%lu,\"name\":%s,\"v\":%llu}\n", t,
-                         h.ProcessId, h.ThreadId, name.c_str(), static_cast<unsigned long long>(v[0]));
+            emitJson(out, {{"k", "begin"}, {"t", t}, {"pid", h.ProcessId}, {"tid", h.ThreadId},
+                {"name", name}, {"v", v[0]}});
             break;
         case 3:
-            std::fprintf(out,
-                         "{\"k\":\"instant\",\"t\":%llu,\"pid\":%lu,\"tid\":%lu,\"name\":%s,\"id\":%llu,\"v\":%llu}\n",
-                         t, h.ProcessId, h.ThreadId, name.c_str(), static_cast<unsigned long long>(v[0]),
-                         static_cast<unsigned long long>(v[1]));
+            emitJson(out, {{"k", "instant"}, {"t", t}, {"pid", h.ProcessId}, {"tid", h.ThreadId},
+                {"name", name}, {"id", v[0]}, {"v", v[1]}});
             break;
         case 4:
-            std::fprintf(out, "{\"k\":\"counter\",\"t\":%llu,\"pid\":%lu,\"tid\":%lu,\"name\":%s,\"v\":%lld}\n", t,
-                         h.ProcessId, h.ThreadId, name.c_str(), static_cast<long long>(v[0]));
+            emitJson(out, {{"k", "counter"}, {"t", t}, {"pid", h.ProcessId}, {"tid", h.ThreadId},
+                {"name", name}, {"v", static_cast<int64_t>(v[0])}});
             break;
         }
     }
@@ -322,9 +327,7 @@ struct Decoder {
         const std::string opcode = text(info->OpcodeNameOffset);
         if (!opcode.empty())
             ev += "/" + opcode;
-        std::fprintf(out, "{\"k\":\"etw\",\"t\":%llu,\"pid\":%lu,\"tid\":%lu,\"p\":\"%s\",\"id\":%u,\"ev\":%s,\"f\":{",
-                     static_cast<unsigned long long>(h.TimeStamp.QuadPart), h.ProcessId, h.ThreadId, p.name,
-                     h.EventDescriptor.Id, json_string(ev).c_str());
+        auto fields = Json::object();
         // The top-level scalar properties, in order, up to the first that is not one (arrays, structures, lengths
         // from other properties: none of the events read have them before the fields wanted).
         const ULONG pointer = (h.Flags & EVENT_HEADER_FLAG_32_BIT_HEADER) ? 4 : 8;
@@ -355,12 +358,11 @@ struct Decoder {
             if (TdhFormatProperty(info, map_info, pointer, prop.nonStructType.InType, prop.nonStructType.OutType,
                                   prop.length, left, data, &size, value, &used) != ERROR_SUCCESS)
                 break;
-            std::fprintf(out, "%s%s:%s", i ? "," : "", json_string(text(prop.NameOffset)).c_str(),
-                         json_string(utf8(value)).c_str());
+            fields[text(prop.NameOffset)] = utf8(value);
             data += used;
             left -= used;
         }
-        std::fputs("}}\n", out);
+        write_etw(out, h, p.name, ev, std::move(fields));
     }
 
     void event(EVENT_RECORD& r)
@@ -431,10 +433,71 @@ int decode(const std::wstring& etl, const std::wstring& jsonl, const std::string
 
 std::string meta_line(double hz, ULONG events_lost, ULONG buffers_lost)
 {
-    char line[256];
-    std::snprintf(line, sizeof(line), "{\"k\":\"meta\",\"tsc_hz\":%.0f,\"events_lost\":%lu,\"buffers_lost\":%lu}", hz,
-                  events_lost, buffers_lost);
-    return line;
+    return Json({{"k", "meta"}, {"tsc_hz", static_cast<uint64_t>(std::nearbyint(hz))},
+        {"events_lost", events_lost}, {"buffers_lost", buffers_lost}}).dump();
+}
+
+int selftest()
+{
+    FILE* out = std::tmpfile();
+    if (!out) {
+        std::fputs("venera-trace: could not create the self-test output\n", stderr);
+        return 1;
+    }
+    write_process(out, 4294967295u, "C:\\Games\\雪 \"ready\"\n\t\x01");
+    write_thread(out, 42, 7, std::string("worker\0name", 11));
+    Decoder decoder;
+    decoder.out = out;
+    EVENT_RECORD record{};
+    record.EventHeader.TimeStamp.QuadPart = static_cast<LONGLONG>(UINT64_MAX);
+    record.EventHeader.ProcessId = 4294967295u;
+    record.EventHeader.ThreadId = 7;
+    const std::string name = "stage \"雪\"\n";
+    std::vector<char> payload(name.begin(), name.end());
+    payload.resize(name.size() + 1 + 16);
+    const uint64_t values[] = {UINT64_MAX, UINT64_MAX - 1};
+    std::memcpy(payload.data() + name.size() + 1, values, sizeof(values));
+    record.UserData = payload.data();
+    record.UserDataLength = static_cast<USHORT>(payload.size());
+    for (USHORT id : {1, 2, 3, 4}) {
+        record.EventHeader.EventDescriptor.Id = id;
+        decoder.venera(record);
+    }
+    const uint64_t minimum = uint64_t(1) << 63;
+    std::memcpy(payload.data() + name.size() + 1, &minimum, sizeof(minimum));
+    decoder.venera(record);
+    record.EventHeader.EventDescriptor.Id = 65535;
+    write_etw(out, record.EventHeader, "DxgKrnl", "Task/Opcode\n", {{"字段\"", "18446744073709551615"},
+        {"empty", ""}, {"path", "C:\\GPU\t🚀"}});
+    write_etw(out, record.EventHeader, "Dwm", "", Json::object());
+    const std::string meta = meta_line(3000000000.6, 4294967295u, 2);
+    std::fprintf(out, "%s\n", meta.c_str());
+    std::fflush(out);
+    std::rewind(out);
+    std::string actual;
+    char buffer[4096];
+    for (size_t count; (count = std::fread(buffer, 1, sizeof(buffer), out));)
+        actual.append(buffer, count);
+    std::fclose(out);
+    const char* expected =
+        R"({"k":"proc","pid":4294967295,"name":"C:\\Games\\雪 \"ready\"\n\t\u0001"})" "\n"
+        R"({"k":"thread","pid":42,"tid":7,"name":"worker\u0000name"})" "\n"
+        R"({"k":"begin","t":18446744073709551615,"pid":4294967295,"tid":7,"name":"stage \"雪\"\n","v":18446744073709551615})" "\n"
+        R"({"k":"end","t":18446744073709551615,"pid":4294967295,"tid":7})" "\n"
+        R"({"k":"instant","t":18446744073709551615,"pid":4294967295,"tid":7,"name":"stage \"雪\"\n","id":18446744073709551615,"v":18446744073709551614})" "\n"
+        R"({"k":"counter","t":18446744073709551615,"pid":4294967295,"tid":7,"name":"stage \"雪\"\n","v":-1})" "\n"
+        R"({"k":"counter","t":18446744073709551615,"pid":4294967295,"tid":7,"name":"stage \"雪\"\n","v":-9223372036854775808})" "\n"
+        R"({"k":"etw","t":18446744073709551615,"pid":4294967295,"tid":7,"p":"DxgKrnl","id":65535,"ev":"Task/Opcode\n","f":{"字段\"":"18446744073709551615","empty":"","path":"C:\\GPU\t🚀"}})" "\n"
+        R"({"k":"etw","t":18446744073709551615,"pid":4294967295,"tid":7,"p":"Dwm","id":65535,"ev":"","f":{}})" "\n"
+        R"({"k":"meta","tsc_hz":3000000001,"events_lost":4294967295,"buffers_lost":2})" "\n";
+    if (actual != expected ||
+        meta_line(1000.5, 0, 0) != R"({"k":"meta","tsc_hz":1000,"events_lost":0,"buffers_lost":0})" ||
+        meta_line(1001.5, 0, 0) != R"({"k":"meta","tsc_hz":1002,"events_lost":0,"buffers_lost":0})") {
+        std::fprintf(stderr, "venera-trace: JSON self-test failed\n%s", actual.c_str());
+        return 1;
+    }
+    std::puts("venera-trace: JSON self-test passed");
+    return 0;
 }
 
 int stop()
@@ -455,7 +518,7 @@ int stop()
 
 int usage()
 {
-    std::fputs("usage: venera-trace record SECONDS DIR | start DIR | stop | decode ETL JSONL\n", stderr);
+    std::fputs("usage: venera-trace record SECONDS DIR | start DIR | stop | decode ETL JSONL | --selftest\n", stderr);
     return 2;
 }
 
@@ -466,6 +529,8 @@ int main(int argc, char** argv)
     if (argc < 2)
         return usage();
     const std::string cmd = argv[1];
+    if (cmd == "--selftest" && argc == 2)
+        return selftest();
     if (cmd == "start" && argc == 3)
         return start(argv[2]);
     if (cmd == "stop" && argc == 2)

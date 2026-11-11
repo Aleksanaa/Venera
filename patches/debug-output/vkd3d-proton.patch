@@ -1,0 +1,65 @@
+--- a/libs/vkd3d-common/debug.c
++++ b/libs/vkd3d-common/debug.c
+@@ -187,6 +187,52 @@
+     }
+ }
+ 
++#ifdef _WIN32
++static void venera_debug_output(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level,
++        const char *function, const char *fmt, va_list args)
++{
++    static volatile LONG sequence;
++    static const char hex[] = "0123456789abcdef";
++    const char *channel_name = channel == VKD3D_DBG_CHANNEL_API ? "api" : "shader";
++    unsigned long id = (unsigned long)InterlockedIncrement(&sequence);
++    va_list copy;
++    char *message, record[3000];
++    int count, prefix;
++    size_t length, parts, part, i, end, offset;
++
++    va_copy(copy, args);
++    count = vsnprintf(NULL, 0, fmt, copy);
++    va_end(copy);
++    if (count < 0)
++        return;
++    length = strlen(function) + 2 + (size_t)count;
++    message = malloc(length + 1);
++    if (!message)
++        return;
++    prefix = sprintf(message, "%s: ", function);
++    va_copy(copy, args);
++    vsnprintf(message + prefix, (size_t)count + 1, fmt, copy);
++    va_end(copy);
++    parts = (length + 1399) / 1400;
++    for (part = 0; part < parts; ++part)
++    {
++        offset = snprintf(record, sizeof(record), "VDBG1|vkd3d-proton|%s|%s|%lu|%lu|%zu|%zu|",
++                debug_level_names[level], channel_name, (unsigned long)GetCurrentThreadId(),
++                id, part + 1, parts);
++        end = min(length, (part + 1) * 1400);
++        for (i = part * 1400; i < end; ++i)
++        {
++            unsigned char byte = message[i];
++            record[offset++] = hex[byte >> 4];
++            record[offset++] = hex[byte & 15];
++        }
++        record[offset] = 0;
++        OutputDebugStringA(record);
++    }
++    free(message);
++}
++#endif
++
+ void vkd3d_dbg_printf(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level, const char *function, const char *fmt, ...)
+ {
+     unsigned int tid;
+@@ -203,6 +249,9 @@
+ 
+     va_start(args, fmt);
+     tid = vkd3d_get_current_thread_id();
++#ifdef _WIN32
++    venera_debug_output(channel, level, function, fmt, args);
++#endif
+ 
+     if (vkd3d_dbg_buffer.buffer)
+     {

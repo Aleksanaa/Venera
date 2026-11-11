@@ -1,0 +1,23 @@
+[package]
+name = "venera-debug-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, optional = true }
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"], optional = true }
+tokio-stream = { version = "0.1", optional = true }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
+venera-debug-protocol.workspace = true
+serde_json.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+clap = { version = "4", features = ["derive"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
+
+[features]
+web = ["dep:serde", "dep:axum", "dep:tokio", "dep:tokio-stream", "dep:tower-http"]
+
+[dev-dependencies]
+tempfile = "3"

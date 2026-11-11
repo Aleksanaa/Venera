@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: MIT
 # D3D9 caps and an FP16 blend, for both builds: d3d9caps_32 runs on the 32-bit UMDs (D3D9On12 on venera_d3d12_32).
 add_executable(d3d9caps d3d9caps.cpp)
+add_executable(debug-output-probe debug-output-probe.cpp)
+target_link_options(debug-output-probe PRIVATE -static -static-libgcc -static-libstdc++)
 target_link_libraries(d3d9caps PRIVATE d3d9)
 target_link_options(d3d9caps PRIVATE -static -static-libgcc -static-libstdc++)
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
@@ -8,7 +10,20 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
   return()
 endif()
 
+find_package(nlohmann_json CONFIG REQUIRED)
+
 add_executable(vkprobe vkprobe.cpp)
+add_executable(source-runtime-venera source-runtime-venera.cpp
+  ../../umd/common/log.cpp ../../umd/common/stacks.cpp)
+target_include_directories(source-runtime-venera PRIVATE ../../umd/common)
+target_link_libraries(source-runtime-venera PRIVATE advapi32 nlohmann_json::nlohmann_json)
+target_link_options(source-runtime-venera PRIVATE -static -static-libgcc -static-libstdc++)
+add_executable(source-runtime-resolution source-runtime-resolution.cpp
+  ../../kmd/yttrium/viogpu/shared/log.cpp)
+target_include_directories(source-runtime-resolution PRIVATE ../../kmd/yttrium/viogpu/shared)
+target_compile_definitions(source-runtime-resolution PRIVATE UNICODE _UNICODE)
+target_link_options(source-runtime-resolution PRIVATE -static -static-libgcc -static-libstdc++)
+target_link_libraries(source-runtime-resolution PRIVATE nlohmann_json::nlohmann_json)
 target_link_libraries(vkprobe PRIVATE venera-vulkan-headers)
 target_link_options(vkprobe PRIVATE -static -static-libgcc -static-libstdc++)
 
@@ -35,6 +50,6 @@ target_link_options(uibench PRIVATE -static -static-libgcc -static-libstdc++)
 
 # Records performance traces (tests/perf/vtrace.py drives it).
 add_executable(venera-trace venera-trace.cpp)
-target_link_libraries(venera-trace PRIVATE tdh advapi32)
+target_link_libraries(venera-trace PRIVATE tdh advapi32 nlohmann_json::nlohmann_json)
 target_compile_options(venera-trace PRIVATE -Wall -Wextra)
 target_link_options(venera-trace PRIVATE -static -static-libgcc -static-libstdc++)

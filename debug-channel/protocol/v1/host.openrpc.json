@@ -1,0 +1,654 @@
+{
+  "openrpc": "1.4.1",
+  "info": {
+    "title": "Venera host",
+    "version": "1.0.0"
+  },
+  "methods": [
+    {
+      "name": "endpoint.info",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputEndpointInfo"
+        }
+      }
+    },
+    {
+      "name": "rpc.discover",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputDiscovery"
+        }
+      }
+    },
+    {
+      "name": "status.changed",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "effective_filter",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/InputFilter"
+          }
+        },
+        {
+          "name": "forwarding_enabled",
+          "required": true,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "health",
+          "required": true,
+          "schema": true
+        },
+        {
+          "name": "loss",
+          "required": true,
+          "schema": true
+        },
+        {
+          "name": "revision",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          }
+        },
+        {
+          "name": "expires_at",
+          "required": false,
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "log",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "component",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "level",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "observed_at",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "raw_level",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "seq",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          }
+        },
+        {
+          "name": "source",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "stream_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "text",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "process",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputProcessIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        {
+          "name": "session_id",
+          "required": false,
+          "schema": {
+            "default": null,
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        {
+          "name": "source_time",
+          "required": false,
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        {
+          "name": "tid",
+          "required": false,
+          "schema": {
+            "default": null,
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "gap",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "reason",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "stream_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "count",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        {
+          "name": "first_seq",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        {
+          "name": "last_seq",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "components": {
+    "schemas": {
+      "InputDecimalU64": {
+        "maxLength": 20,
+        "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|1844674407370955[0-0][0-9]{3}|18446744073709551[0-5][0-9]{2}|184467440737095516[0-0][0-9]{1}|1844674407370955161[0-4][0-9]{0}|18446744073709551615)$(?![\\s\\S])",
+        "type": "string"
+      },
+      "InputEmpty": {
+        "type": "object"
+      },
+      "InputFilter": {
+        "properties": {
+          "components": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "levels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/InputTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "components",
+          "levels",
+          "targets"
+        ],
+        "type": "object"
+      },
+      "InputGap": {
+        "properties": {
+          "count": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "first_seq": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_seq": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "stream_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream_id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "InputLogRecord": {
+        "properties": {
+          "component": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "process": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputProcessIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "raw_level": {
+            "type": "string"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          },
+          "session_id": {
+            "default": null,
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "source_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tid": {
+            "default": null,
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "stream_id",
+          "seq",
+          "observed_at",
+          "source",
+          "component",
+          "level",
+          "raw_level",
+          "text"
+        ],
+        "type": "object"
+      },
+      "InputProcessIdentity": {
+        "properties": {
+          "exe_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pid": {
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_time_filetime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "pid"
+        ],
+        "type": "object"
+      },
+      "InputStatus": {
+        "properties": {
+          "effective_filter": {
+            "$ref": "#/components/schemas/InputFilter"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "forwarding_enabled": {
+            "type": "boolean"
+          },
+          "health": true,
+          "loss": true,
+          "revision": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          }
+        },
+        "required": [
+          "forwarding_enabled",
+          "revision",
+          "effective_filter",
+          "health",
+          "loss"
+        ],
+        "type": "object"
+      },
+      "InputTarget": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "include_descendants": {
+                "type": "boolean"
+              },
+              "kind": {
+                "const": "process_instance",
+                "type": "string"
+              },
+              "pid": {
+                "maximum": 4294967295,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "start_time_filetime": {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              }
+            },
+            "required": [
+              "kind",
+              "pid",
+              "start_time_filetime",
+              "include_descendants"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "exe_path",
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "OutputContentDescriptor": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "required": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "schema": true
+        },
+        "required": [
+          "name",
+          "schema"
+        ],
+        "type": "object"
+      },
+      "OutputDiscovery": {
+        "description": "The discovery document returned by the connected receiver.",
+        "properties": {
+          "components": {
+            "$ref": "#/components/schemas/OutputDiscoveryComponents"
+          },
+          "info": {
+            "$ref": "#/components/schemas/OutputDiscoveryInfo"
+          },
+          "methods": {
+            "items": {
+              "$ref": "#/components/schemas/OutputMethodDescriptor"
+            },
+            "type": "array"
+          },
+          "openrpc": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "openrpc",
+          "info",
+          "methods",
+          "components"
+        ],
+        "type": "object"
+      },
+      "OutputDiscoveryComponents": {
+        "properties": {
+          "schemas": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "schemas"
+        ],
+        "type": "object"
+      },
+      "OutputDiscoveryInfo": {
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "version"
+        ],
+        "type": "object"
+      },
+      "OutputEndpointInfo": {
+        "properties": {
+          "protocol_version": {
+            "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$(?![\\s\\S])",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/OutputEndpointRole"
+          },
+          "software_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "software_version",
+          "protocol_version"
+        ],
+        "type": "object"
+      },
+      "OutputEndpointRole": {
+        "enum": [
+          "host",
+          "guest"
+        ],
+        "type": "string"
+      },
+      "OutputMethodDescriptor": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "paramStructure": {
+            "$ref": "#/components/schemas/OutputParamStructure"
+          },
+          "params": {
+            "items": {
+              "$ref": "#/components/schemas/OutputContentDescriptor"
+            },
+            "type": "array"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputContentDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "paramStructure",
+          "params"
+        ],
+        "type": "object"
+      },
+      "OutputParamStructure": {
+        "enum": [
+          "by-name"
+        ],
+        "type": "string"
+      }
+    }
+  }
+}

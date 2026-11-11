@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The system report: what the Overview shows and `/info` prints, from the system information and the probe's result.
 #include "panel.h"
+#include "debugjson.h"
 
 #include <cwchar>
 
@@ -291,6 +292,20 @@ std::wstring reportText(const std::vector<InfoSection>& sections)
         }
     }
     return text;
+}
+
+std::string reportJson(const std::vector<InfoSection>& sections)
+{
+    auto entries = debugjson::Json::array();
+    for (const InfoSection& s : sections) {
+        auto rows = debugjson::Json::array();
+        for (const InfoRow& r : s.rows) {
+            rows.push_back({{"key", narrow(r.key)}, {"value", narrow(r.value)},
+                            {"bad", r.bad}, {"warning", narrow(r.warning)}});
+        }
+        entries.push_back({{"title", narrow(s.title)}, {"rows", std::move(rows)}});
+    }
+    return debugjson::Json({{"sections", std::move(entries)}}).dump();
 }
 
 bool anyProblem(const std::vector<InfoSection>& sections)

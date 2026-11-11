@@ -1,0 +1,8 @@
+{
+  "files": {
+    "includes": ["**", "!yarn.lock", "!dist", "!node_modules", "!.yarn"]
+  },
+  "formatter": { "indentStyle": "space", "indentWidth": 2 },
+  "javascript": { "formatter": { "quoteStyle": "single" } },
+  "linter": { "enabled": true, "rules": { "preset": "none" } }
+}
