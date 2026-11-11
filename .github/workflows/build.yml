@@ -42,9 +42,6 @@ jobs:
           path: refs/winkits
           key: winkits-${{ hashFiles('cmake/fetch-winkits.sh') }}
 
-      - name: Fetch the WDK and SDK headers
-        run: cmake/fetch-winkits.sh
-
       # Seed each commit with the newest compiler cache for this toolchain.
       - name: Cache the compiler output
         uses: actions/cache@v4
@@ -78,19 +75,8 @@ jobs:
       - name: Prepare the dev shell
         run: nix develop -c ccache -z
 
-      - name: Validate the protocol contract
-        run: |
-          nix develop -c cargo test --locked --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --features schema
-          nix develop -c cargo run --locked --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema -- --check
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Validate discovery schemas
-        run: |
-          python -m pip install jsonschema==4.25.1
-          python debug-channel/protocol/tests/v1_schema.py
+      - name: Check the debug channel and workbench
+        run: nix develop -c scripts/build check
 
       - name: Cache the VirtIO serial release
         uses: actions/cache@v4
@@ -98,39 +84,21 @@ jobs:
           path: build/vioserial-cache
           key: virtio-win-0.1.302-1
 
-      - name: Fetch the VirtIO serial driver
-        run: nix develop -c scripts/fetch-vioserial.sh
-
-      - name: Build the Venus ICD and the OpenGL driver
-        run: nix develop -c icd/build.sh
-
       # The kernel takes any signature in test mode: a throwaway certificate per build.
-      - name: Build the KMD
+      - name: Build the installer and workbench
+        env:
+          VENERA_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && 'ON' || 'OFF' }}
+          VENERA_KMD_SIGN_PFX: ${{ runner.temp }}/kmd.pfx
         run: |
-          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=Venera CI test signing" \
-            -addext extendedKeyUsage=codeSigning -keyout "$RUNNER_TEMP/kmd.key" -out "$RUNNER_TEMP/kmd.crt"
-          openssl pkcs12 -export -passout pass: -inkey "$RUNNER_TEMP/kmd.key" -in "$RUNNER_TEMP/kmd.crt" \
-            -out "$RUNNER_TEMP/kmd.pfx"
-          nix develop -c sh -c "cmake -S kmd -B build/kmd -G Ninja -DCMAKE_TOOLCHAIN_FILE=$PWD/cmake/clang-cl-kmd.cmake \
-            -DVENERA_KMD_SIGN_PFX=$RUNNER_TEMP/kmd.pfx && ninja -C build/kmd"
-
-      - name: Build the UMDs, the services and the installer
-        run: |
-          # A tag's build is a release build; any other a develop build.
-          release=${{ startsWith(github.ref, 'refs/tags/v') && 'ON' || 'OFF' }}
-          nix develop -c sh -c "cmake -S . -B build/win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
-            -DVENERA_RELEASE=$release -DVENERA_VIOSERIAL_DIR=$PWD/build/vioserial/package && cmake --build build/win"
+          nix develop -c bash -euo pipefail <<'BUILD'
+            openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=Venera CI test signing" \
+              -addext extendedKeyUsage=codeSigning -keyout "$RUNNER_TEMP/kmd.key" -out "$RUNNER_TEMP/kmd.crt"
+            openssl pkcs12 -export -passout pass: -inkey "$RUNNER_TEMP/kmd.key" -in "$RUNNER_TEMP/kmd.crt" \
+              -out "$RUNNER_TEMP/kmd.pfx"
+            scripts/build all
+          BUILD
           version=$(cat build/win/setup/version.txt)
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          cp build/win/setup/venera-setup.exe "venera-setup-$version.exe"
-          cp build/vioserial/package/LICENSE.txt vioserial-LICENSE.txt
-          cp docs/third-party/nlohmann-json-LICENSE.txt nlohmann-json-LICENSE.txt
-
-      # The installer on a disc image, to attach to a VM as a CD-ROM. Joliet for the names Windows shows.
-      - name: Wrap the installer in an ISO
-        run: |
-          nix develop -c xorriso -as mkisofs -J -joliet-long -R -V VENERA \
-            -o "venera-setup-$VERSION.iso" "venera-setup-$VERSION.exe" vioserial-LICENSE.txt nlohmann-json-LICENSE.txt
 
       - name: Compiler cache statistics
         if: always()
@@ -140,10 +108,10 @@ jobs:
         with:
           name: venera-setup-${{ env.VERSION }}
           path: |
-            venera-setup-${{ env.VERSION }}.exe
-            venera-setup-${{ env.VERSION }}.iso
-            vioserial-LICENSE.txt
-            nlohmann-json-LICENSE.txt
+            build/release/venera-setup-${{ env.VERSION }}.exe
+            build/release/venera-setup-${{ env.VERSION }}.iso
+            build/release/vioserial-LICENSE.txt
+            build/release/nlohmann-json-LICENSE.txt
 
       - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -172,5 +140,5 @@ jobs:
             }
             END { if (cur != "") print cur }
           ' > notes.md
-          gh release create "$GITHUB_REF_NAME" "venera-setup-$VERSION.exe" "venera-setup-$VERSION.iso" vioserial-LICENSE.txt nlohmann-json-LICENSE.txt \
+          gh release create "$GITHUB_REF_NAME" "build/release/venera-setup-$VERSION.exe" "build/release/venera-setup-$VERSION.iso" build/release/vioserial-LICENSE.txt build/release/nlohmann-json-LICENSE.txt \
             --title "Venera $VERSION" --notes-file notes.md

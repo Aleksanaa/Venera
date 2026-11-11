@@ -5,14 +5,13 @@ The host background process continuously receives records from the QEMU debug po
 ## Build and Run
 
 ```sh
-cd debug-channel
-cargo build --release -p venera-debug-host
+nix develop -c scripts/build workbench
 ```
 
 QEMU provides a Unix socket listener for the dedicated virtserialport. The background process connects to that path and continuously reconnects:
 
 ```sh
-venera-debug-host receive \
+build/debug-channel/release/venera-debug-host receive \
   --socket /run/user/1000/venera-debug.sock \
   --control /run/user/1000/venera-control.sock \
   --database /home/user/.local/share/venera/history.db \
@@ -28,8 +27,8 @@ Create the example history directory first, and replace the paths with actual pa
 Run from the repository root and choose an accessible QEMU socket path. These commands install the build artifact in the user's program directory and render the startup command in the service template:
 
 ```sh
-nix develop --command cargo build --manifest-path debug-channel/Cargo.toml --release -p venera-debug-host
-install -Dm755 debug-channel/target/release/venera-debug-host "$HOME/.local/bin/venera-debug-host"
+nix develop -c scripts/build workbench
+install -Dm755 build/debug-channel/release/venera-debug-host "$HOME/.local/bin/venera-debug-host"
 mkdir -p "$HOME/.local/share/venera" "$XDG_RUNTIME_DIR/venera"
 python3 scripts/venera-debug-host-service \
   --binary "$HOME/.local/bin/venera-debug-host" \
@@ -116,18 +115,13 @@ Build the host program and frontend:
 
 ```sh
 # Run from the repository root
-nix develop --command cargo build --manifest-path debug-channel/Cargo.toml \
-  -p venera-debug-host --features web
-cd debug-channel/web
-corepack yarn install --immutable
-corepack yarn build
-cd ../..
+nix develop -c scripts/build workbench
 ```
 
 After starting the workbench, open <http://127.0.0.1:8787> in a browser:
 
 ```sh
-debug-channel/target/debug/venera-debug-host web \
+build/debug-channel/release/venera-debug-host web \
   --database .harness/vm-debug/live.sqlite \
   --control .harness/vm-debug/host-control.sock \
   --assets debug-channel/web/dist
@@ -152,8 +146,8 @@ Host and guest exchange UTF-8 JSONL over VirtIO Serial. Each line is a JSON-RPC 
 Protocol documents are generated from shared Rust types. Generate and check them with:
 
 ```bash
-cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema
-cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema -- --check
+nix develop -c cargo run --locked --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --example generate-v1 --features schema
+nix develop -c scripts/build check
 ```
 
 The host background process parses JSON-RPC messages into log, status, connection, and gap records, continuously writing them to SQLite. The browser workbench reads the same history through application interfaces and provides live browsing, filters, details, and JSONL export.
@@ -161,20 +155,7 @@ The host background process parses JSON-RPC messages into log, status, connectio
 ## Validation
 
 ```sh
-cd debug-channel
-cargo fmt --check
-cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-python3 protocol/tests/schema.py
-python3 host/tests/deployment.py
+nix develop -c scripts/build check
 ```
 
-The schema validation script uses Python `jsonschema`. Rust tests cover byte splitting, recovery from malformed lines, filter matching, and real Unix sockets, CLI controls, reconnects, restarts, SQLite eviction, and export.
-
-Run host integration checks from the repository root:
-
-```sh
-nix develop --command cargo test --manifest-path debug-channel/Cargo.toml -p venera-debug-host
-python3 debug-channel/host/tests/deployment.py
-```
+This entry point uses Nix-provided Python `jsonschema` to validate both sets of Schemas, checks generated protocol documents and service deployment, and runs frontend type checking, tests, linting, and builds. Rust workspace tests enable host Web and protocol Schema features, covering byte splitting, recovery from malformed lines, filter matching, and real Unix sockets, CLI controls, reconnects, restarts, SQLite eviction, and export.

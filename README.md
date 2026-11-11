@@ -63,23 +63,41 @@ and download updates.
 
 ## Building
 
-Everything builds on a Linux host inside `nix develop` (see `flake.nix`).
+Build on Linux with the repository's Nix development shell. `flake.nix` selects the tools, including Node, Yarn,
+Rust and Python with `jsonschema`; `flake.lock` pins their versions.
 
-The KMD and the Mesa drivers:
-
-```
-cmake/fetch-winkits.sh
-icd/build.sh
-cmake -S kmd -B build/kmd -G Ninja -DCMAKE_TOOLCHAIN_FILE=$PWD/cmake/clang-cl-kmd.cmake && ninja -C build/kmd
-cmake -S . -B build/win -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake && cmake --build build/win
+```sh
+export VENERA_KMD_SIGN_PFX=/absolute/path/to/existing-test-signing.pfx
+nix develop -c scripts/build
 ```
 
-`cmake/fetch-winkits.sh` extracts the WDK and SDK headers from Microsoft's NuGet packages (Microsoft.Windows.WDK.x64
-and Microsoft.Windows.SDK.CPP, 10.0.26100) into `refs/winkits/{wdk,sdk}`. The KMD build test-signs `viogpu3d.sys`
-with the PFX in `VENERA_KMD_SIGN_PFX`; any code signing certificate does, as the kernel accepts any signature in test
-mode. The installer is `build/win/setup/venera-setup.exe` (`.github/workflows/build.yml` does the same). The drivers
-are built for 32-bit processes too: `icd/build.sh` builds Mesa for both x86_64 and i686, and the main build runs a
-32-bit build of the UMDs in `build/win/umd32`.
+The KMD uses an existing code-signing certificate in an empty-password PFX for Windows test-signing mode.
+Set `VENERA_RELEASE=ON` for a release build; the default is `OFF`.
+
+| Target | Result |
+| --- | --- |
+| `all` (default) | Installer, ISO and browser workbench |
+| `installer` | Windows components and release packages |
+| `workbench` | Release host and browser assets |
+| `check` | Rust, generated protocol, schema, deployment and frontend checks |
+
+```sh
+nix develop -c scripts/build workbench
+nix develop -c scripts/build check
+scripts/build --help
+```
+
+Installer builds prepare the WDK/SDK headers, official VirtIO serial package, Mesa drivers, KMD and main CMake
+targets. `build/release/` contains `venera-setup-<version>.exe`, its ISO, `vioserial-LICENSE.txt` and
+`nlohmann-json-LICENSE.txt`. The version comes from `build/win/setup/version.txt`; the unversioned installer is
+`build/win/setup/venera-setup.exe`. Mesa and the UMDs build for both x86_64 and i686.
+
+The workbench produces `build/debug-channel/release/venera-debug-host` and `debug-channel/web/dist`.
+Cargo downloads use `build/cargo-home` and build output uses `build/debug-channel`; existing `CARGO_HOME` and
+`CARGO_TARGET_DIR` settings take precedence for the host build and checks.
+See [host deployment](docs/virtio-serial-host.md) and [VirtIO serial packaging](docs/vioserial-distribution.md)
+for deployment and custom package configuration. Component build details live in
+[`icd/build.sh`](icd/build.sh), [`kmd/CMakeLists.txt`](kmd/CMakeLists.txt) and [`CMakeLists.txt`](CMakeLists.txt).
 
 For testing, make `build/` visible in the guest and run this from an elevated PowerShell in `build\win\tests\win`; it
 runs the installer silently and sets the drivers' logging up. Its top comment covers the other actions.
