@@ -222,6 +222,8 @@ fn connection_query_tracks_live_receiver_and_disconnect() {
     wait_for(dir.path(), |rows| {
         rows.iter().any(|r| r["message"]["seq"] == "1")
     });
+    drop(listener);
+    std::fs::remove_file(dir.path().join("guest.sock")).unwrap();
     drop(reader);
     drop(guest);
     wait_for(dir.path(), |rows| {

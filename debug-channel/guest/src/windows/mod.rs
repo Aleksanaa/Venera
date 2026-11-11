@@ -16,7 +16,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use venera_debug_protocol::{Envelope, LogRecord, Message};
+use venera_debug_protocol::{Envelope, Message};
 use windows_sys::Win32::{
     Foundation::*,
     System::{
@@ -135,12 +135,6 @@ pub fn accept(state: &Shared, capture: Capture) {
             tid: None,
         })
     });
-    let Some(class) = class else {
-        return;
-    };
-    if class.component == "probe" {
-        return;
-    }
     state.expire();
     let observed = capture
         .pid
@@ -156,41 +150,10 @@ pub fn accept(state: &Shared, capture: Capture) {
         .as_ref()
         .map(|p| state.processes.ancestors(p, state.filter_started_filetime))
         .unwrap_or_default();
-    let mut record = LogRecord {
-        stream_id: state.stream_id.clone(),
-        seq: 0,
-        observed_at: capture.observed_at,
-        source_time: capture.source_time,
-        source: capture.source,
-        component: class.component,
-        level: class.level,
-        raw_level: capture.raw_level.unwrap_or(class.raw_level),
-        session_id,
-        process: identity,
-        tid: capture.tid.or(class.tid),
-        text: capture.text,
-    };
-    if !venera_debug_protocol::matches_filter(&state.status.effective_filter, &record, &ancestors) {
-        return;
-    }
-    state.sequence += 1;
-    record.seq = state.sequence;
-    let bytes = venera_debug_protocol::encode(&Envelope::new(Message::Log { record })).unwrap();
-    if bytes.len() > venera_debug_protocol::DEFAULT_MAX_LINE_BYTES {
-        let stream_id = state.stream_id.clone();
-        let seq = state.sequence;
-        state.queue_control(&Envelope::new(Message::Gap {
-            stream_id,
-            reason: "record_size_exceeded".into(),
-            count: Some(1),
-            first_seq: Some(seq),
-            last_seq: Some(seq),
-        }));
-        return;
-    }
-    state.broadcast(bytes.clone());
-    let seq = state.sequence;
-    state.enqueue_log(seq, bytes);
+    let mut capture = capture;
+    capture.process = identity;
+    capture.session_id = session_id;
+    state.publish_capture(capture, class, &ancestors);
 }
 pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {

@@ -1042,6 +1042,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_log_subscription_projects_ordinary_program_capture() {
+        let (server, mut pipe_client) = pipe_pair();
+        let state = Arc::new(Mutex::new(State::new("pipe-test".into(), true)));
+        state.lock().unwrap().status.effective_filter.components = vec!["venus".into()];
+        let mut owner = PipeWorkers::new();
+        let local_stop = owner.local_stop.clone();
+        let shared = state.clone();
+        owner.threads.push(std::thread::spawn(move || {
+            let mut finite = false;
+            client(server, shared, &mut finite, &local_stop).unwrap();
+        }));
+        pipe_client
+            .write_all(b"{\"type\":\"local.subscribe\"}\n")
+            .unwrap();
+        let (observed, received) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(pipe_client);
+            for _ in 0..2 {
+                let value: serde_json::Value =
+                    serde_json::from_slice(&line(&mut reader).unwrap()).unwrap();
+                observed.send(value).unwrap();
+            }
+        });
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()["type"],
+            "status"
+        );
+        accept(
+            &state,
+            Capture {
+                pid: Some(42),
+                tid: None,
+                session_id: Some(2),
+                observed_at: "2026-11-12T00:00:00Z".into(),
+                observed_filetime: 100,
+                source_time: None,
+                source: "dbwin".into(),
+                text: "ordinary program: hello 中文".into(),
+                raw_level: None,
+                process: Some(venera_debug_protocol::ProcessIdentity {
+                    pid: 42,
+                    start_time_filetime: Some("100".into()),
+                    exe_path: Some("C:\\Tools\\ordinary.exe".into()),
+                }),
+                component: None,
+            },
+        );
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            serde_json::json!({"major":1,"type":"log","stream_id":"pipe-test","seq":1,
+                "observed_at":"2026-11-12T00:00:00Z","source_time":null,"source":"dbwin",
+                "component":"","level":"unknown","raw_level":"unknown","session_id":2,
+                "process":{"pid":42,"start_time_filetime":"100","exe_path":"C:\\Tools\\ordinary.exe"},
+                "tid":null,"text":"ordinary program: hello 中文"})
+        );
+        reader.join().unwrap();
+        drop(owner);
+    }
+
     fn drop_listener_owner(subscribe: bool) {
         assert!(!stopped());
         let (server, mut pipe_client) = pipe_pair();
