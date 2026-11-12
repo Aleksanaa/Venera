@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The installer's window: a classic wizard with a banner, a status line and progress bar, the log as it is written,
-// and buttons at the bottom. Every page shows the same log; a page's text (what will happen) goes into it. It follows
-// DPI changes.
+// and buttons at the bottom, with Licenses (a window of its own) and the version on the left. Every page shows the same
+// log; a page's text (what will happen) goes into it. It follows DPI changes.
 #include "setup.h"
 
 #include <commctrl.h>
@@ -10,17 +10,171 @@
 
 namespace {
 
-constexpr wchar_t kClass[] = L"venera-setup";
+constexpr wchar_t kClass[] = L"venera-setup", kLicensesClass[] = L"venera-setup-licenses";
 constexpr UINT kLogLine = WM_APP, kStep = WM_APP + 1, kWorkDone = WM_APP + 2;
-constexpr int kStatus = 1001, kBar = 1002, kLog = 1003, kTitle = 1004, kSubtitle = 1005, kVersion = 1006;
+constexpr int kStatus = 1001, kBar = 1002, kLog = 1003, kTitle = 1004, kSubtitle = 1005, kVersion = 1006,
+              kLicensesButton = 1007, kLicenseTabs = 1008, kLicenseText = 1009;
 constexpr int kWidth = 640, kHeight = 500, kBanner = 64, kMargin = 16, kButtonW = 100, kButtonH = 28;
+constexpr int kLicensesWidth = 720, kLicensesHeight = 560, kFirstLicense = 200;
 constexpr DWORD kStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, kExStyle = WS_EX_CONTROLPARENT;
+
+// `text` with the line breaks an edit control wants.
+std::wstring crlf(const std::wstring& text)
+{
+    std::wstring out;
+    for (wchar_t c : text)
+        if (c == L'\n')
+            out += L"\r\n";
+        else if (c != L'\r')
+            out += c;
+    return out;
+}
+
+// The Licenses window: Venera's license and those of the projects in its files, a tab each. The build puts them in as
+// RCDATA kFirstLicense, kFirstLicense + 1, ... (setup/CMakeLists.txt), UTF-8, each starting with its tab's name on a
+// line of its own. It deletes itself when closed.
+struct Licenses {
+    HWND hwnd = nullptr, tabs = nullptr, text = nullptr;
+    HFONT font = nullptr, mono = nullptr;
+    int dpi = 96;
+    std::vector<std::pair<std::wstring, std::wstring>> pages;  // the tab's name, the text
+
+    int px(int v) const { return MulDiv(v, dpi, 96); }
+
+    // Opens the window over `owner`.
+    static HWND open(HWND owner)
+    {
+        auto self = new Licenses;
+        self->load();
+        HINSTANCE instance = GetModuleHandleW(nullptr);
+        HWND hwnd = CreateWindowExW(0, kLicensesClass, L"Licenses", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 100,
+                                    100, owner, nullptr, instance, nullptr);
+        self->hwnd = hwnd;
+        // The text first: the first child is on top, and the tabs' display area, which the text covers, is theirs too.
+        self->text = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS |
+                                     WS_VSCROLL | WS_TABSTOP | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0,
+                                     hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLicenseText)), instance,
+                                     nullptr);
+        self->tabs = CreateWindowExW(0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP |
+                                     TCS_MULTILINE, 0, 0, 0, 0, hwnd,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(kLicenseTabs)), instance, nullptr);
+        SendMessageW(self->text, EM_SETLIMITTEXT, 0, 0);
+        for (size_t i = 0; i < self->pages.size(); i++) {
+            TCITEMW item = {TCIF_TEXT};
+            item.pszText = const_cast<wchar_t*>(self->pages[i].first.c_str());
+            TabCtrl_InsertItem(self->tabs, static_cast<int>(i), &item);
+        }
+        self->select(0);
+
+        // Sized for the DPI of the monitor it opened on, centred on the wizard.
+        self->dpi = GetDpiForWindow(hwnd);
+        self->make_fonts();
+        RECT rc = {0, 0, self->px(kLicensesWidth), self->px(kLicensesHeight)}, owner_rc;
+        AdjustWindowRectExForDpi(&rc, WS_OVERLAPPEDWINDOW, FALSE, 0, self->dpi);
+        GetWindowRect(owner, &owner_rc);
+        int w = rc.right - rc.left, h = rc.bottom - rc.top;
+        SetWindowPos(hwnd, nullptr, (owner_rc.left + owner_rc.right - w) / 2, (owner_rc.top + owner_rc.bottom - h) / 2,
+                     w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        self->layout();
+        ShowWindow(hwnd, SW_SHOW);
+        SetFocus(self->tabs);
+        return hwnd;
+    }
+
+    void load()
+    {
+        for (int id = kFirstLicense;; id++) {
+            HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(id), MAKEINTRESOURCEW(10));  // RT_RCDATA
+            if (!res)
+                break;
+            auto data = static_cast<const char*>(LockResource(LoadResource(nullptr, res)));
+            int size = SizeofResource(nullptr, res);
+            std::wstring s(MultiByteToWideChar(CP_UTF8, 0, data, size, nullptr, 0), L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, data, size, s.data(), static_cast<int>(s.size()));
+            size_t name_end = s.find(L'\n');
+            pages.emplace_back(s.substr(0, name_end), crlf(s.substr(name_end + 1)));
+        }
+    }
+
+    void select(int i)
+    {
+        if (i >= 0 && i < static_cast<int>(pages.size()))
+            SetWindowTextW(text, pages[i].second.c_str());
+    }
+
+    void make_fonts()
+    {
+        for (HFONT f : {font, mono})
+            if (f)
+                DeleteObject(f);
+        NONCLIENTMETRICSW ncm = {sizeof(ncm)};
+        SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, dpi);
+        font = CreateFontIndirectW(&ncm.lfMessageFont);
+        mono = CreateFontW(-px(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
+                           FIXED_PITCH, L"Consolas");
+        SendMessageW(tabs, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+        SendMessageW(text, WM_SETFONT, reinterpret_cast<WPARAM>(mono), FALSE);
+    }
+
+    // The tabs fill the client area; the text fills their display area, which shrinks as the tabs take more rows.
+    void layout()
+    {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        RECT r = {px(8), px(8), rc.right - px(8), rc.bottom - px(8)};
+        MoveWindow(tabs, r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
+        TabCtrl_AdjustRect(tabs, FALSE, &r);
+        MoveWindow(text, r.left, r.top, r.right - r.left, r.bottom - r.top, TRUE);
+    }
+
+    static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+    {
+        auto self = reinterpret_cast<Licenses*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (!self)
+            return DefWindowProcW(hwnd, msg, wparam, lparam);
+        switch (msg) {
+        case WM_NOTIFY: {
+            auto hdr = reinterpret_cast<const NMHDR*>(lparam);
+            if (hdr->hwndFrom == self->tabs && hdr->code == TCN_SELCHANGE)
+                self->select(TabCtrl_GetCurSel(self->tabs));
+            return 0;
+        }
+        case WM_SIZE:
+            self->layout();
+            return 0;
+        case WM_DPICHANGED: {
+            self->dpi = HIWORD(wparam);
+            self->make_fonts();
+            auto r = reinterpret_cast<const RECT*>(lparam);
+            SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            self->layout();
+            return 0;
+        }
+        case WM_CTLCOLORSTATIC:  // a read-only edit's: white, as an editable one
+            if (reinterpret_cast<HWND>(lparam) == self->text) {
+                SetBkColor(reinterpret_cast<HDC>(wparam), GetSysColor(COLOR_WINDOW));
+                return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+            }
+            break;
+        case WM_NCDESTROY:
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            for (HFONT f : {self->font, self->mono})
+                DeleteObject(f);
+            delete self;
+            break;
+        }
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+};
 
 }  // namespace
 
 struct Wizard::Impl {
     HWND hwnd = nullptr;
-    HWND title, subtitle, status, bar, log_view, version_label;
+    HWND title, subtitle, status, bar, log_view, version_label, licenses_button;
+    HWND licenses = nullptr;  // the Licenses window, while it is open
     std::vector<HWND> buttons;
     HFONT font = nullptr, bold = nullptr, mono = nullptr;
     HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
@@ -52,7 +206,7 @@ struct Wizard::Impl {
         bold = CreateFontIndirectW(&lf);
         mono = CreateFontW(-px(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY,
                            FIXED_PITCH, L"Consolas");
-        for (HWND c : {subtitle, status, version_label})
+        for (HWND c : {subtitle, status, version_label, licenses_button})
             SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
         for (HWND b : buttons)
             SendMessageW(b, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
@@ -62,13 +216,7 @@ struct Wizard::Impl {
 
     void append_log(const std::wstring& line)
     {
-        std::wstring text;
-        for (wchar_t c : line)
-            if (c == L'\n')
-                text += L"\r\n";
-            else if (c != L'\r')
-                text += c;
-        text += L"\r\n";
+        std::wstring text = crlf(line) + L"\r\n";
         int len = GetWindowTextLengthW(log_view);
         SendMessageW(log_view, EM_SETSEL, len, len);
         SendMessageW(log_view, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
@@ -93,7 +241,8 @@ struct Wizard::Impl {
             MoveWindow(*it, x, y, px(kButtonW), px(kButtonH), TRUE);
             x -= px(8);
         }
-        MoveWindow(version_label, m, y + px(6), px(160), px(18), TRUE);
+        MoveWindow(licenses_button, m, y, px(kButtonW), px(kButtonH), TRUE);
+        MoveWindow(version_label, m + px(kButtonW) + px(12), y + px(6), px(160), px(18), TRUE);
         InvalidateRect(hwnd, nullptr, TRUE);
     }
 
@@ -139,6 +288,15 @@ struct Wizard::Impl {
         switch (msg) {
         case WM_COMMAND: {
             int id = LOWORD(wparam);
+            if (HIWORD(wparam) == BN_CLICKED && id == kLicensesButton) {
+                if (IsWindow(self->licenses)) {
+                    ShowWindow(self->licenses, SW_RESTORE);
+                    SetForegroundWindow(self->licenses);
+                } else {
+                    self->licenses = Licenses::open(hwnd);
+                }
+                return 0;
+            }
             if (HIWORD(wparam) == BN_CLICKED && ((id >= 100 && id < 1000) || id == IDCANCEL || id == IDOK)) {
                 if (!self->working)
                     self->result = id == IDOK ? self->default_button : id;
@@ -215,7 +373,7 @@ struct Wizard::Impl {
 
 Wizard::Wizard(const std::wstring& version) : impl(new Impl)
 {
-    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES | ICC_TAB_CLASSES};
     InitCommonControlsEx(&icc);
     WNDCLASSEXW wc = {sizeof(wc)};
     wc.lpfnWndProc = Impl::proc;
@@ -227,6 +385,9 @@ Wizard::Wizard(const std::wstring& version) : impl(new Impl)
                                                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
                                                LR_DEFAULTCOLOR));
     wc.lpszClassName = kClass;
+    RegisterClassExW(&wc);
+    wc.lpfnWndProc = Licenses::proc;
+    wc.lpszClassName = kLicensesClass;
     RegisterClassExW(&wc);
 
     Impl& d = *impl;
@@ -243,6 +404,9 @@ Wizard::Wizard(const std::wstring& version) : impl(new Impl)
     SendMessageW(d.log_view, EM_SETLIMITTEXT, 0, 0);
     d.version_label = d.child(L"STATIC", WS_VISIBLE | SS_NOPREFIX, 0, kVersion);
     SetWindowTextW(d.version_label, (L"Venera " + version).c_str());
+    // On every page, left of the version; the window it opens closes with the wizard, which owns it.
+    d.licenses_button = d.child(L"BUTTON", WS_VISIBLE | WS_TABSTOP, 0, kLicensesButton);
+    SetWindowTextW(d.licenses_button, L"Licenses");
 
     // Sized and centred for the DPI of the monitor it opened on.
     d.dpi = GetDpiForWindow(d.hwnd);
