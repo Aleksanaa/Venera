@@ -1,0 +1,187 @@
+From: renner.dev
+Subject: wsi/win32: present on the DXGI_SHARED path from a thread
+
+vkQueuePresentKHR on DXGI_SHARED waited on the CPU for the image's WSI fence, then copied the image into the DXGI
+swapchain through D3D11 and presented, all on the application's thread: about 1.9 ms per frame on top of the GPU
+time, never overlapped with the next frame (Windows 11 guest, RX 9070 XT host, renner-bench at 53% of native).
+
+The present thread does that work now: vkQueuePresentKHR queues the image (in order, at most 16) and returns; the
+thread waits, copies, presents and marks the image idle. A queued image is not acquirable until it was presented,
+so the image count still bounds how far the application gets ahead. A failure reaches the application through
+chain->status at the next present or acquire. Destroying the swapchain presents what is queued, then joins the
+thread. If the thread cannot start, presents stay inline as before.
+
+renner-bench, 1280x720, immediate, idle host GPU, 3 rounds alternating: native 4277/4288/4261; installed Venera
+0.2.3 2262/2306/2041; the same Mesa built without this patch 2232/2189/2220; with it 3612/3738/3469 (about 84% of
+native).
+
+--- a/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-15 02:27:50.222995500 +0900
++++ b/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-15 02:27:50.310442100 +0900
+@@ -127,6 +127,17 @@
+    HMODULE                    d3d11_mod;
+    ID3D11Device              *d3d11_device;
+    ID3D11DeviceContext       *d3d11_context;
++   /* DXGI_SHARED present thread: vkQueuePresentKHR queues the image and
++    * returns; the thread waits for the image's WSI fence, copies it into the
++    * DXGI swapchain and presents, so the application records the next frame
++    * meanwhile. Queue and flags are guarded by acquire_mutex.
++    */
++   thrd_t                     present_thread;
++   struct u_cnd_monotonic     present_cond;
++   bool                       present_thread_running;
++   bool                       present_thread_quit;
++   uint32_t                   present_queue[16];
++   uint32_t                   present_head, present_tail;
+ #endif
+    IDXGISwapChain3            *dxgi;
+    enum wsi_win32_present_path present_path;
+@@ -143,6 +154,10 @@
+    struct wsi_win32_image     images[0];
+ };
+ 
++#if defined(HAVE_YTTRIUM)
++static void wsi_win32_stop_present_thread(struct wsi_win32_swapchain *chain);
++#endif
++
+ /* DirectComposition transactions are device-global.  Serialize mutations
+  * across all Win32 surfaces so one surface cannot commit another surface's
+  * pending visual changes.
+@@ -971,6 +986,10 @@
+    struct wsi_win32_swapchain *chain =
+       (struct wsi_win32_swapchain *) drv_chain;
+ 
++#if defined(HAVE_YTTRIUM)
++   wsi_win32_stop_present_thread(chain);
++#endif
++
+    mtx_lock(&chain->surface->mutex);
+    if (chain->surface->active_swapchain == chain)
+       chain->surface->active_swapchain = NULL;
+@@ -1200,11 +1219,13 @@
+    return result;
+ }
+ 
++/* Waits for the image, copies and presents it (on the present thread, or
++ * inline when the thread could not be started). */
+ static VkResult
+-wsi_win32_queue_present_dxgi_shared(struct wsi_win32_swapchain *chain,
+-                                    struct wsi_win32_image *image,
+-                                    uint32_t image_index,
+-                                    const VkPresentRegionKHR *damage)
++wsi_win32_present_dxgi_shared_now(struct wsi_win32_swapchain *chain,
++                                  struct wsi_win32_image *image,
++                                  uint32_t image_index,
++                                  const VkPresentRegionKHR *damage)
+ {
+    (void)damage;
+ 
+@@ -1269,6 +1290,97 @@
+    wsi_win32_set_image_idle(chain, image);
+    return VK_SUCCESS;
+ }
++
++static int
++wsi_win32_present_thread(void *data)
++{
++   struct wsi_win32_swapchain *chain = (struct wsi_win32_swapchain *)data;
++   const uint32_t queue_size = ARRAY_SIZE(chain->present_queue);
++
++   u_thread_setname("wsi_win32_present");
++   mtx_lock(&chain->acquire_mutex);
++   for (;;) {
++      while (chain->present_head == chain->present_tail &&
++             !chain->present_thread_quit)
++         u_cnd_monotonic_wait(&chain->present_cond, &chain->acquire_mutex);
++      if (chain->present_head == chain->present_tail)
++         break; /* quit, and nothing left to present */
++
++      const uint32_t index =
++         chain->present_queue[chain->present_head++ % queue_size];
++      mtx_unlock(&chain->acquire_mutex);
++      /* Marks the image idle (and records a failure in chain->status). */
++      wsi_win32_present_dxgi_shared_now(chain, &chain->images[index], index,
++                                        NULL);
++      mtx_lock(&chain->acquire_mutex);
++   }
++   mtx_unlock(&chain->acquire_mutex);
++   return 0;
++}
++
++/* The CPU wait for the frame plus the D3D11 copy and present took about
++ * 1.9 ms per frame on top of the GPU time, serialized with the application
++ * (Windows guest, renner-bench: 53% of native, 2026-11-15). The present
++ * thread overlaps them with the application's next frame; presents keep
++ * their order, and a queued image is not acquirable until it was presented.
++ */
++static VkResult
++wsi_win32_queue_present_dxgi_shared(struct wsi_win32_swapchain *chain,
++                                    struct wsi_win32_image *image,
++                                    uint32_t image_index,
++                                    const VkPresentRegionKHR *damage)
++{
++   if (!chain->present_thread_running)
++      return wsi_win32_present_dxgi_shared_now(chain, image, image_index,
++                                               damage);
++
++   const uint32_t queue_size = ARRAY_SIZE(chain->present_queue);
++   mtx_lock(&chain->acquire_mutex);
++   const VkResult status = chain->status;
++   if (status < VK_SUCCESS) {
++      image->state = WSI_IMAGE_IDLE;
++      u_cnd_monotonic_broadcast(&chain->acquire_cond);
++      mtx_unlock(&chain->acquire_mutex);
++      return status;
++   }
++   assert(chain->present_tail - chain->present_head < queue_size);
++   image->state = WSI_IMAGE_QUEUED;
++   chain->present_queue[chain->present_tail++ % queue_size] = image_index;
++   u_cnd_monotonic_broadcast(&chain->present_cond);
++   mtx_unlock(&chain->acquire_mutex);
++   return status;
++}
++
++static void
++wsi_win32_start_present_thread(struct wsi_win32_swapchain *chain)
++{
++   if (u_cnd_monotonic_init(&chain->present_cond) != thrd_success)
++      return;
++   chain->present_head = chain->present_tail = 0;
++   chain->present_thread_quit = false;
++   if (thrd_create(&chain->present_thread, wsi_win32_present_thread, chain) !=
++       thrd_success) {
++      u_cnd_monotonic_destroy(&chain->present_cond);
++      mesa_logw("wsi/win32: no present thread; presenting inline");
++      return;
++   }
++   chain->present_thread_running = true;
++}
++
++/* Presents what is queued, then ends the thread. */
++static void
++wsi_win32_stop_present_thread(struct wsi_win32_swapchain *chain)
++{
++   if (!chain->present_thread_running)
++      return;
++   mtx_lock(&chain->acquire_mutex);
++   chain->present_thread_quit = true;
++   u_cnd_monotonic_broadcast(&chain->present_cond);
++   mtx_unlock(&chain->acquire_mutex);
++   thrd_join(chain->present_thread, NULL);
++   u_cnd_monotonic_destroy(&chain->present_cond);
++   chain->present_thread_running = false;
++}
+ #endif
+ 
+ static VkResult
+@@ -1659,6 +1771,11 @@
+       chain->base.image_count++;
+    }
+ 
++#if defined(HAVE_YTTRIUM)
++   if (chain->present_path == WSI_WIN32_PRESENT_DXGI_SHARED)
++      wsi_win32_start_present_thread(chain);
++#endif
++
+    *swapchain_out = &chain->base;
+ 
+    return VK_SUCCESS;
