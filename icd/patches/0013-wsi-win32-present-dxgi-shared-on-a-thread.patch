@@ -8,15 +8,17 @@ time, never overlapped with the next frame (Windows 11 guest, RX 9070 XT host, r
 The present thread does that work now: vkQueuePresentKHR queues the image (in order, at most 16) and returns; the
 thread waits, copies, presents and marks the image idle. A queued image is not acquirable until it was presented,
 so the image count still bounds how far the application gets ahead. A failure reaches the application through
-chain->status at the next present or acquire. Destroying the swapchain presents what is queued, then joins the
-thread. If the thread cannot start, presents stay inline as before.
+chain->status at the next present or acquire: the thread records it under acquire_mutex before the image goes
+idle, and acquire checks it under the lock, also after each wakeup, so no acquire succeeds after the failure.
+Destroying the swapchain presents what is queued, then joins the thread. If the thread cannot start, presents stay
+inline as before.
 
 renner-bench, 1280x720, immediate, idle host GPU, 3 rounds alternating: native 4277/4288/4261; installed Venera
 0.2.3 2262/2306/2041; the same Mesa built without this patch 2232/2189/2220; with it 3612/3738/3469 (about 84% of
 native).
 
---- a/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-15 02:27:50.222995500 +0900
-+++ b/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-15 02:27:50.310442100 +0900
+--- a/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-16 19:26:05.814863026 +0800
++++ b/src/vulkan/wsi/wsi_common_win32.cpp	2026-11-16 19:26:55.493441864 +0800
 @@ -127,6 +127,17 @@
     HMODULE                    d3d11_mod;
     ID3D11Device              *d3d11_device;
@@ -57,7 +59,42 @@ native).
     mtx_lock(&chain->surface->mutex);
     if (chain->surface->active_swapchain == chain)
        chain->surface->active_swapchain = NULL;
-@@ -1200,11 +1219,13 @@
+@@ -1072,6 +1091,12 @@
+                                         const VkAcquireNextImageInfoKHR *info,
+                                         uint32_t *out_image_index)
+ {
++   /* The DXGI_SHARED present thread sets chain->status under acquire_mutex
++    * when a present fails, so check it here and after every wakeup.
++    */
++   if (chain->status != VK_SUCCESS)
++      return chain->status;
++
+    if (wsi_win32_find_idle_image(chain, out_image_index))
+       return VK_SUCCESS;
+ 
+@@ -1088,6 +1113,8 @@
+          return VK_TIMEOUT;
+       else if (ret != thrd_success)
+          return VK_ERROR_OUT_OF_DATE_KHR;
++      if (chain->status != VK_SUCCESS)
++         return chain->status;
+    } while (!wsi_win32_find_idle_image(chain, out_image_index));
+ 
+    return VK_SUCCESS;
+@@ -1194,17 +1221,25 @@
+                               struct wsi_win32_image *image,
+                               VkResult result)
+ {
+-   wsi_win32_set_image_idle(chain, image);
++   /* Record the failure before the image becomes acquirable, so that an
++    * acquire woken by it returns the failure instead of the image.
++    */
++   mtx_lock(&chain->acquire_mutex);
+    if (result < VK_SUCCESS)
+       chain->status = result;
++   image->state = WSI_IMAGE_IDLE;
++   u_cnd_monotonic_broadcast(&chain->acquire_cond);
++   mtx_unlock(&chain->acquire_mutex);
     return result;
  }
  
@@ -75,7 +112,7 @@ native).
  {
     (void)damage;
  
-@@ -1269,6 +1290,97 @@
+@@ -1269,6 +1304,97 @@
     wsi_win32_set_image_idle(chain, image);
     return VK_SUCCESS;
  }
@@ -173,7 +210,7 @@ native).
  #endif
  
  static VkResult
-@@ -1659,6 +1771,11 @@
+@@ -1659,6 +1785,11 @@
        chain->base.image_count++;
     }
  
