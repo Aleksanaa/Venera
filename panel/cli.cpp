@@ -147,7 +147,7 @@ int runTests(const std::vector<std::string>& names, bool verbose)
         TestResult r = runTest(id, nullptr);
         wchar_t time[32];
         swprintf(time, 32, L"%6.1f s", r.seconds);
-        out.print(std::wstring(r.ok ? L"passed " : L"FAILED ") + time + (r.ok ? L"" : L"  " + r.summary) + L"\n");
+        out.print(std::wstring(r.ok ? L"passed " : L"FAILED ") + time + (r.ok ? L"" : L"  " + r.summary.resolve(locale::Language::English)) + L"\n");
         if (!r.ok || verbose)
             out.print(indent(r.output, L"    "));
         (r.ok ? passed : failed)++;
@@ -223,7 +223,7 @@ int runUpdate(Channel channel, const std::wstring& from)
     if (printed)
         Output(STD_ERROR_HANDLE).print(e + L".\n");
     else
-        MessageBoxW(nullptr, (e + L".").c_str(), L"Venera update", MB_ICONERROR);
+        MessageBoxW(nullptr, (e + L".").c_str(), locale::text(IDS_VeneraUpdate), MB_ICONERROR);
     return 1;
 }
 
@@ -304,7 +304,7 @@ int runCommandLine(int argc, wchar_t** argv, int* page)
             if (AttachConsole(ATTACH_PARENT_PROCESS) || GetLastError() == ERROR_ACCESS_DENIED)
                 Output(STD_ERROR_HANDLE).print(e + L".\n");
             else
-                MessageBoxW(nullptr, (e + L".").c_str(), L"Frame rate overlay", MB_ICONERROR);
+                MessageBoxW(nullptr, (e + L".").c_str(), locale::text(IDS_FpsOverlay), MB_ICONERROR);
             return 1;
         }
         if (o == L"update") {

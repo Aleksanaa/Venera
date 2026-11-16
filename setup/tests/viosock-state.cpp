@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-#include "../vioserial-state.h"
+#include "../viosock-state.h"
 #include <cstdlib>
 #include <iostream>
 
@@ -11,8 +11,8 @@ int main()
             std::exit(1);
         }
     };
-    using vioserial::accepted;
-    using vioserial::ready;
+    using viosock::accepted;
+    using viosock::ready;
     expect(accepted(259, ready({{true, true, true, true, 0}}, true)), true, "259 healthy controller");
     expect(accepted(259, ready({}, true)), false, "259 device discovery");
     expect(accepted(259, ready({{true, true, true, true, 28}}, true)), false, "259 controller problem");
@@ -27,9 +27,18 @@ int main()
     expect(accepted(3010, false), true, "restart requested");
     expect(accepted(1641, false), true, "restart initiated");
     expect(accepted(5, true), false, "installation error");
-    expect(vioserial::matches(L"PCI\\VEN_1AF4&DEV_1003&SUBSYS_00031AF4&REV_00"), true, "legacy hardware ID");
-    expect(vioserial::matches(L"pci\\ven_1af4&dev_1043"), true, "modern compatible ID");
-    expect(vioserial::matches(L"PCI\\VEN_1AF4&DEV_10430"), false, "device ID token");
-    expect(vioserial::matches(L"PCI\\VEN_1234&DEV_1043"), false, "vendor ID");
-    std::cout << "17 literal decisions passed\n";
+    expect(viosock::matches(L"PCI\\VEN_1AF4&DEV_1012&SUBSYS_00031AF4&REV_00"), true, "legacy hardware ID");
+    expect(viosock::matches(L"pci\\ven_1af4&dev_1053"), true, "modern compatible ID");
+    expect(viosock::matches(L"PCI\\VEN_1AF4&DEV_10530"), false, "device ID token");
+    expect(viosock::matches(L"PCI\\VEN_1234&DEV_1053"), false, "vendor ID");
+    expect(ready(true, {true, true, true}), true, "working listener");
+    expect(ready(false, {true, true, true}), false, "controller activation pending");
+    expect(ready(true, {false, true, true}), false, "WSP service stopped");
+    expect(ready(true, {true, false, true}), false, "provider registration pending");
+    expect(ready(true, {true, true, false}), false, "listener activation pending");
+    expect(accepted(259, ready(true, {true, true, false})), false, "existing package activation pending");
+    expect(accepted(259, ready(true, {true, true, true})), true, "existing package active");
+    expect(viosock::restart_required(0, false), true, "activation after restart");
+    expect(viosock::restart_required(0, true), false, "active provider");
+    expect(viosock::restart_required(3010, true), true, "Windows restart request");
 }

@@ -23,10 +23,10 @@ test('选择详情视图查看概览与完整嵌套元数据', async () => {
   const overview = screen.getByRole('tabpanel', { name: '概览' });
   for (const value of [
     '9007199254740993',
-    '2026-11-11T09:00:00Z',
-    'log',
+    '2026年11月11日 09:00:00',
+    '日志',
     'renderer',
-    'info',
+    '信息',
     'C:\\demo.exe',
     '42',
   ]) {

@@ -196,22 +196,22 @@ TestResult runTest(const std::string& id, HANDLE cancel)
         return r;
     wchar_t buf[64];
     if (!c.started) {
-        r.summary = L"Could not start the test";
+        r.summary = locale::Message(IDS_TestStartFailed);
     } else if (c.cancelled) {
         r.stopped = true;
-        r.summary = L"Stopped";
+        r.summary = locale::Message(IDS_TestStopped);
     } else if (c.timedOut) {
-        r.summary = L"Stopped responding after " + std::to_wstring(kTestTimeoutMs / 1000) + L" s";
+        r.summary = locale::Message(IDS_TestTimeout, {std::to_wstring(kTestTimeoutMs / 1000)});
     } else if (c.exitCode != 1) {
-        swprintf(buf, 64, L"Crashed (0x%08lx)", c.exitCode);
-        r.summary = buf;
+        swprintf(buf, 64, L"0x%08lx", c.exitCode);
+        r.summary = locale::Message(IDS_TestCrashed, {buf});
         std::wstring where = failure(c.output);
         if (where.find(L"ACCESS VIOLATION") == 0)
-            r.summary += L": " + where;
+            r.summary.diagnostic = L": " + where;
     } else {
         r.summary = failure(c.output);
         if (r.summary.empty())
-            r.summary = L"Failed";
+            r.summary = locale::Message(IDS_TestFailed);
     }
     return r;
 }

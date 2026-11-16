@@ -176,6 +176,8 @@ struct Wizard::Impl {
     HWND title, subtitle, status, bar, log_view, version_label, licenses_button, option;
     HWND licenses = nullptr;  // the Licenses window, while it is open
     std::vector<HWND> buttons;
+    std::vector<HWND> component_boxes;
+    bool transport_ready = false, transport_available = false;
     HFONT font = nullptr, bold = nullptr, mono = nullptr;
     HBRUSH white = CreateSolidBrush(RGB(255, 255, 255));
     int dpi = 96;
@@ -184,6 +186,22 @@ struct Wizard::Impl {
     int default_button = 0;
 
     int px(int v) const { return MulDiv(v, dpi, 96); }
+
+    void update_component_status()
+    {
+        if (component_boxes.empty())
+            return;
+        const bool collector = SendMessageW(component_boxes[2], BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const bool panel = SendMessageW(component_boxes[1], BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const bool transport = SendMessageW(component_boxes[3], BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const wchar_t* error = collector && !panel ? L"Select Panel for Debug collector." :
+            transport && !transport_available && !transport_ready ?
+            L"The VirtIO socket package is unavailable." :
+            collector && !transport && !transport_ready ? L"Select VirtIO socket transport for Debug collector." : L"";
+        SetWindowTextW(status, *error ? error : L"Ready.");
+        if (!buttons.empty())
+            EnableWindow(buttons.front(), !*error);
+    }
 
     HWND child(const wchar_t* cls, DWORD style, DWORD ex, int id)
     {
@@ -211,6 +229,8 @@ struct Wizard::Impl {
         SendMessageW(option, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
         for (HWND b : buttons)
             SendMessageW(b, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+        for (HWND b : component_boxes)
+            SendMessageW(b, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
         SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(bold), FALSE);
         SendMessageW(log_view, WM_SETFONT, reinterpret_cast<WPARAM>(mono), FALSE);
     }
@@ -234,9 +254,12 @@ struct Wizard::Impl {
         int top = px(kBanner) + m, bottom = h - px(52) - m / 2;
         MoveWindow(status, m, top, w - 2 * m, px(20), TRUE);
         MoveWindow(bar, m, top + px(24), w - 2 * m, px(18), TRUE);
-        const int option_height = (GetWindowLongPtrW(option, GWL_STYLE) & WS_VISIBLE) ? px(30) : 0;
+        const int option_height = !component_boxes.empty() ? px(128) :
+            (GetWindowLongPtrW(option, GWL_STYLE) & WS_VISIBLE) ? px(30) : 0;
         MoveWindow(log_view, m, top + px(50), w - 2 * m, bottom - top - px(50) - option_height, TRUE);
         MoveWindow(option, m, bottom - px(28), w - 2 * m, px(24), TRUE);
+        for (size_t i = 0; i < component_boxes.size(); ++i)
+            MoveWindow(component_boxes[i], m, bottom - option_height + px(32 * i), w - 2 * m, px(30), TRUE);
         int y = h - px(10) - px(kButtonH);
         int x = w - m;
         for (auto it = buttons.rbegin(); it != buttons.rend(); ++it) {
@@ -245,7 +268,10 @@ struct Wizard::Impl {
             x -= px(8);
         }
         MoveWindow(licenses_button, m, y, px(kButtonW), px(kButtonH), TRUE);
-        MoveWindow(version_label, m + px(kButtonW) + px(12), y + px(6), px(160), px(18), TRUE);
+        const int version_x = m + px(kButtonW) + px(12);
+        const int version_width = x - version_x;
+        ShowWindow(version_label, version_width >= px(120) ? SW_SHOW : SW_HIDE);
+        MoveWindow(version_label, version_x, y + px(6), version_width > 0 ? version_width : 0, px(18), TRUE);
         InvalidateRect(hwnd, nullptr, TRUE);
     }
 
@@ -257,6 +283,27 @@ struct Wizard::Impl {
         SetWindowTextW(option, page.option.c_str());
         SendMessageW(option, BM_SETCHECK, page.option_checked ? BST_CHECKED : BST_UNCHECKED, 0);
         ShowWindow(option, page.option.empty() ? SW_HIDE : SW_SHOW);
+        for (auto box : component_boxes)
+            DestroyWindow(box);
+        component_boxes.clear();
+        transport_ready = page.transport_ready;
+        transport_available = page.transport_available;
+        if (page.component_page) {
+            const wchar_t* labels[] = {
+                L"Graphics — Direct3D, Vulkan and OpenGL",
+                L"Display Control Panel — display settings and diagnostics",
+                L"Debug collector — collects guest diagnostics using Panel and VirtIO sockets",
+                L"VirtIO socket transport — connects guest diagnostics to the host"};
+            const bool checked[] = {true, page.selected.panel, page.selected.collector, page.selected.transport};
+            for (int i = 0; i < 4; ++i) {
+                HWND box = child(L"BUTTON", WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 1100 + i);
+                SetWindowTextW(box, labels[i]);
+                SendMessageW(box, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+                SendMessageW(box, BM_SETCHECK, checked[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+                EnableWindow(box, i != 0 && (i != 3 || transport_available));
+                component_boxes.push_back(box);
+            }
+        }
         if (!page.text.empty())
             log(page.text);
         for (HWND b : buttons)
@@ -269,6 +316,7 @@ struct Wizard::Impl {
             SetWindowTextW(b, label.c_str());
             buttons.push_back(b);
         }
+        update_component_status();
         layout();
         if (!buttons.empty())
             SetFocus(buttons[page.default_index]);
@@ -301,6 +349,19 @@ struct Wizard::Impl {
                 } else {
                     self->licenses = Licenses::open(hwnd);
                 }
+                return 0;
+            }
+            if (HIWORD(wparam) == BN_CLICKED && id >= 1100 && id <= 1103 && !self->component_boxes.empty()) {
+                auto checked = [&](int i) { return SendMessageW(self->component_boxes[i], BM_GETCHECK, 0, 0) == BST_CHECKED; };
+                if (id == 1102 && checked(2))
+                    SendMessageW(self->component_boxes[1], BM_SETCHECK, BST_CHECKED, 0);
+                if (id == 1101 && !checked(1))
+                    SendMessageW(self->component_boxes[2], BM_SETCHECK, BST_UNCHECKED, 0);
+                if (id == 1102 && checked(2) && !self->transport_ready && self->transport_available)
+                    SendMessageW(self->component_boxes[3], BM_SETCHECK, BST_CHECKED, 0);
+                if (id == 1103 && !checked(3) && !self->transport_ready)
+                    SendMessageW(self->component_boxes[2], BM_SETCHECK, BST_UNCHECKED, 0);
+                self->update_component_status();
                 return 0;
             }
             if (HIWORD(wparam) == BN_CLICKED && ((id >= 100 && id < 1000) || id == IDCANCEL || id == IDOK)) {
@@ -409,7 +470,7 @@ Wizard::Wizard(const std::wstring& version) : impl(new Impl)
                          WS_EX_CLIENTEDGE, kLog);
     SendMessageW(d.log_view, EM_SETLIMITTEXT, 0, 0);
     d.version_label = d.child(L"STATIC", WS_VISIBLE | SS_NOPREFIX, 0, kVersion);
-    d.option = d.child(L"BUTTON", WS_TABSTOP | BS_AUTOCHECKBOX, 0, 1007);
+    d.option = d.child(L"BUTTON", WS_TABSTOP | BS_AUTOCHECKBOX, 0, 1010);
     SetWindowTextW(d.version_label, (L"Venera " + version).c_str());
     // On every page, left of the version; the window it opens closes with the wizard, which owns it.
     d.licenses_button = d.child(L"BUTTON", WS_VISIBLE | WS_TABSTOP, 0, kLicensesButton);
@@ -457,6 +518,13 @@ int Wizard::ask(const Page& page)
 bool Wizard::option_checked() const
 {
     return SendMessageW(impl->option, BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
+components::Selection Wizard::selection() const
+{
+    auto checked = [&](int i) { return impl->component_boxes.size() == 4 &&
+        SendMessageW(impl->component_boxes[i], BM_GETCHECK, 0, 0) == BST_CHECKED; };
+    return {true, checked(1), checked(2), checked(3)};
 }
 
 bool Wizard::run(const std::wstring& heading, const std::wstring& subheading,

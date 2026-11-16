@@ -48,7 +48,7 @@ fn failure(request_id: String, session_id: Option<u32>, code: &str, message: Str
     })
 }
 
-pub fn request(state: Shared, request_id: String) -> Option<Envelope> {
+pub fn request(state: Shared, peer: u64, request_id: String) -> Option<Envelope> {
     if ACTIVE.swap(true, Ordering::AcqRel) {
         return Some(failure(
             request_id,
@@ -93,7 +93,7 @@ pub fn request(state: Shared, request_id: String) -> Option<Envelope> {
                 })
             };
             while !stopped() {
-                if state.lock().unwrap().queue_control(&response) {
+                if state.lock().unwrap().queue_peer_control(peer, &response) {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(20));

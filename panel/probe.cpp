@@ -3,7 +3,7 @@
 // through the loader, D3D12 and D3D11 on the adapter, OpenGL on a window) and prints key=value lines. Each API first
 // prints "<api>.status=checking", so one that crashes the process is told apart from one that was never reached, and
 // each names the files of ours it loaded (module.*). The panel runs it as a child process (startProbe) and reads its
-// output.
+// output. GPU identity is queried through the installed Venus ICD.
 #include "panel.h"
 
 #define VK_NO_PROTOTYPES
@@ -60,48 +60,92 @@ void outModules()
     }
 }
 
-bool hasExtension(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhysicalDevice d, const char* name)
+VkResult hasExtension(PFN_vkGetInstanceProcAddr gipa, VkInstance instance, VkPhysicalDevice d, const char* name,
+                      bool& supported)
 {
     auto enumerate = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
         gipa(instance, "vkEnumerateDeviceExtensionProperties"));
+    if (!enumerate)
+        return VK_ERROR_INITIALIZATION_FAILED;
     uint32_t n = 0;
-    enumerate(d, nullptr, &n, nullptr);
+    VkResult result = enumerate(d, nullptr, &n, nullptr);
+    if (result != VK_SUCCESS)
+        return result;
     std::vector<VkExtensionProperties> exts(n);
-    enumerate(d, nullptr, &n, exts.data());
+    if (n) {
+        result = enumerate(d, nullptr, &n, exts.data());
+        if (result != VK_SUCCESS)
+            return result;
+        exts.resize(n);
+    }
     for (const VkExtensionProperties& e : exts)
         if (!strcmp(e.extensionName, name))
-            return true;
-    return false;
+            supported = true;
+    return VK_SUCCESS;
 }
 
-void probeVulkan()
+struct VulkanQuery {
+    HMODULE module;
+    VkInstance instance = VK_NULL_HANDLE;
+    PFN_vkDestroyInstance destroy = nullptr;
+    ~VulkanQuery()
+    {
+        if (instance && destroy)
+            destroy(instance, nullptr);
+        // An incomplete interface keeps its live instance until the probe process exits.
+        if (module && (!instance || destroy))
+            FreeLibrary(module);
+    }
+};
+
+void queryVulkan(VulkanQuery& query, PFN_vkGetInstanceProcAddr gipa, const std::string& prefix)
 {
-    out("vk.status", "checking");
-    HMODULE loader = LoadLibraryW(L"vulkan-1.dll");
-    if (!loader) {
-        out("vk.status", "no loader");
+    auto emit = [&](const std::string& key, const std::string& value) { out(prefix + "." + key, value); };
+    if (!gipa) {
+        emit("status", "missing instance entry point");
         return;
     }
-    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(loader, "vkGetInstanceProcAddr"));
     auto createInstance = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
+    if (!createInstance) {
+        emit("status", "missing instance creation entry point");
+        return;
+    }
     VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "venera-panel";
     app.apiVersion = VK_API_VERSION_1_3;
     VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ci.pApplicationInfo = &app;
-    VkInstance instance;
-    if (VkResult r = createInstance(&ci, nullptr, &instance)) {
-        out("vk.status", "error " + std::to_string(r));
+    if (VkResult r = createInstance(&ci, nullptr, &query.instance)) {
+        query.instance = VK_NULL_HANDLE;
+        emit("status", "creating instance: error " + std::to_string(r));
         return;
     }
+    VkInstance instance = query.instance;
     auto enumerate = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(gipa(instance, "vkEnumeratePhysicalDevices"));
     auto properties2 =
         reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(gipa(instance, "vkGetPhysicalDeviceProperties2"));
-    auto destroy = reinterpret_cast<PFN_vkDestroyInstance>(gipa(instance, "vkDestroyInstance"));
+    query.destroy = reinterpret_cast<PFN_vkDestroyInstance>(gipa(instance, "vkDestroyInstance"));
+    auto memory = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        gipa(instance, "vkGetPhysicalDeviceMemoryProperties"));
+    if (!enumerate || !properties2 || !query.destroy || !memory) {
+        emit("status", "missing device query entry point");
+        return;
+    }
     uint32_t n = 0;
-    enumerate(instance, &n, nullptr);
+    VkResult result = enumerate(instance, &n, nullptr);
+    if (result != VK_SUCCESS) {
+        emit("status", "counting devices: error " + std::to_string(result));
+        return;
+    }
     std::vector<VkPhysicalDevice> devices(n);
-    enumerate(instance, &n, devices.data());
+    if (n) {
+        result = enumerate(instance, &n, devices.data());
+        if (result != VK_SUCCESS) {
+            emit("status", "enumerating devices: error " + std::to_string(result));
+            return;
+        }
+        devices.resize(n);
+    }
     bool found = false;
     for (VkPhysicalDevice d : devices) {
         VkPhysicalDeviceDriverProperties driver = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
@@ -110,11 +154,11 @@ void probeVulkan()
         if (driver.driverID != VK_DRIVER_ID_MESA_VENUS)
             continue;
         uint32_t v = p.properties.apiVersion;
-        out("vk.device", p.properties.deviceName);
-        out("vk.api", std::to_string(VK_API_VERSION_MAJOR(v)) + "." + std::to_string(VK_API_VERSION_MINOR(v)) + "." +
+        emit("device", p.properties.deviceName);
+        emit("api", std::to_string(VK_API_VERSION_MAJOR(v)) + "." + std::to_string(VK_API_VERSION_MINOR(v)) + "." +
                           std::to_string(VK_API_VERSION_PATCH(v)));
-        out("vk.driver", driver.driverName);
-        out("vk.driver_info", driver.driverInfo);
+        emit("driver", driver.driverName);
+        emit("driver_info", driver.driverInfo);
         // The host's driver, as Venus keeps it for VK_KHR_maintenance7's layered API: e.g. radv, "Mesa 25.2.4".
         VkPhysicalDeviceDriverProperties hostDriver = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         VkPhysicalDeviceLayeredApiVulkanPropertiesKHR hostVk = {
@@ -126,17 +170,21 @@ void probeVulkan()
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LAYERED_API_PROPERTIES_LIST_KHR};
         layers.layeredApiCount = 1;
         layers.pLayeredApis = &layer;
-        if (hasExtension(gipa, instance, d, VK_KHR_MAINTENANCE_7_EXTENSION_NAME)) {
+        bool maintenance7 = false;
+        result = hasExtension(gipa, instance, d, VK_KHR_MAINTENANCE_7_EXTENSION_NAME, maintenance7);
+        if (result != VK_SUCCESS) {
+            emit("status", "enumerating extensions: error " + std::to_string(result));
+            return;
+        }
+        if (maintenance7) {
             VkPhysicalDeviceProperties2 q = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &layers};
             properties2(d, &q);
             if (layers.layeredApiCount && hostDriver.driverInfo[0]) {
-                out("vk.host_driver", hostDriver.driverName);
-                out("vk.host_driver_info", hostDriver.driverInfo);
+                emit("host_driver", hostDriver.driverName);
+                emit("host_driver_info", hostDriver.driverInfo);
             }
         }
         // Its memory heaps, as "<bytes> <flags>": device-local (d) and with a memory type the CPU maps (m).
-        auto memory = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
-            gipa(instance, "vkGetPhysicalDeviceMemoryProperties"));
         VkPhysicalDeviceMemoryProperties mp;
         memory(d, &mp);
         for (uint32_t h = 0; h < mp.memoryHeapCount; h++) {
@@ -147,14 +195,62 @@ void probeVulkan()
             std::string flags = mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? "d" : "";
             if (mappable)
                 flags += "m";
-            out("vk.heap." + std::to_string(h), std::to_string(mp.memoryHeaps[h].size) + " " + flags);
+            emit("heap." + std::to_string(h), std::to_string(mp.memoryHeaps[h].size) + " " + flags);
         }
         outModules();
         found = true;
         break;
     }
-    destroy(instance, nullptr);
-    out("vk.status", found ? "ok" : "no device");
+    emit("status", found ? "ok" : "no device");
+}
+
+void probeVenus()
+{
+    out("venus.status", "checking");
+    const SystemInfo info = readSystemInfo();
+    if (!info.ours || info.driverFolder.empty()) {
+        out("venus.status", "installed Venera driver folder unavailable");
+        return;
+    }
+#ifdef _WIN64
+    const auto path = info.driverFolder + L"\\venera_vulkan_virtio.dll";
+#else
+    const auto path = info.driverFolder + L"\\venera_vulkan_virtio_32.dll";
+#endif
+    VulkanQuery query{LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH)};
+    if (!query.module) {
+        out("venus.status", "loading Venus: Windows error " + std::to_string(GetLastError()));
+        return;
+    }
+    using Negotiate = VkResult(VKAPI_PTR*)(uint32_t*);
+    auto negotiate = reinterpret_cast<Negotiate>(GetProcAddress(query.module, "vk_icdNegotiateLoaderICDInterfaceVersion"));
+    if (!negotiate) {
+        out("venus.status", "missing Venus interface negotiation");
+        return;
+    }
+    uint32_t version = 5;
+    const VkResult result = negotiate(&version);
+    if (result != VK_SUCCESS || version < 1 || version > 5) {
+        out("venus.status", "Venus interface negotiation: error " + std::to_string(result) +
+                            ", version " + std::to_string(version));
+        return;
+    }
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(query.module, "vk_icdGetInstanceProcAddr"));
+    queryVulkan(query, gipa, "venus");
+}
+
+void probeVulkan()
+{
+    out("vk.status", "checking");
+    VulkanQuery query{LoadLibraryW(L"vulkan-1.dll")};
+    if (!query.module) {
+        const DWORD error = GetLastError();
+        out("vk.status", error == ERROR_MOD_NOT_FOUND ? "no loader" :
+                         "loading Vulkan Runtime: Windows error " + std::to_string(error));
+        return;
+    }
+    auto gipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(query.module, "vkGetInstanceProcAddr"));
+    queryVulkan(query, gipa, "vk");
 }
 
 }  // namespace
@@ -289,6 +385,7 @@ void probeOpenGL()
 int runProbe()
 {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    probeVenus();
     probeVulkan();
     IDXGIAdapter1* adapter = findAdapter();
     if (adapter) {

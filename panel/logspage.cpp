@@ -22,7 +22,7 @@ enum : int { kCaptureId = kPageId, kClearId, kExportId, kElevateId, kFilterId, k
 
 // The SelectorBar narrows step by step: everything, the drivers' lines, their warnings and errors, their errors.
 enum Filter { kAll, kDrivers, kWarnings, kErrors };
-const wchar_t* const kFilters[] = {L"All", L"Drivers", L"Warnings", L"Errors"};
+const unsigned kFilters[] = {IDS_All, IDS_Drivers, IDS_Warnings, IDS_Errors};
 
 std::wstring clock(const SYSTEMTIME& t, bool ms)
 {
@@ -42,7 +42,7 @@ class Logs : public Page {
 public:
     explicit Logs(HWND window) : window_(window) { SetTimer(window_, kPageTimer + 31, 500, nullptr); }
     ~Logs() override { KillTimer(window_, kPageTimer + 31); capture_.stop(); }
-    const wchar_t* title() const override { return L"Logs"; }
+    const wchar_t* title() const override { return locale::text(IDS_Logs); }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui, float x, float w, float& y) override;
     void click(int id) override;
@@ -101,13 +101,13 @@ bool Logs::message(UINT msg, WPARAM wp, LPARAM)
 void Logs::draw(Ui& ui, float x, float w, float& y)
 {
     if (capture_.running()) {
-        std::wstring desc = L"Since " + clock(since_, false);
-        float cy = ui.settingsCard(x, y, w, L"", L"Following debug output", desc, kCritical);
-        ui.buttonRight(L"Stop", x + w - 16, cy, kCaptureId, false);
+        std::wstring desc = locale::format(IDS_LogSince, {clock(since_, false)});
+        float cy = ui.settingsCard(x, y, w, L"", locale::text(IDS_FollowingDebug), desc, kCritical);
+        ui.buttonRight(locale::text(IDS_Stop), x + w - 16, cy, kCaptureId, false);
     } else {
-        float cy = ui.settingsCard(x, y, w, L"", L"Follow debug output",
-                                   L"Live messages from the debug service");
-        ui.buttonRight(L"Start", x + w - 16, cy, kCaptureId, true);
+        float cy = ui.settingsCard(x, y, w, L"", locale::text(IDS_FollowDebug),
+                                   locale::text(IDS_LiveMessages));
+        ui.buttonRight(locale::text(IDS_Start), x + w - 16, cy, kCaptureId, true);
     }
 
     std::wstring error = capture_.error();
@@ -118,20 +118,20 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
     // SelectorBar for which lines, actions on the right
     float fx = x;
     for (int i = 0; i < 4; i++) {
-        float tw = ui.measure(kFilters[i], Ui::kBody) + 24;
+        float tw = ui.measure(locale::text(kFilters[i]), Ui::kBody) + 24;
         D2D1_RECT_F r = {fx, y, fx + tw, y + 40};
         bool sel = filter_ == i, h = ui.pointer(kFilterId + i).over;
         if (h && !sel)
             ui.fill({r.left, r.top + 4, r.right, r.bottom - 4}, 4, kWhite, kControl);
-        ui.text(kFilters[i], Ui::kBody, r, kWhite, sel || h ? kTextPrimary : kTextSecondary,
+        ui.text(locale::text(kFilters[i]), Ui::kBody, r, kWhite, sel || h ? kTextPrimary : kTextSecondary,
                 DWRITE_TEXT_ALIGNMENT_CENTER);
         if (sel)
             ui.fill({fx + tw / 2 - 8, y + 36, fx + tw / 2 + 8, y + 39}, 1.5f, accent);
         ui.hot(r, kFilterId + i);
         fx += tw;
     }
-    float bx = ui.buttonRight(L"Export", x + w, y + 20, kExportId, false);
-    ui.buttonRight(L"Clear", bx - 8, y + 20, kClearId, false);
+    float bx = ui.buttonRight(locale::text(IDS_Export), x + w, y + 20, kExportId, false);
+    ui.buttonRight(locale::text(IDS_Clear), bx - 8, y + 20, kClearId, false);
     y += 40 + 12;
 
     std::vector<const Line*> shownLines;
@@ -140,9 +140,9 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
             shownLines.push_back(&l);
     if (shownLines.empty()) {
         ui.card({x, y, x + w, y + 64});
-        ui.text(!capture_.running() ? L"Start capturing to see what the drivers print."
-                : filter_ == kAll   ? L"Nothing yet."
-                                    : L"Nothing from the drivers yet. They print as programs use the GPU.",
+        ui.text(!capture_.running() ? locale::text(IDS_CaptureEmpty)
+                : filter_ == kAll   ? locale::text(IDS_NothingYet)
+                                    : locale::text(IDS_NoDriverMessages),
                 Ui::kBody, {x + 16, y, x + w - 16, y + 64}, kWhite, kTextSecondary);
         y += 64;
         return;
@@ -209,7 +209,11 @@ void Logs::exportLog()
     SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, docs);
     OPENFILENAMEW ofn = {sizeof(ofn)};
     ofn.hwndOwner = window_;
-    ofn.lpstrFilter = L"Text files (*.txt)\0*.txt\0All files\0*.*\0";
+    std::wstring filters = locale::text(IDS_TextFiles);
+    filters += L'\0'; filters += L"*.txt"; filters += L'\0';
+    filters += locale::text(IDS_AllFiles);
+    filters += L'\0'; filters += L"*.*"; filters += L'\0'; filters += L'\0';
+    ofn.lpstrFilter = filters.c_str();
     ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrInitialDir = docs;

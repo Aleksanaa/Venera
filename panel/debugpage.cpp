@@ -8,6 +8,25 @@
 
 namespace panel {
 namespace {
+std::wstring healthText(const std::wstring& value, bool listener = false)
+{
+    const std::pair<const wchar_t*, unsigned> states[] = {
+        {L"installed", IDS_DebugInstalled}, {L"missing", IDS_DebugMissing},
+        {L"present", IDS_DebugPresent}, {L"running", IDS_DebugRunning},
+        {L"retrying", IDS_DebugRetrying}, {L"probing", IDS_DebugProbing},
+        {L"connected", IDS_HostConnected}, {L"waiting", IDS_DebugWaiting},
+        {L"disconnected", IDS_HostDisconnected}, {L"connecting", IDS_HostConnecting},
+        {L"Unknown", IDS_DebugUnknown},
+    };
+    size_t end = value.find_first_of(L" (—");
+    std::wstring token = value.substr(0, end);
+    if(listener && token == L"present")
+        return std::wstring(locale::text(IDS_SocketListening)) + (end == std::wstring::npos ? L"" : value.substr(end));
+    for (const auto& state : states)
+        if (token == state.first)
+            return std::wstring(locale::text(state.second)) + (end == std::wstring::npos ? L"" : value.substr(end));
+    return value;
+}
 constexpr UINT kResult=kPageMessage+30;
 constexpr UINT_PTR kRefresh=kPageTimer+30;
 enum { Refresh=kPageId, Forward, Filter, Reset, Install, Details };
@@ -21,15 +40,16 @@ std::wstring selected(const debugjson::Value& values) {
     for(const auto& value:values.items) {
         if(!text.empty()) text+=L", "; text+=widen(value.text);
     }
-    return text.empty()?L"All":text;
+    return text.empty()?locale::text(IDS_All):text;
 }
 std::wstring filterSummary(const debugjson::Value& filter) {
-    std::wstring summary=L"Components: "+selected(filter["components"])+L" · Message levels: "+selected(filter["levels"]);
+    std::wstring summary=locale::format(IDS_FilterSummary, {selected(filter["components"]), selected(filter["levels"])});
     for(const auto& target:filter["targets"].items) {
-        if(target["kind"].text=="exe_path") summary+=L"\nProgram: "+widen(target["path"].text);
-        else summary+=L"\nProcess "+widen(target["pid"].text)+(target["include_descendants"].boolean?L" and its child processes":L"");
+        if(target["kind"].text=="exe_path") summary+=L"\n"+locale::format(IDS_ProgramTarget, {widen(target["path"].text)});
+        else summary+=L"\n"+locale::format(target["include_descendants"].boolean ? IDS_ProcessTreeTarget : IDS_ProcessTarget,
+            {widen(target["pid"].text)});
     }
-    if(filter["targets"].items.empty()) summary+=L"\nAll programs";
+    if(filter["targets"].items.empty()) summary+=L"\n"+std::wstring(locale::text(IDS_AllPrograms));
     return summary;
 }
 std::wstring edit(HWND window,int id) {
@@ -38,7 +58,7 @@ std::wstring edit(HWND window,int id) {
 }
 debugjson::Json list(const std::wstring& text) {
     auto out=debugjson::Json::array();
-    if(text==L"All" || text.empty()) return out;
+    if(text==locale::text(IDS_All) || text.empty()) return out;
     std::wistringstream stream(text); std::wstring item;
     while(std::getline(stream,item,L',')) {
         size_t first=item.find_first_not_of(L" \t"), last=item.find_last_not_of(L" \t");
@@ -55,12 +75,12 @@ INT_PTR CALLBACK filterProc(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
     if(msg==WM_INITDIALOG) {
         SetWindowLongPtrW(window,DWLP_USER,lp);
         auto* form=reinterpret_cast<FilterForm*>(lp);
-        for(const wchar_t* s:{L"Current programs",L"All programs",L"Process and descendants",L"Executable path"})
+        for(const wchar_t* s:{locale::text(IDS_CurrentPrograms),locale::text(IDS_AllPrograms),locale::text(IDS_ProcessDescendants),locale::text(IDS_ExecutablePath)})
             SendDlgItemMessageW(window,503,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(s));
         SendDlgItemMessageW(window,503,CB_SETCURSEL,0,0);
-        for(const wchar_t* s:{L"All",L"venera_d3d11",L"venera_d3d12",L"mesa",L"venus",L"dxvk",L"vkd3d",L"vkd3d-shader",L"kernel",L"service"})
+        for(const wchar_t* s:{locale::text(IDS_All),L"venera_d3d11",L"venera_d3d12",L"mesa",L"venus",L"dxvk",L"vkd3d",L"vkd3d-shader",L"kernel",L"service"})
             SendDlgItemMessageW(window,501,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(s));
-        for(const wchar_t* s:{L"All",L"trace",L"debug",L"info",L"warning",L"error",L"fatal",L"unknown"})
+        for(const wchar_t* s:{locale::text(IDS_All),L"trace",L"debug",L"info",L"warning",L"error",L"fatal",L"unknown"})
             SendDlgItemMessageW(window,502,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(s));
         SetDlgItemTextW(window,501,selected(form->current["components"]).c_str());
         SetDlgItemTextW(window,502,selected(form->current["levels"]).c_str());
@@ -87,12 +107,12 @@ INT_PTR CALLBACK filterProc(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
             auto target=edit(window,504); unsigned long long n=0;
             if(mode==1) targets=debugjson::Json::array();
             if(mode==2) {
-                if(!integer(target,n)||!n||n>MAXDWORD) error=L"Enter a running process ID.";
+                if(!integer(target,n)||!n||n>MAXDWORD) error=locale::text(IDS_EnterProcess);
                 else {
                     HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,DWORD(n));
                     FILETIME created,exited,kernel,user;
                     if(!process||!GetProcessTimes(process,&created,&exited,&kernel,&user))
-                        error=L"The process creation time could not be read. Choose a running process.";
+                        error=locale::text(IDS_ProcessTimeFailed);
                     else {
                         ULARGE_INTEGER time; time.LowPart=created.dwLowDateTime; time.HighPart=created.dwHighDateTime;
                         targets=debugjson::Json::array({{{"kind","process_instance"},{"pid",n},
@@ -102,13 +122,13 @@ INT_PTR CALLBACK filterProc(HWND window,UINT msg,WPARAM wp,LPARAM lp) {
                 }
             } else if(mode==3) {
                 if(target.size()<3 || !((target[1]==L':'&&(target[2]==L'\\'||target[2]==L'/')) || target.substr(0,2)==L"\\\\"))
-                    error=L"Enter the complete executable path.";
+                    error=locale::text(IDS_EnterPath);
                 else targets=debugjson::Json::array({{{"kind","exe_path"},{"path",narrow(target)}}});
             }
             std::wstring duration=edit(window,505); unsigned long long minutes=0;
             if(!duration.empty() && (!integer(duration,minutes)||!minutes||minutes>~0ull/60000))
-                error=L"Enter a positive number of minutes.";
-            if(!error.empty()) { MessageBoxW(window,error.c_str(),L"Debug filter",MB_OK|MB_ICONWARNING); return TRUE; }
+                error=locale::text(IDS_EnterMinutes);
+            if(!error.empty()) { MessageBoxW(window,error.c_str(),locale::text(IDS_DebugFilter),MB_OK|MB_ICONWARNING); return TRUE; }
             debugjson::Json request={{"filter",{{"components",list(edit(window,501))},
                 {"levels",list(edit(window,502))},{"targets",targets}}}};
             if(minutes) request["duration_ms"]=minutes*60000;
@@ -122,7 +142,7 @@ class DebugPage : public Page {
 public:
     explicit DebugPage(HWND window):window_(window) { SetTimer(window_,kRefresh,2500,nullptr); launch(); }
     ~DebugPage() override { KillTimer(window_,kRefresh); if(worker_.joinable()) worker_.join(); }
-    const wchar_t* title() const override { return L"Debug channel"; }
+    const wchar_t* title() const override { return locale::text(IDS_DebugChannel); }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui,float x,float w,float& y) override {
         int textId=kPageId+100;
@@ -137,47 +157,46 @@ public:
             ui.selectable(textId++,body,x+56,top+heading.height+4,theme::kWhite,theme::kTextSecondary);
             float cy=y+h/2; y+=h+4; return cy;
         };
-        float cy=row(L"\uE724",L"Send debug output to host",L"The host is the computer running this virtual machine.",100);
+        float cy=row(L"\uE724",locale::text(IDS_ForwardDebug),locale::text(IDS_HostDescription),100);
         if(status_.valid) ui.toggle(x+w-20,cy,Forward,status_.forwarding,!applying_);
         if(!status_.error.empty())
-            ui.infoBar(x,w,y,Ui::Severity::kError,L"Debug service",
-                (stale_?L"Showing the last successful status.\n":L"")+status_.error.substr(0,status_.error.find(L'\n')));
+            ui.infoBar(x,w,y,Ui::Severity::kError,locale::text(IDS_DebugService),
+                stale_ ? locale::format(IDS_StaleError, {status_.error.resolve()}) : status_.error.resolve());
         if(applying_)
-            ui.infoBar(x,w,y,Ui::Severity::kInformational,L"",L"Applying changes…");
+            ui.infoBar(x,w,y,Ui::Severity::kInformational,L"",locale::text(IDS_ApplyingChanges));
         std::wstring connection;
         if(status_.valid) {
-            if(status_.host==L"connected") connection=L"Connected to the host";
-            else if(status_.host==L"waiting") connection=L"Waiting for the host to connect";
-            else if(status_.host==L"disconnected") connection=L"Host disconnected";
-            else if(status_.host==L"connecting") connection=L"Connecting to the host";
-            else connection=status_.host;
-            if(stale_) connection=L"Last successful status: "+connection;
-        } else connection=busy_?L"Checking…":L"Status unavailable";
-        row(L"\uE703",L"Host connection",connection);
+            connection=healthText(status_.host);
+            if(stale_) connection=locale::format(IDS_LastStatus, {connection});
+        } else connection=busy_?locale::text(IDS_Checking):locale::text(IDS_StatusUnavailable);
+        row(L"\uE703",locale::text(IDS_HostConnection),connection);
+        if(!status_.valid)
+            row(L"\uE7B8",locale::text(IDS_SocketDriver),
+                healthText(status_.driver.empty()?L"Unknown":status_.driver));
 
-        float refreshW=ui.measure(L"Refresh",Ui::kBody)+40;
+        float refreshW=ui.measure(locale::text(IDS_Refresh),Ui::kBody)+40;
         D2D1_RECT_F refreshRect={x,y,x+refreshW,y+32};
         if(ui.pointer(Refresh).over) ui.fill(refreshRect,4,theme::kWhite,theme::kControlHover);
         ui.text(L"\uE72C",Ui::kIcon,{x+8,y,x+24,y+32});
-        ui.text(L"Refresh",Ui::kBody,{x+32,y,x+refreshW,y+32});
+        ui.text(locale::text(IDS_Refresh),Ui::kBody,{x+32,y,x+refreshW,y+32});
         ui.hot(refreshRect,Refresh); y+=40;
         if(status_.valid) {
-            row(L"\uE71C",L"Receive filter",L"Choose which programs, components and message levels to receive.\n"+filterSummary(status_.effectiveFilter));
-            float bw=ui.button(L"Edit filter",x,y,Filter,true);
-            ui.button(L"Reset filter",x+bw+8,y,Reset,false); y+=40;
-            if(!status_.expires.empty()) row(L"\uE81C",L"Filter expires",status_.expires);
+            row(L"\uE71C",locale::text(IDS_ReceiveFilter),locale::format(IDS_ReceiveFilterDescription, {filterSummary(status_.effectiveFilter)}));
+            float bw=ui.button(locale::text(IDS_EditFilter),x,y,Filter,true);
+            ui.button(locale::text(IDS_ResetFilter),x+bw+8,y,Reset,false); y+=40;
+            if(!status_.expires.empty()) row(L"\uE81C",locale::text(IDS_FilterExpires),status_.expires);
             const wchar_t* icons[]={L"\uE7B8",L"\uE772",L"\uE71B",L"\uE703"};
-            const wchar_t* titles[]={L"Serial driver",L"Controller",L"Debug port",L"Host connection"};
+            const wchar_t* titles[]={locale::text(IDS_SocketDriver),locale::text(IDS_Controller),locale::text(IDS_DebugPort),locale::text(IDS_HostConnection)};
             const std::wstring* values[]={&status_.driver,&status_.controller,&status_.port,&status_.host};
             Ui::Paragraph descriptions[4];
             float heights[4],bodyH=16;
             for(int i=0;i<4;i++) {
-                descriptions[i]=ui.wrap(*values[i],Ui::kCaption,w-72);
+                descriptions[i]=ui.wrap(healthText(*values[i],i==2),Ui::kCaption,w-72);
                 heights[i]=std::max(60.f,descriptions[i].height+36); bodyH+=heights[i];
             }
             float h=ui.expander(x,y,w,Details,detailsOpen_,bodyH);
             ui.text(L"\uE71B",Ui::kIconLarge,{x+16,y,x+36,y+64});
-            ui.titleDesc(x+56,x+w-52,y+32,L"Connection details",stale_?L"Last successful status":L"Driver, devices and host");
+            ui.titleDesc(x+56,x+w-52,y+32,locale::text(IDS_ConnectionDetails),stale_?locale::text(IDS_LastSuccessfulStatus):locale::text(IDS_DriverDevicesHost));
             if(detailsOpen_) {
                 float top=y+73;
                 for(int i=0;i<4;i++) {
@@ -189,7 +208,7 @@ public:
             }
             y+=h+4;
         }
-        if(driverMissing_) { ui.button(L"Install serial driver",x,y,Install,true); y+=40; }
+        if(driverMissing_) { ui.button(locale::text(IDS_InstallSocket),x,y,Install,true); y+=40; }
     }
     void click(int id) override {
         if(id==Details) { detailsOpen_=!detailsOpen_; return; }
@@ -197,7 +216,7 @@ public:
         if(id==Refresh) launch();
         if(id==Forward||id==Filter||id==Reset) {
             if(!elevated()) {
-                if(!restartElevated(window_,6)) status_.error=L"Administrator approval was not completed.";
+                if(!restartElevated(window_,6)) status_.error={IDS_AdminApprovalFailed};
                 return;
             }
             if(id==Forward) launch({L"forwarding",status_.forwarding?L"off":L"on"});
@@ -206,19 +225,22 @@ public:
                 FilterForm form;
                 form.current=status_.effectiveFilter;
                 form.summary=filterSummary(status_.effectiveFilter);
-                if(DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(500),window_,filterProc,reinterpret_cast<LPARAM>(&form))==1)
+                HMODULE module=GetModuleHandleW(nullptr);
+                HRSRC resource=FindResourceExW(module,RT_DIALOG,MAKEINTRESOURCEW(500),locale::resourceLanguage());
+                const auto* dialog=static_cast<const DLGTEMPLATE*>(LockResource(LoadResource(module,resource)));
+                if(dialog && DialogBoxIndirectParamW(module,dialog,window_,filterProc,reinterpret_cast<LPARAM>(&form))==1)
                     launch({},form.json);
             }
         }
         if(id==Install) {
             wchar_t folder[MAX_PATH];
             if(FAILED(SHGetFolderPathW(nullptr,CSIDL_PROGRAM_FILES,nullptr,SHGFP_TYPE_CURRENT,folder))) {
-                status_.error=L"The application installation folder could not be located."; return;
+                status_.error={IDS_InstallationFolderFailed}; return;
             }
             std::wstring setup=std::wstring(folder)+L"\\Venera\\venera-setup.exe";
             SHELLEXECUTEINFOW info={sizeof(info)}; info.lpVerb=L"runas"; info.lpFile=setup.c_str();
-            info.lpParameters=L"/vioserial"; info.hwnd=window_; info.nShow=SW_SHOWNORMAL;
-            if(!ShellExecuteExW(&info)) status_.error=L"Serial driver setup could not start ("+std::to_wstring(GetLastError())+L").";
+            info.lpParameters=L"/viosock"; info.hwnd=window_; info.nShow=SW_SHOWNORMAL;
+            if(!ShellExecuteExW(&info)) status_.error={IDS_SocketSetupFailed, {std::to_wstring(GetLastError())}};
         }
     }
     bool message(UINT msg,WPARAM wp,LPARAM) override {
@@ -229,7 +251,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             driverMissing_=pending_.driver==L"missing";
             if(pending_.valid) { status_=std::move(pending_); stale_=false; }
-            else { status_.error=std::move(pending_.error); stale_=status_.valid; }
+            else { status_.driver=std::move(pending_.driver); status_.error=std::move(pending_.error); stale_=status_.valid; }
         }
         busy_=false; applying_=false;
         return true;
@@ -246,17 +268,18 @@ private:
                     file=name; HANDLE f=CreateFileW(file.c_str(),GENERIC_WRITE,0,nullptr,TRUNCATE_EXISTING,FILE_ATTRIBUTE_TEMPORARY,nullptr);
                     DWORD written=0;
                     if(f==INVALID_HANDLE_VALUE||!WriteFile(f,filter.data(),DWORD(filter.size()),&written,nullptr)||written!=filter.size())
-                        result.error=L"The filter could not be saved.";
+                        result.error={IDS_FilterSaveFailed};
                     if(f!=INVALID_HANDLE_VALUE) CloseHandle(f);
                     args={L"filter-set",L"--json",file};
-                } else result.error=L"The filter file could not be created.";
+                } else result.error={IDS_FilterCreateFailed};
             }
             if(result.error.empty()) result=queryDebug(args);
             if(!result.valid) {
+                result.driver=L"Unknown";
                 SC_HANDLE manager=OpenSCManagerW(nullptr,nullptr,SC_MANAGER_CONNECT);
                 if(manager) {
-                    SC_HANDLE driver=OpenServiceW(manager,L"VirtioSerial",SERVICE_QUERY_STATUS);
-                    if(driver) CloseServiceHandle(driver);
+                    SC_HANDLE driver=OpenServiceW(manager,L"VirtioSocket",SERVICE_QUERY_STATUS);
+                    if(driver) { result.driver=L"installed"; CloseServiceHandle(driver); }
                     else if(GetLastError()==ERROR_SERVICE_DOES_NOT_EXIST) result.driver=L"missing";
                     CloseServiceHandle(manager);
                 }

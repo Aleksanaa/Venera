@@ -67,7 +67,7 @@ public:
         CloseHandle(cancel_);
     }
 
-    const wchar_t* title() const override { return L"Tests"; }
+    const wchar_t* title() const override { return locale::text(IDS_Tests); }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui, float x, float w, float& y) override;
     void click(int id) override;
@@ -299,37 +299,33 @@ std::wstring Tests::summary(int* passed, int* failed) const
         for (const Entry& e : g.tests)
             (e.state == kPassed ? *passed : e.state == kFailed ? *failed : notRun)++;
     if (!*passed && !*failed)
-        return L"Not run yet";
-    std::wstring s = std::to_wstring(*passed) + L" passed, " + std::to_wstring(*failed) + L" failed";
-    if (notRun)
-        s += L", " + std::to_wstring(notRun) + L" not run";
-    return s;
+        return locale::text(IDS_NotRunYet);
+    return locale::format(IDS_TestSummary, {std::to_wstring(*passed), std::to_wstring(*failed), std::to_wstring(notRun)});
 }
 
 void Tests::draw(Ui& ui, float x, float w, float& y)
 {
     // the summary, Run all and Copy results
     int passed, failed;
-    std::wstring title = summary(&passed, &failed), desc = L"Each test runs on the VirtIO GPU in a process of its own";
+    std::wstring title = summary(&passed, &failed), desc = locale::text(IDS_TestDescription);
     if (busy()) {
         for (size_t g = 0; g < groups_.size(); g++)
             for (size_t t = 0; t < groups_[g].tests.size(); t++)
                 if (groups_[g].tests[t].state == kRunning)
-                    title = std::wstring(L"Running ") + testGroups()[g].name + L": " + testGroups()[g].tests[t].name;
+                    title = locale::format(IDS_TestRunning, {testGroups()[g].name, testName(testGroups()[g], testGroups()[g].tests[t])});
     } else if (lastRun_.wYear) {
         wchar_t time[64];
         GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &lastRun_, nullptr, time, 64);
-        desc = std::wstring(L"Last run at ") + time;
+        desc = locale::format(IDS_LastRun, {time});
     }
     float cy = ui.settingsCard(x, y, w, L"", title, desc, failed && !busy() ? kCritical : kWhite);
-    const wchar_t* run = busy() ? L"Stop" : L"Run all";
+    const wchar_t* run = busy() ? locale::text(IDS_Stop) : locale::text(IDS_RunAll);
     float right = ui.buttonRight(run, x + w - 16, cy, kRunAllId, !busy());
     if (passed || failed)
-        ui.buttonRight(copied_ ? L"Copied" : L"Copy results", right - 8, cy, kCopyId, false);
+        ui.buttonRight(copied_ ? locale::text(IDS_Copied) : locale::text(IDS_CopyResults), right - 8, cy, kCopyId, false);
 
-    ui.infoBar(x, w, y, Ui::Severity::kInformational, L"Some tests show things on the screen",
-               L"Swapchain and present tests open windows for a few seconds, and some fill the whole screen. They close "
-               L"by themselves.");
+    ui.infoBar(x, w, y, Ui::Severity::kInformational, locale::text(IDS_TestsDisplayTitle),
+               locale::text(IDS_TestsDisplayDescription));
     y += 20;
 
     for (size_t g = 0; g < groups_.size(); g++)
@@ -341,7 +337,31 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
     const TestGroup& tg = testGroups()[g];
     const Group& group = groups_[g];
     bool running = active(group);
-    float h = ui.expander(x, y, w, kHeaderId + g, group.open, 8 + group.tests.size() * kRowH + 8);
+    struct Layout {
+        Ui::Paragraph name, description;
+        std::wstring time;
+        float timeWidth, height;
+        bool result;
+    };
+    std::vector<Layout> rows;
+    float bodyH = 16;
+    if (group.open) {
+        for (size_t t = 0; t < group.tests.size(); t++) {
+            const Test& test = tg.tests[t];
+            const Entry& e = group.tests[t];
+            Layout row;
+            row.time = e.state == kPassed || e.state == kFailed ? seconds(e.result.seconds) : L"";
+            row.timeWidth = row.time.empty() ? 0 : ui.measure(row.time, Ui::kCaption) + 16;
+            row.result = e.state == kFailed || (e.state == kNotRun && !e.result.summary.empty());
+            float width = std::max(100.f, w - 156 - row.timeWidth);
+            row.name = ui.wrap(testName(tg, test), Ui::kBody, width);
+            row.description = ui.wrap(row.result ? e.result.summary.resolve() : testDescription(tg, test), Ui::kCaption, width);
+            row.height = std::max(kRowH, row.name.height + row.description.height + 24);
+            bodyH += row.height;
+            rows.push_back(std::move(row));
+        }
+    }
+    float h = ui.expander(x, y, w, kHeaderId + g, group.open, bodyH);
 
     // the header: state, name and how it went, the run button (a ProgressRing while it runs)
     int runId = kGroupRunId + g;
@@ -354,13 +374,11 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
     State state = running ? kWaiting : failed ? kFailed : done == int(group.tests.size()) ? kPassed : done ? kPartial
                                                                                                             : kNotRun;
     stateIcon(ui, state, x + 16, y + kHeaderH / 2);
-    std::wstring sub = tg.desc;
+    std::wstring sub = testGroupDescription(tg);
     if (running)
-        sub = L"Test " + std::to_wstring(std::min(group.runDone + 1, group.runTotal)) + L" of " +
-              std::to_wstring(group.runTotal);
+        sub = locale::format(IDS_TestProgress, {std::to_wstring(std::min(group.runDone + 1, group.runTotal)), std::to_wstring(group.runTotal)});
     else if (done)
-        sub = std::to_wstring(passed) + L" passed" + (failed ? L", " + std::to_wstring(failed) + L" failed" : L"") +
-              (done < int(group.tests.size()) ? L", " + std::to_wstring(group.tests.size() - done) + L" not run" : L"");
+        sub = locale::format(IDS_TestSummary, {std::to_wstring(passed), std::to_wstring(failed), std::to_wstring(group.tests.size() - done)});
     ui.titleDesc(x + 56, x + w - 120, y + kHeaderH / 2, tg.name, sub, failed && !running ? kCritical : kWhite,
                  failed && !running ? 1 : kTextSecondary);
     float bx = x + w - 52 - 32, by = y + kHeaderH / 2 - 16;
@@ -380,25 +398,24 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
     if (group.open) {
         float ry = y + kHeaderH + 1 + 8;
         for (size_t t = 0; t < group.tests.size(); t++) {
-            const Test& test = tg.tests[t];
             const Entry& e = group.tests[t];
-            float cy = ry + kRowH / 2;
+            const Layout& row = rows[t];
+            float cy = ry + row.height / 2;
             stateIcon(ui, e.state, x + 16, cy);
             float right = x + w - 52 - 32 - 16;  // left of the run button
-            std::wstring time = e.state == kPassed || e.state == kFailed ? seconds(e.result.seconds) : L"";
-            float tw = time.empty() ? 0 : ui.measure(time, Ui::kCaption) + 16;
-            if (e.state == kFailed || (e.state == kNotRun && !e.result.summary.empty()))
-                ui.titleDesc(x + 56, right - tw, cy, test.name, e.result.summary,
-                             e.state == kFailed ? kCritical : kWhite, e.state == kFailed ? 1 : kTextSecondary,
-                             kResultText + g * 100 + int(t));
+            float top = cy - (row.name.height + row.description.height + 4) / 2;
+            ui.text(row.name, x + 56, top);
+            if (row.result)
+                ui.selectable(kResultText + g * 100 + int(t), row.description, x + 56, top + row.name.height + 4,
+                              e.state == kFailed ? kCritical : kWhite, e.state == kFailed ? 1 : kTextSecondary);
             else
-                ui.titleDesc(x + 56, right - tw, cy, test.name, test.desc);
-            if (!time.empty())
-                ui.text(time, Ui::kCaption, {right - tw, cy - 10, right, cy + 10}, kWhite, kTextSecondary,
+                ui.text(row.description, x + 56, top + row.name.height + 4, kWhite, kTextSecondary);
+            if (!row.time.empty())
+                ui.text(row.time, Ui::kCaption, {right - row.timeWidth, cy - 10, right, cy + 10}, kWhite, kTextSecondary,
                         DWRITE_TEXT_ALIGNMENT_TRAILING);
             bool queued = e.state == kWaiting || e.state == kRunning;
             ui.iconButton(queued ? kStop : kPlay, x + w - 52 - 32, cy - 16, kTestRunId + g * 100 + int(t));
-            ry += kRowH;
+            ry += row.height;
         }
     }
     y += h + 4;
@@ -408,7 +425,7 @@ void Tests::drawGroup(Ui& ui, int g, float x, float w, float& y)
 std::wstring Tests::results() const
 {
     int passed, failed;
-    std::wstring text = L"Venera tests: " + summary(&passed, &failed) + L"\r\n";
+    std::wstring text = locale::format(IDS_TestResults, {summary(&passed, &failed)});
     for (size_t g = 0; g < groups_.size(); g++) {
         const TestGroup& tg = testGroups()[g];
         text += L"\r\n" + std::wstring(tg.name) + L"\r\n";
@@ -416,11 +433,11 @@ std::wstring Tests::results() const
             const Entry& e = groups_[g].tests[t];
             text += L"  " + widen(tg.id) + L"." + widen(tg.tests[t].id) + L": ";
             if (e.state == kPassed)
-                text += L"passed, " + seconds(e.result.seconds) + L"\r\n";
+                text += locale::format(IDS_ResultPassed, {seconds(e.result.seconds)});
             else if (e.state == kFailed)
-                text += L"FAILED, " + seconds(e.result.seconds) + L": " + e.result.summary + L"\r\n";
+                text += locale::format(IDS_ResultFailed, {seconds(e.result.seconds), e.result.summary});
             else
-                text += L"not run\r\n";
+                text += locale::text(IDS_ResultNotRun);
             if (e.state == kFailed)
                 for (size_t start = 0; start < e.result.output.size();) {
                     size_t end = e.result.output.find(L'\n', start);

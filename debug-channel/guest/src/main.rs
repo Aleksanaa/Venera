@@ -3,7 +3,7 @@ mod ancestry;
 #[cfg(any(windows, test))]
 mod collector;
 #[cfg(any(windows, test))]
-mod serial_connection;
+mod connection;
 #[cfg(any(windows, test))]
 mod state;
 #[cfg(all(test, not(windows)))]

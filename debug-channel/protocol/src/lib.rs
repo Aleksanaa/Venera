@@ -134,15 +134,31 @@ pub struct RequestError {
     pub message: String,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LocalizedMessage {
+    pub id: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SystemInfoRow {
     pub key: String,
     pub value: String,
     pub bad: bool,
     pub warning: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_message: Option<LocalizedMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_message: Option<LocalizedMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_message: Option<LocalizedMessage>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SystemInfoSection {
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_message: Option<LocalizedMessage>,
     pub rows: Vec<SystemInfoRow>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

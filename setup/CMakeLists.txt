@@ -6,16 +6,9 @@ set(VENERA_ICD_DIR "${CMAKE_SOURCE_DIR}/build/icd" CACHE PATH
     "icd/build.sh's output (venera_vulkan_virtio.dll, viogpu_wgl.dll and their _32 builds)")
 set(VENERA_KMD_SYS "${CMAKE_SOURCE_DIR}/build/kmd/signed/viogpu3d.sys" CACHE FILEPATH
     "The test-signed KMD (kmd/ build)")
-set(VENERA_VIOSERIAL_DIR "" CACHE PATH "VirtIO serial driver package directory")
-set(vioserial_files)
-if(VENERA_VIOSERIAL_DIR)
-  foreach(name vioser.inf vioser.sys vioser.cat LICENSE.txt)
-    if(NOT EXISTS "${VENERA_VIOSERIAL_DIR}/${name}")
-      message(FATAL_ERROR "${VENERA_VIOSERIAL_DIR}/${name} is required for the VirtIO serial package")
-    endif()
-  endforeach()
-  file(GLOB_RECURSE vioserial_files CONFIGURE_DEPENDS "${VENERA_VIOSERIAL_DIR}/*")
-endif()
+set(VENERA_VIOSOCK_DIR "" CACHE PATH "VirtIO socket driver and provider package directory")
+include("${CMAKE_CURRENT_SOURCE_DIR}/viosock-payload.cmake")
+viosock_payload("${VENERA_VIOSOCK_DIR}" viosock_files)
 find_program(WIMLIB wimlib-imagex REQUIRED)
 find_package(Git REQUIRED)
 
@@ -45,9 +38,9 @@ add_custom_command(
     # The dev shell sets SOURCE_DATE_EPOCH (1980), which string(TIMESTAMP) would take for the build time.
     COMMAND "${CMAKE_COMMAND}" -E env --unset=SOURCE_DATE_EPOCH "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}" "-DOUT_DIR=${CMAKE_CURRENT_BINARY_DIR}"
             "-DVERSION=${PROJECT_VERSION}" "-DGIT=${GIT_EXECUTABLE}" "-DWIMLIB=${WIMLIB}" "-DFILES=${payload}"
-            "-DVIOSERIAL_DIR=${VENERA_VIOSERIAL_DIR}"
+            "-DVIOSOCK_DIR=${VENERA_VIOSOCK_DIR}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/payload.cmake"
-    DEPENDS payload.cmake "${CMAKE_SOURCE_DIR}/pkg/venera.inf" ${payload} ${vioserial_files} ${head_log}
+    DEPENDS payload.cmake viosock-payload.cmake "${CMAKE_SOURCE_DIR}/pkg/venera.inf" ${payload} ${viosock_files} ${head_log}
     COMMENT "Packing the driver package and the control panel"
     VERBATIM)
 set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/payload.rc" PROPERTIES
@@ -111,11 +104,11 @@ add_executable(venera-setup WIN32 main.cpp system.cpp install.cpp uninstaller-co
 # The WIM holds the panel: it has to be built first.
 add_dependencies(venera-setup venera-panel venera-panel-com venera-debug-guest)
 target_compile_definitions(venera-setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
-if(VENERA_VIOSERIAL_DIR)
-  target_compile_definitions(venera-setup PRIVATE VENERA_HAS_VIOSERIAL=1)
+if(VENERA_VIOSOCK_DIR)
+  target_compile_definitions(venera-setup PRIVATE VENERA_HAS_VIOSOCK=1)
 endif()
 target_link_libraries(venera-setup PRIVATE setupapi crypt32 cryptui wintrust ncrypt comctl32 shell32 shlwapi
-    ole32 uuid advapi32 ntdll cfgmgr32)
+    ole32 uuid advapi32 ntdll cfgmgr32 ws2_32)
 target_link_options(venera-setup PRIVATE -municode -s -static -static-libgcc -static-libstdc++)
 
 add_subdirectory(tests)

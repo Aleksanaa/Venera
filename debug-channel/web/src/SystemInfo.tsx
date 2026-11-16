@@ -8,6 +8,9 @@ import {
 } from '@fluentui/react-components';
 import { ArrowSyncRegular } from '@fluentui/react-icons';
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { formatDate } from './i18n';
+import { type LocalizedMessage, reportMessage } from './reportMessages';
 
 type Connection = {
   transport: string;
@@ -27,7 +30,16 @@ type Report = {
   session_id: number | null;
   sections: {
     title: string;
-    rows: { key: string; value: string; bad: boolean; warning: string }[];
+    title_message?: LocalizedMessage;
+    rows: {
+      key: string;
+      value: string;
+      bad: boolean;
+      warning: string;
+      key_message?: LocalizedMessage;
+      value_message?: LocalizedMessage;
+      warning_message?: LocalizedMessage;
+    }[];
   }[];
   error?: { code: string; message: string };
 };
@@ -38,12 +50,20 @@ async function load<T>(url: string, signal: AbortSignal): Promise<T> {
   if (!response.ok || body.ok === false)
     throw new Error(
       (typeof body.error === 'string' ? body.error : body.error?.message) ||
-        '读取系统信息失败',
+        'readSystemError',
     );
   return body;
 }
 
 export function SystemInfo() {
+  const { t, i18n } = useTranslation();
+  const message = (fallback: string, metadata?: LocalizedMessage) =>
+    reportMessage(fallback, metadata, i18n.resolvedLanguage);
+  function errorText(error: string) {
+    return error === 'readSystemError' || error === 'collectError'
+      ? t(error)
+      : error;
+  }
   const [connection, setConnection] = useState<Connection | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [connectionError, setConnectionError] = useState('');
@@ -74,8 +94,7 @@ export function SystemInfo() {
     await load<Report>('/api/system-info', controller.signal)
       .then((value) => {
         if (controller.signal.aborted) return;
-        if (!value.ok)
-          throw new Error(value.error?.message || '系统信息采集失败');
+        if (!value.ok) throw new Error(value.error?.message || 'collectError');
         setReport(value);
         setReportError('');
       })
@@ -94,27 +113,27 @@ export function SystemInfo() {
     <>
       <header>
         <div>
-          <h1>系统信息</h1>
-          <p>查看调试通道与客户机系统报告。</p>
+          <h1>{t('systemInfo')}</h1>
+          <p>{t('systemHint')}</p>
         </div>
         <Button
           icon={<ArrowSyncRegular />}
           disabled={busy}
           onClick={() => void refresh()}
         >
-          {busy ? '正在刷新' : '刷新'}
+          {busy ? t('refreshing') : t('refresh')}
         </Button>
       </header>
-      <section className="system-page" aria-label="系统报告">
+      <section className="system-page" aria-label={t('systemReport')}>
         <Card className="system-card">
-          <h2>连接信息</h2>
+          <h2>{t('connectionInfo')}</h2>
           <dl>
-            <dt>浏览器地址</dt>
+            <dt>{t('browserAddress')}</dt>
             <dd>{window.location.href}</dd>
           </dl>
           {connectionError && (
             <MessageBar intent="error">
-              <MessageBarBody>{connectionError}</MessageBarBody>
+              <MessageBarBody>{errorText(connectionError)}</MessageBarBody>
             </MessageBar>
           )}
           {connection && (
@@ -123,32 +142,36 @@ export function SystemInfo() {
                 className="connection-status"
                 color={connection.connected ? 'success' : 'warning'}
               >
-                {connection.connected ? '已连接' : '等待连接'}
+                {connection.connected ? t('connected') : t('waitingConnection')}
               </Badge>
               <dl className="connection-grid">
                 <div>
-                  <dt>通道方式</dt>
+                  <dt>{t('transport')}</dt>
                   <dd>{connection.transport}</dd>
                 </div>
                 <div>
-                  <dt>通道名称</dt>
+                  <dt>{t('channel')}</dt>
                   <dd>{connection.channel}</dd>
                 </div>
                 <div>
-                  <dt>调试通道协议版本</dt>
+                  <dt>{t('protocolVersion')}</dt>
                   <dd>{connection.protocol_version ?? '—'}</dd>
                 </div>
                 <div>
-                  <dt>调试服务版本</dt>
+                  <dt>{t('softwareVersion')}</dt>
                   <dd>{connection.software_version ?? '—'}</dd>
                 </div>
                 <div>
-                  <dt>接收端 Socket</dt>
+                  <dt>{t('socket')}</dt>
                   <dd>{connection.socket_path}</dd>
                 </div>
                 <div>
-                  <dt>最后收到时间</dt>
-                  <dd>{connection.last_received_at ?? '等待首条消息'}</dd>
+                  <dt>{t('lastReceived')}</dt>
+                  <dd>
+                    {connection.last_received_at
+                      ? formatDate(connection.last_received_at)
+                      : t('waitingMessage')}
+                  </dd>
                 </div>
               </dl>
             </>
@@ -162,26 +185,27 @@ export function SystemInfo() {
               size="small"
               role="status"
               aria-live="polite"
-              label="正在采集系统信息…"
+              label={t('collecting')}
             />
           </div>
         )}
         {reportError && (
           <MessageBar intent="error">
-            <MessageBarBody>{reportError}</MessageBarBody>
+            <MessageBarBody>{errorText(reportError)}</MessageBarBody>
           </MessageBar>
         )}
         {report && (
           <>
             <p className="report-context">
-              {reportError ? '最后采集时间' : '采集时间'}：
-              <time>{report.collected_at}</time> · 会话：
-              {report.session_id ?? '系统'}
+              {t(reportError ? 'lastCollected' : 'collected', {
+                date: formatDate(report.collected_at),
+                session: report.session_id ?? t('system'),
+              })}
             </p>
             <div className="system-report-grid">
               {report.sections.map((section, index) => (
                 <Card className="system-card" key={`${section.title}-${index}`}>
-                  <h2>{section.title}</h2>
+                  <h2>{message(section.title, section.title_message)}</h2>
                   <dl>
                     {section.rows.map((row, rowIndex) => (
                       <div
@@ -189,12 +213,16 @@ export function SystemInfo() {
                         key={`${row.key}-${rowIndex}`}
                       >
                         <dt>
-                          {row.key}
-                          {row.bad && <Badge color="danger">异常</Badge>}
+                          {message(row.key, row.key_message)}
+                          {row.bad && (
+                            <Badge color="danger">{t('abnormal')}</Badge>
+                          )}
                         </dt>
-                        <dd>{row.value}</dd>
+                        <dd>{message(row.value, row.value_message)}</dd>
                         {row.warning && (
-                          <dd className="system-warning">{row.warning}</dd>
+                          <dd className="system-warning">
+                            {message(row.warning, row.warning_message)}
+                          </dd>
                         )}
                       </div>
                     ))}

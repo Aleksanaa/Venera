@@ -3,6 +3,8 @@
 // the build packs into the executable as a WIM (setup/payload.cmake). See main.cpp for the flow.
 #pragma once
 
+#include "components.h"
+
 #include <windows.h>
 
 #include <setupapi.h>
@@ -71,6 +73,8 @@ struct SystemState {
     // (Red Hat's virtio-win viogpudo, yttrium's), which the install removes once ours drives the device.
     std::vector<DriverPackage> packages;
     bool cert_exists = false;
+    components::Observed components;
+    std::wstring collector_path;
 
     std::wstring summary() const;
 };
@@ -82,10 +86,11 @@ bool is_virtio_gpu(HDEVINFO set, SP_DEVINFO_DATA* dev);
 // Reports a step: overall percentage and what is being done.
 using Progress = std::function<void(int percent, const std::wstring& step)>;
 
-// install.cpp. Both return whether Windows needs a restart; both throw Failure.
-bool install(const SystemState& state, const std::wstring& version, const Progress& progress, bool vioserial);
-bool vioserial_available();
-bool install_vioserial(const Progress& progress);
+// Component servicing reports whether Windows needs a restart and throws Failure on an incomplete step.
+bool install(const SystemState& state, const std::wstring& version, const Progress& progress,
+             const components::Plan& plan);
+bool viosock_available();
+bool viosock_ready();
 bool uninstall(const Progress& progress);
 // At the boot after an install (`/cleanup`): removes the packages the install replaced, once the device runs on ours.
 void cleanup();
@@ -105,6 +110,10 @@ struct Page {
     size_t default_index = 0;  // the button Enter presses
     std::wstring option;
     bool option_checked = true;
+    bool component_page = false;
+    components::Selection selected;
+    bool transport_available = false;
+    bool transport_ready = false;
 };
 
 class Wizard {
@@ -114,6 +123,7 @@ public:
     // Shows `page` until a button is pressed; returns its id (IDCANCEL for the window's close box).
     int ask(const Page& page);
     bool option_checked() const;
+    components::Selection selection() const;
     // Shows the progress page and runs `work` on a thread meanwhile; returns its result, or sets `error`.
     bool run(const std::wstring& heading, const std::wstring& subheading,
              const std::function<bool(const Progress&)>& work, std::wstring& error);

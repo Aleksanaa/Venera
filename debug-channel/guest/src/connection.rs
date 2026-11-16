@@ -1,4 +1,4 @@
-use crate::state::serial;
+use crate::state::wire;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use venera_debug_protocol::{v1::*, Envelope, Message};
@@ -7,6 +7,7 @@ const CAPACITY: usize = 64;
 
 #[derive(Default)]
 pub struct Connection {
+    peer_id: u64,
     framer: JsonlFramer,
     peer: PeerProtocol,
     next_id: u64,
@@ -36,8 +37,7 @@ fn discovery() -> RpcResult<Discovery> {
 }
 
 fn result(envelope: &Envelope) -> RpcResult<Value> {
-    let bytes =
-        serial::encode(envelope).map_err(|error| RpcError::new(-32603, error.to_string()))?;
+    let bytes = wire::encode(envelope).map_err(|error| RpcError::new(-32603, error.to_string()))?;
     match serde_json::from_slice::<RpcResponse>(&bytes)
         .map_err(|error| RpcError::new(-32603, error.to_string()))?
     {
@@ -47,6 +47,12 @@ fn result(envelope: &Envelope) -> RpcResult<Value> {
 }
 
 impl Connection {
+    pub fn new(peer_id: u64) -> Self {
+        Self {
+            peer_id,
+            ..Self::default()
+        }
+    }
     fn id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
@@ -156,14 +162,16 @@ impl Connection {
                                 "Control queue is busy; retry the request",
                             ))
                         } else {
-                            let internal_id = format!("guest-report-{}", self.id());
+                            let request = self.id();
+                            let internal_id =
+                                format!("guest-peer-{}-request-{request}", self.peer_id);
                             let message = match incoming {
                                 Incoming::StatusGet { .. } => Message::StatusGet {
                                     request_id: internal_id,
                                 },
                                 Incoming::FilterSet { params, .. } => Message::FilterSet {
                                     request_id: internal_id,
-                                    filter: serial::filter_legacy(params.filter),
+                                    filter: wire::filter_legacy(params.filter),
                                     duration_ms: params.duration_ms.map(|ms| ms.0),
                                 },
                                 Incoming::FilterReset { .. } => Message::FilterReset {
@@ -265,6 +273,96 @@ mod tests {
                 error: None,
             },
         })
+    }
+
+    #[test]
+    fn peer_negotiation_is_independent_and_filter_revisions_are_broadcast() {
+        let mut state = State::new("run".into(), true);
+        let a_id = state.add_peer();
+        let b_id = state.add_peer();
+        let mut a = Connection::new(a_id);
+        let mut b = Connection::new(b_id);
+        negotiate(&mut a, &mut state, "1.0.0");
+        let reset = json!({"jsonrpc":"2.0","id":7,"method":"filter.reset"});
+        assert_eq!(
+            receive(&mut b, &mut state, reset.clone()).output,
+            vec![json!({"jsonrpc":"2.0","id":7,"error":{"code":-32001,"message":"not_ready"}})]
+        );
+        assert_eq!(
+            receive(&mut a, &mut state, reset.clone()).output[0]["result"]["revision"],
+            "1"
+        );
+        negotiate(&mut b, &mut state, "1.0.0");
+        assert_eq!(
+            receive(&mut b, &mut state, reset).output[0]["result"]["revision"],
+            "2"
+        );
+        for peer in [a_id, b_id] {
+            let revisions: Vec<Value> = (0..2)
+                .map(|_| {
+                    let (_, bytes) = state.next_line(peer).unwrap();
+                    let envelope = venera_debug_protocol::decode(&bytes).unwrap();
+                    let value: Value =
+                        serde_json::from_slice(&wire::encode(&envelope).unwrap()).unwrap();
+                    assert_eq!(value["method"], "status.changed");
+                    value["params"]["revision"].clone()
+                })
+                .collect();
+            assert_eq!(revisions, vec![json!("1"), json!("2")]);
+        }
+    }
+
+    #[test]
+    fn identical_wire_report_ids_complete_their_original_peer_batches() {
+        let mut state = State::new("run".into(), true);
+        let a_id = state.add_peer();
+        let b_id = state.add_peer();
+        let mut a = Connection::new(a_id);
+        let mut b = Connection::new(b_id);
+        negotiate(&mut a, &mut state, "1.0.0");
+        negotiate(&mut b, &mut state, "1.0.0");
+        let request = json!([
+            {"jsonrpc":"2.0","id":"same","method":"system.info.get"},
+            {"jsonrpc":"2.0","id":9,"method":"status.get"}
+        ]);
+        let a_request = receive(&mut a, &mut state, request.clone());
+        let b_request = receive(&mut b, &mut state, request);
+        let a_report = report(a_request.reports[0].clone());
+        assert!(state.queue_peer_control(a_id, &a_report));
+        let (_, bytes) = state.next_line(a_id).unwrap();
+        let response = a
+            .report(&venera_debug_protocol::decode(&bytes).unwrap())
+            .unwrap();
+        assert_eq!(
+            response[0],
+            json!({"jsonrpc":"2.0","id":"same","result":{
+                "collected_at":"2026-11-11T00:00:00Z","session_id":2,"sections":[]
+            }})
+        );
+        assert_eq!(response[1]["id"], 9);
+        assert_eq!(state.next_line(b_id), None);
+        let late = receive(
+            &mut a,
+            &mut state,
+            json!({"jsonrpc":"2.0","id":"same","method":"system.info.get"}),
+        );
+        let late_report = report(late.reports[0].clone());
+        a.disconnect();
+        state.remove_peer(a_id);
+        assert!(state.queue_peer_control(a_id, &late_report));
+        assert_eq!(state.next_line(b_id), None);
+        assert_eq!(b.report(&late_report), None);
+        assert!(state.queue_peer_control(b_id, &report(b_request.reports[0].clone())));
+        let (_, bytes) = state.next_line(b_id).unwrap();
+        let response = b
+            .report(&venera_debug_protocol::decode(&bytes).unwrap())
+            .unwrap();
+        assert_eq!(response[0]["id"], "same");
+        assert_eq!(
+            response[0]["result"],
+            json!({"collected_at":"2026-11-11T00:00:00Z","session_id":2,"sections":[]})
+        );
+        assert_eq!(response[1]["result"]["revision"], "0");
     }
 
     #[test]

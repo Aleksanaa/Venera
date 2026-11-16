@@ -7,11 +7,15 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 # The stable redirect selected this release on 2026-11-10.
 version=0.1.302
 size=877373440
-base="$root/build/vioserial-cache"
+base="$root/build/viosock-cache"
 archive="$base/virtio-win-$version.iso"
-out="$root/build/vioserial"
+out="$root/build/viosock"
 url="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-$version-1/virtio-win-$version.iso"
 mkdir -p "$base"
+previous="$root/build/vioserial-cache/virtio-win-$version.iso"
+if [[ ! -f "$archive" && -f "$previous" && $(stat -c %s "$previous") == "$size" ]]; then
+  cp --reflink=auto "$previous" "$archive"
+fi
 if [[ ! -f "$archive" || $(stat -c %s "$archive") != "$size" ]]; then
   curl --fail --location --continue-at - --output "$archive" "$url"
 fi
@@ -20,10 +24,13 @@ if [[ $(stat -c %s "$archive") != "$size" ]]; then
   exit 1
 fi
 mkdir -p "$out/package"
-xorriso -osirrox on -indev "$archive" \
-  -extract /vioserial/w11/amd64 "$out/package" \
+extract=()
+for name in viosock.inf viosock.cat viosock.sys viosocklib_x64.dll viosocklib_x86.dll viosockwspsvc.exe; do
+  extract+=(-extract "/viosock/w11/amd64/$name" "$out/package/$name")
+done
+xorriso -osirrox on -indev "$archive" "${extract[@]}" \
   -extract /virtio-win_license.txt "$out/package/LICENSE.txt"
-for name in vioser.inf vioser.sys vioser.cat LICENSE.txt; do
+for name in viosock.inf viosock.sys viosock.cat viosocklib_x64.dll viosocklib_x86.dll viosockwspsvc.exe LICENSE.txt; do
   test -s "$out/package/$name"
 done
 root_cert="$base/microsoft-root-2010.crt"
@@ -34,8 +41,12 @@ if [[ ! -s "$root_cert" ]]; then
 fi
 openssl x509 -inform DER -in "$root_cert" -out "$base/microsoft-root-2010.pem"
 osslsigncode verify -CAfile "$base/microsoft-root-2010.pem" \
-  -TSA-CAfile "$base/microsoft-root-2010.pem" -in "$out/package/vioser.cat"
-osslsigncode verify -CAfile "$base/microsoft-root-2010.pem" \
-  -TSA-CAfile "$base/microsoft-root-2010.pem" \
-  -catalog "$out/package/vioser.cat" -in "$out/package/vioser.sys"
+  -TSA-CAfile "$base/microsoft-root-2010.pem" -in "$out/package/viosock.cat"
+for name in viosock.sys viosocklib_x64.dll viosocklib_x86.dll viosockwspsvc.exe; do
+  osslsigncode verify -CAfile "$base/microsoft-root-2010.pem" \
+    -TSA-CAfile "$base/microsoft-root-2010.pem" \
+    -catalog "$out/package/viosock.cat" -in "$out/package/$name"
+done
+cp "$root/docs/third-party/viosock-LICENSE.txt" "$out/package/"
+cp "$root/docs/third-party/viosock-lib-LICENSE.txt" "$out/package/"
 printf 'virtio-win %s\nISO: %s\nPackage: %s\n' "$version" "$url" "$out/package"

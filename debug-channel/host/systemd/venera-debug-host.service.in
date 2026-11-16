@@ -1,5 +1,5 @@
 [Unit]
-Description=Venera debug collection
+Description=Venera debug collection and history
 
 [Service]
 Type=simple

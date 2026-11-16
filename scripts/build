@@ -39,7 +39,7 @@ installer() {
     exit 1
   fi
   cmake/fetch-winkits.sh
-  scripts/fetch-vioserial.sh
+  scripts/fetch-viosock.sh
   icd/build.sh
   cmake -S kmd -B build/kmd -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$root/cmake/clang-cl-kmd.cmake" \
@@ -48,7 +48,7 @@ installer() {
   cmake -S . -B build/win -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
     -DVENERA_RELEASE="${VENERA_RELEASE:-OFF}" \
-    -DVENERA_VIOSERIAL_DIR="$root/build/vioserial/package"
+    -DVENERA_VIOSOCK_DIR="$root/build/viosock/package"
   cmake --build build/win
   local version
   if [[ ! -s build/win/setup/version.txt ]]; then
@@ -62,13 +62,14 @@ installer() {
   fi
   mkdir -p build/release
   cp build/win/setup/venera-setup.exe "build/release/venera-setup-$version.exe"
-  cp -f build/vioserial/package/LICENSE.txt build/release/vioserial-LICENSE.txt
+  cp -f build/viosock/package/LICENSE.txt build/release/virtio-win-LICENSE.txt
+  cp -f docs/third-party/viosock-LICENSE.txt docs/third-party/viosock-lib-LICENSE.txt build/release/
   cp -f docs/third-party/nlohmann-json-LICENSE.txt build/release/nlohmann-json-LICENSE.txt
   (
     cd build/release
     xorriso -as mkisofs -J -joliet-long -R -V VENERA \
       -o "venera-setup-$version.iso" "venera-setup-$version.exe" \
-      vioserial-LICENSE.txt nlohmann-json-LICENSE.txt
+      virtio-win-LICENSE.txt viosock-LICENSE.txt viosock-lib-LICENSE.txt nlohmann-json-LICENSE.txt
   )
 }
 

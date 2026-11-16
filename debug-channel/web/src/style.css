@@ -35,6 +35,24 @@ body {
   color: #aaa;
   font-size: 12px;
 }
+.navigation .fui-Tab {
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.navigation .fui-Tab__content,
+.navigation .fui-Tab__content--reserved-space {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.language-select {
+  margin: 12px 4px;
+  min-width: 0;
+}
+.language-select select {
+  min-width: 0;
+  width: 100%;
+}
 main {
   display: flex;
   flex-direction: column;
@@ -83,8 +101,18 @@ h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
+.filter-grid > .fui-Field {
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+.filter-grid .fui-Input,
+.filter-grid input {
+  min-width: 0;
+  width: 100%;
+}
 .filter-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 14px;
 }
@@ -409,6 +437,18 @@ pre {
   .navigation {
     width: 100px;
     padding: 12px 2px;
+  }
+  .navigation .fui-Tab {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    row-gap: 4px;
+    padding: 6px 4px;
+  }
+  .navigation .fui-Tab__content,
+  .navigation .fui-Tab__content--reserved-space {
+    grid-column: 1;
+    grid-row: 2;
+    text-align: center;
   }
   .brand {
     padding: 0 6px 16px;

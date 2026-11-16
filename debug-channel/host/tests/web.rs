@@ -23,15 +23,12 @@ impl Drop for Server {
 }
 impl Server {
     fn start(populate: bool) -> Self {
-        Self::with_control(populate, false)
-    }
-    fn with_control(populate: bool, control: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), "<h1>History</h1>").unwrap();
         std::fs::write(dir.path().join("app.js"), "window.historyReady=true;").unwrap();
         if populate {
             let db = Connection::open(dir.path().join("history.db")).unwrap();
-            db.execute_batch("CREATE TABLE events(id INTEGER PRIMARY KEY,received_at TEXT NOT NULL,message TEXT NOT NULL)").unwrap();
+            db.execute_batch("PRAGMA auto_vacuum=FULL; CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,received_at TEXT NOT NULL,message TEXT NOT NULL)").unwrap();
             for (id, received, raw) in [
                 (
                     "9007199254740993",
@@ -61,17 +58,15 @@ impl Server {
         drop(listener);
         let mut command = Command::new(env!("CARGO_BIN_EXE_venera-debug-host"));
         command
-            .args(["web", "--database"])
+            .args(["serve", "--database"])
             .arg(dir.path().join("history.db"))
             .arg("--assets")
             .arg(dir.path())
             .args(["--listen", &addr.to_string()])
+            .args(["--max-bytes", "1048576", "--cid", "42"])
+            .arg("--control")
+            .arg(dir.path().join("control.sock"))
             .stdout(Stdio::null());
-        if control {
-            command
-                .arg("--control")
-                .arg(dir.path().join("control.sock"));
-        }
         let child = command.spawn().unwrap();
         let mut server = Self { child, addr, dir };
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -81,13 +76,19 @@ impl Server {
                 let mut stream = TcpStream::connect(addr)?;
                 stream.set_read_timeout(Some(Duration::from_millis(100)))?;
                 stream.set_write_timeout(Some(Duration::from_millis(100)))?;
-                write!(stream, "GET /api/health HTTP/1.0\r\nHost: localhost\r\n\r\n")?;
+                write!(
+                    stream,
+                    "GET /api/health HTTP/1.0\r\nHost: localhost\r\n\r\n"
+                )?;
                 let mut response = String::new();
                 stream.read_to_string(&mut response)?;
-                Ok(response.split_once("\r\n\r\n").is_some_and(|(headers, body)| {
-                    headers.split_whitespace().nth(1) == Some("200")
-                        && serde_json::from_str::<Value>(body).ok() == Some(json!({"status":"ok"}))
-                }))
+                Ok(response
+                    .split_once("\r\n\r\n")
+                    .is_some_and(|(headers, body)| {
+                        headers.split_whitespace().nth(1) == Some("200")
+                            && serde_json::from_str::<Value>(body).ok()
+                                == Some(json!({"status":"ok"}))
+                    }))
             };
             if ready().unwrap_or(false) {
                 break;
@@ -95,6 +96,13 @@ impl Server {
             assert!(Instant::now() < deadline, "server startup timed out");
             sleep(Duration::from_millis(20));
         }
+        Connection::open(server.dir.path().join("history.db"))
+            .unwrap()
+            .execute(
+                "DELETE FROM events WHERE json_extract(message,'$.type')='host.started'",
+                [],
+            )
+            .unwrap();
         server
     }
     fn get(&self, path: &str) -> (u16, String) {
@@ -106,7 +114,8 @@ impl Server {
             match TcpStream::connect(self.addr) {
                 Ok(stream) => break stream,
                 Err(error)
-                    if error.kind() == ErrorKind::ConnectionRefused && Instant::now() < deadline =>
+                    if error.kind() == ErrorKind::ConnectionRefused
+                        && Instant::now() < deadline =>
                 {
                     sleep(Duration::from_millis(20));
                 }
@@ -145,92 +154,15 @@ impl Server {
 }
 
 #[test]
-fn live_endpoints_return_configuration_error_and_forward_control_responses() {
-    use std::{
-        io::{BufRead, BufReader},
-        os::unix::net::UnixListener,
-    };
+fn live_endpoints_report_offline_guest() {
     let server = Server::start(false);
-    for endpoint in ["/api/system-info", "/api/connection"] {
-        let (status, body) = server.get(endpoint);
-        assert_eq!(status, 503);
-        assert_eq!(
-            serde_json::from_str::<Value>(&body).unwrap(),
-            json!({"error":"Live connection is not configured"})
-        );
-    }
-    let server = Server::with_control(false, true);
-    let listener = UnixListener::bind(server.dir.path().join("control.sock")).unwrap();
-    let system = json!({"collected_at":"2026-11-11T00:00:00Z","session_id":1,"sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Unavailable","bad":true,"warning":"请检查图形驱动。\n重新启动 Windows 后重试。"}]}
-    ]});
-    let connection = json!({"transport":"VirtIO Serial","channel":"org.venera.debug.0","socket_path":"/run/guest.sock","connected":false,"last_received_at":null});
-    let responses = [system.clone(), connection.clone()];
-    let worker = std::thread::spawn(move || {
-        for (kind, response) in ["system.info.get", "connection.get"]
-            .into_iter()
-            .zip(responses)
-        {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut line = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut line)
-                .unwrap();
-            let request: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(request["jsonrpc"], "2.0");
-            assert_eq!(request["method"], kind);
-            assert_eq!(request["id"], "web");
-            writeln!(
-                stream,
-                "{}",
-                json!({"jsonrpc":"2.0","id":"web","result":response})
-            )
-            .unwrap();
-        }
-    });
-    assert_eq!(
-        server.json("/api/system-info"),
-        json!({"major":1,"type":"system.info.result","request_id":"web","ok":true,
-            "collected_at":"2026-11-11T00:00:00Z","session_id":1,
-            "sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Unavailable","bad":true,"warning":"请检查图形驱动。\n重新启动 Windows 后重试。"}]}]})
-    );
-    assert_eq!(server.json("/api/connection"), connection);
-    worker.join().unwrap();
-}
-
-#[test]
-fn system_report_projects_rpc_errors_and_connection_keeps_rpc_errors() {
-    use std::{
-        io::{BufRead, BufReader},
-        os::unix::net::UnixListener,
-    };
-    let server = Server::with_control(false, true);
-    let listener = UnixListener::bind(server.dir.path().join("control.sock")).unwrap();
-    let worker = std::thread::spawn(move || {
-        for method in ["system.info.get", "connection.get"] {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut line = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut line)
-                .unwrap();
-            let request: Value = serde_json::from_str(&line).unwrap();
-            assert_eq!(request["method"], method);
-            writeln!(stream, "{}", json!({"jsonrpc":"2.0","id":"web","error":{
-                "code":-32001,"message":"System report collection timed out",
-                "data":{"retry_after_ms":1000}
-            }})).unwrap();
-        }
-    });
-    assert_eq!(
-        server.json("/api/system-info"),
-        json!({"major":1,"type":"system.info.result","request_id":"web","ok":false,
-            "error":{"code":-32001,"message":"System report collection timed out","data":{"retry_after_ms":1000}}})
-    );
-    assert_eq!(
-        server.json("/api/connection"),
-        json!({"jsonrpc":"2.0","id":"web","error":{"code":-32001,
-            "message":"System report collection timed out","data":{"retry_after_ms":1000}}})
-    );
-    worker.join().unwrap();
+    let connection = server.json("/api/connection");
+    assert_eq!(connection["connected"], false);
+    assert_eq!(connection["ready"], false);
+    let report = server.json("/api/system-info");
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["request_id"], "web");
+    assert_eq!(report["error"]["message"], "not_ready");
 }
 
 #[test]
@@ -283,7 +215,7 @@ fn history_pages_filters_and_details_over_http() {
     );
     assert_eq!(detail["message"]["text"], "中文 Hello");
     let db = Connection::open(server.dir.path().join("history.db")).unwrap();
-    db.execute("INSERT INTO events VALUES(9007199254740996,'2026-11-10T08:00:03Z','{\"text\":\"arrival\"}')", []).unwrap();
+    db.execute("INSERT INTO events(id,received_at,message) VALUES(9007199254740996,'2026-11-10T08:00:03Z','{\"text\":\"arrival\"}')", []).unwrap();
     assert_eq!(server.ids("?after=9007199254740995"), ["9007199254740996"]);
 }
 
@@ -324,22 +256,20 @@ fn export_keeps_literal_numbers_and_static_routes_serve_assets() {
 }
 
 #[test]
-fn missing_history_returns_json_errors() {
+fn fresh_history_is_available_after_health() {
     let server = Server::start(false);
-    for path in ["/api/events", "/api/events/1", "/api/export"] {
-        let (status, body) = server.get(path);
-        assert_eq!(status, 500);
-        assert!(serde_json::from_str::<Value>(&body).unwrap()["error"].is_string());
-    }
-    assert!(!server.dir.path().join("history.db").exists());
+    assert_eq!(
+        server.json("/api/events"),
+        json!({"events":[],"oldest_id":null,"latest_id":null})
+    );
+    assert_eq!(server.get("/api/export"), (200, String::new()));
+    assert_eq!(server.get("/api/events/1").0, 404);
 }
 
 #[test]
 fn mixed_history_filters_projection_and_exports_rpc_notifications() {
     let server = Server::start(true);
     let db = Connection::open(server.dir.path().join("history.db")).unwrap();
-    db.execute_batch("ALTER TABLE events ADD COLUMN raw_message TEXT")
-        .unwrap();
     let raw = "{\n \"jsonrpc\": \"2.0\", \"method\": \"log\", \"params\": {\"stream_id\":\"stream\",\"seq\":\"18446744073709551615\",\"observed_at\":\"2026-11-10T08:00:01Z\",\"source\":\"driver\",\"component\":\"UMD\",\"level\":\"ERROR\",\"raw_level\":\"error\",\"counter\":18446744073709551615,\"text\":\"中文  🙂\\nnext\"} }";
     db.execute(
         "INSERT INTO events VALUES(9007199254740996,'2026-11-10T08:00:03Z',?1,?2)",

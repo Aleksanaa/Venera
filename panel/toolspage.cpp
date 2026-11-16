@@ -25,7 +25,7 @@ public:
         if (starting_)
             CloseHandle(starting_);
     }
-    const wchar_t* title() const override { return L"Tools"; }
+    const wchar_t* title() const override { return locale::text(IDS_Tools); }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui, float x, float w, float& y) override;
     void click(int id) override;
@@ -45,16 +45,16 @@ private:
 void Tools::draw(Ui& ui, float x, float w, float& y)
 {
     shown_ = overlayOn();
-    float cy = ui.settingsCard(x, y, w, L"", L"Frame rate overlay",
-                               L"Frame rate, hitches, and each program's FPS and GPU memory");
+    float cy = ui.settingsCard(x, y, w, L"", locale::text(IDS_FpsOverlay),
+                               locale::text(IDS_FpsDescription));
     ui.toggle(x + w - 16, cy, kFpsId, shown_);
-    ui.sectionHeader(L"Troubleshooting", x, y);
-    cy = ui.settingsCard(x, y, w, L"", L"Report an issue",
-                         L"On GitHub. Paste the Overview's report into it.");
-    ui.buttonRight(L"Open", x + w - 16, cy, kIssueId, false);
-    cy = ui.settingsCard(x, y, w, L"", L"Restart the Desktop Window Manager",
-                         L"Reloads the drivers and their settings. The screen flickers.");
-    ui.buttonRight(L"Restart", x + w - 16, cy, kDwmId, false);
+    ui.sectionHeader(locale::text(IDS_Troubleshooting), x, y);
+    cy = ui.settingsCard(x, y, w, L"", locale::text(IDS_ReportIssue),
+                         locale::text(IDS_ReportIssueDescription));
+    ui.buttonRight(locale::text(IDS_Open), x + w - 16, cy, kIssueId, false);
+    cy = ui.settingsCard(x, y, w, L"", locale::text(IDS_RestartDwm),
+                         locale::text(IDS_RestartDwmDescription));
+    ui.buttonRight(locale::text(IDS_Restart), x + w - 16, cy, kDwmId, false);
 }
 
 void Tools::click(int id)

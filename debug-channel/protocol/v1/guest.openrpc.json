@@ -336,6 +336,31 @@
         ],
         "type": "object"
       },
+      "OutputLocalizedMessage": {
+        "properties": {
+          "args": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "diagnostic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "args"
+        ],
+        "type": "object"
+      },
       "OutputMethodDescriptor": {
         "properties": {
           "name": {
@@ -439,11 +464,41 @@
           "key": {
             "type": "string"
           },
+          "key_message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputLocalizedMessage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "value": {
             "type": "string"
           },
+          "value_message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputLocalizedMessage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "warning": {
             "type": "string"
+          },
+          "warning_message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputLocalizedMessage"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -464,6 +519,16 @@
           },
           "title": {
             "type": "string"
+          },
+          "title_message": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputLocalizedMessage"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [

@@ -29,8 +29,12 @@ import {
 } from '@fluentui/react-icons';
 import type { KeyboardEvent, PointerEvent } from 'react';
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import veneraLogo from '../../../docs/venera.svg';
+import { type MessageKey } from './catalog';
 import { EventDetails, type LogEvent } from './EventDetails';
+import { enumLabel, formatDate, i18n } from './i18n';
+import { LanguageSelect } from './LanguageSelect';
 import { SystemInfo } from './SystemInfo';
 
 type Page = {
@@ -54,14 +58,14 @@ const empty: Filters = {
   from: '',
   until: '',
 };
-const labels: Record<keyof Filters, string> = {
-  component: '组件',
-  level: '级别',
-  program: '程序',
-  q: '正文搜索',
-  from: '开始时间',
-  until: '结束时间',
-};
+const labels = {
+  component: 'component',
+  level: 'level',
+  program: 'program',
+  q: 'searchText',
+  from: 'from',
+  until: 'until',
+} as const satisfies Record<keyof Filters, MessageKey>;
 function query(filters: Filters) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
@@ -81,7 +85,7 @@ async function read<T>(url: string, signal?: AbortSignal): Promise<T> {
     const body = await response
       .json()
       .catch(() => ({ error: response.statusText }));
-    throw new Error(body.error || '读取日志失败');
+    throw new Error(body.error || 'readLogsError');
   }
   return response.json();
 }
@@ -91,10 +95,13 @@ function summary(event: LogEvent) {
 function programName(event: LogEvent) {
   const process = event.message.process;
   if (process?.exe_path) return process.exe_path.split(/[\\/]/).at(-1);
-  return process?.pid !== undefined ? `进程 ${process.pid}` : '系统';
+  return process?.pid !== undefined
+    ? i18n.t('process', { pid: process.pid })
+    : i18n.t('system');
 }
 
 export function App() {
+  const { t } = useTranslation();
   const [page, setPage] = useState('logs');
   const [systemVisited, setSystemVisited] = useState(false);
   const workspace = useRef<HTMLDivElement>(null);
@@ -164,8 +171,10 @@ export function App() {
   const filterSummary =
     (Object.keys(labels) as (keyof Filters)[])
       .filter((key) => filters[key])
-      .map((key) => `${labels[key]}：${filters[key]}`)
-      .join(' · ') || '全部事件';
+      .map((key) =>
+        t('filterSummary', { label: t(labels[key]), value: filters[key] }),
+      )
+      .join(' · ') || t('allEvents');
   const columnTemplate = `${columnWidths
     .slice(0, 4)
     .map((width) => `${width}px`)
@@ -351,7 +360,14 @@ export function App() {
     }
   }
 
-  const detail = <EventDetails selected={selected} detailError={detailError} />;
+  const detail = (
+    <EventDetails
+      selected={selected}
+      detailError={
+        detailError === 'readLogsError' ? t('readLogsError') : detailError
+      }
+    />
+  );
 
   return (
     <FluentProvider theme={webDarkTheme} className="app">
@@ -363,7 +379,7 @@ export function App() {
         <TabList
           vertical
           selectedValue={page}
-          aria-label="工作区导航"
+          aria-label={t('navigation')}
           onTabSelect={(_, data) => {
             setPage(String(data.value));
             if (data.value === 'system') {
@@ -373,28 +389,29 @@ export function App() {
           }}
         >
           <Tab value="logs" icon={<HistoryRegular />}>
-            宿主日志
+            {t('hostLogs')}
           </Tab>
           <Tab value="system" icon={<DesktopRegular />}>
-            系统信息
+            {t('systemInfo')}
           </Tab>
         </TabList>
-        <p>检索事件、追踪运行状态。</p>
+        <p>{t('navigationHint')}</p>
+        <LanguageSelect />
       </aside>
       <main hidden={page !== 'logs'}>
         <header>
           <div>
-            <h1>日志工作台</h1>
-            <p>查看宿主事件与程序日志，定位运行细节。</p>
+            <h1>{t('workbench')}</h1>
+            <p>{t('workbenchHint')}</p>
           </div>
           <Badge appearance="tint" color={error ? 'danger' : 'brand'}>
             {error
-              ? '连接异常'
+              ? t('connectionError')
               : loading
-                ? '正在连接'
+                ? t('connecting')
                 : following
-                  ? '实时跟随'
-                  : '历史浏览'}
+                  ? t('following')
+                  : t('historyBrowsing')}
           </Badge>
         </header>
         <OverlayDrawer
@@ -411,54 +428,56 @@ export function App() {
                 <Button
                   appearance="subtle"
                   icon={<DismissRegular />}
-                  aria-label="关闭"
+                  aria-label={t('close')}
                   onClick={() => setDrawer(null)}
                 />
               }
             >
-              事件详情
+              {t('eventDetails')}
             </DrawerHeaderTitle>
           </DrawerHeader>
           <DrawerBody className="drawer-body">{detail}</DrawerBody>
         </OverlayDrawer>
-        <Toolbar aria-label="日志工具栏" className="toolbar">
+        <Toolbar aria-label={t('toolbar')} className="toolbar">
           <ToolbarButton
             icon={<FilterRegular />}
             onClick={() => setFiltersOpen((open) => !open)}
             aria-expanded={filtersOpen}
             aria-controls="event-filters"
           >
-            {filtersOpen ? '收起筛选' : '筛选'}
+            {filtersOpen ? t('collapseFilters') : t('filters')}
           </ToolbarButton>
           <ToolbarButton
             icon={<ArrowSyncRegular />}
             onClick={() => void loadOlder()}
             disabled={!hasOlder || olderBusy || loading}
           >
-            {olderBusy ? '正在加载' : '加载更早'}
+            {olderBusy ? t('loading') : t('loadOlder')}
           </ToolbarButton>
           <ToolbarButton
             as="a"
             href={`/api/export${params ? `?${params}` : ''}`}
             icon={<ArrowDownloadRegular />}
           >
-            导出 JSONL
+            {t('export')}
           </ToolbarButton>
           <Switch
-            label="实时跟随"
+            label={t('following')}
             checked={following}
             onChange={(_, data) => {
               follow.current = data.checked;
               setFollowing(data.checked);
             }}
           />
-          <span className="count">{events.length} 条事件</span>
+          <span className="count">
+            {t('eventCount', { count: events.length })}
+          </span>
         </Toolbar>
         {filtersOpen && (
           <section
             id="event-filters"
             className="filter-panel"
-            aria-label="筛选事件"
+            aria-label={t('filterEvents')}
           >
             <form
               onSubmit={(event) => {
@@ -468,7 +487,7 @@ export function App() {
             >
               <div className="filter-grid">
                 {(Object.keys(labels) as (keyof Filters)[]).map((key) => (
-                  <Field key={key} label={labels[key]}>
+                  <Field key={key} label={t(labels[key])}>
                     <Input
                       type={
                         key === 'from' || key === 'until'
@@ -492,7 +511,7 @@ export function App() {
                   appearance="primary"
                   icon={<SearchRegular />}
                 >
-                  应用筛选
+                  {t('applyFilters')}
                 </Button>
                 <Button
                   onClick={() => {
@@ -500,9 +519,11 @@ export function App() {
                     setFilters(empty);
                   }}
                 >
-                  重置
+                  {t('reset')}
                 </Button>
-                <Button onClick={() => setFiltersOpen(false)}>收起</Button>
+                <Button onClick={() => setFiltersOpen(false)}>
+                  {t('collapse')}
+                </Button>
               </div>
             </form>
           </section>
@@ -512,15 +533,14 @@ export function App() {
         </div>
         {error && (
           <MessageBar intent="error">
-            <MessageBarBody>{error}</MessageBarBody>
+            <MessageBarBody>
+              {error === 'readLogsError' ? t('readLogsError') : error}
+            </MessageBarBody>
           </MessageBar>
         )}
         {trimmed && (
           <MessageBar>
-            <MessageBarBody>
-              当前会话已保留最近浏览的 5000
-              条事件。可调整时间范围或导出当前筛选的全部事件。
-            </MessageBarBody>
+            <MessageBarBody>{t('retained', { count: 5000 })}</MessageBarBody>
           </MessageBar>
         )}
         <div
@@ -536,14 +556,14 @@ export function App() {
         >
           <Card className="event-card">
             <div className="list-heading">
-              <strong>事件历史</strong>
+              <strong>{t('eventHistory')}</strong>
               <Button
                 className="reset-columns"
                 size="small"
                 appearance="subtle"
                 onClick={() => setColumnWidths([160, 170, 130, 80, 180])}
               >
-                恢复列宽
+                {t('resetColumns')}
               </Button>
             </div>
             <div className="table-scroll" ref={list}>
@@ -555,38 +575,44 @@ export function App() {
                   className="column-heading"
                   style={{ gridTemplateColumns: columnTemplate }}
                 >
-                  {['程序', '时间', '组件', '级别', '正文'].map(
-                    (label, index) => (
-                      <div className="column-title" key={label}>
-                        <span>{label}</span>
-                        <div
-                          className="column-resizer"
-                          role="separator"
-                          tabIndex={0}
-                          aria-orientation="vertical"
-                          aria-label={`调整${label}列宽`}
-                          aria-valuemin={
-                            index === 4 ? 180 : index === 3 ? 64 : 96
-                          }
-                          aria-valuenow={columnWidths[index]}
-                          onPointerDown={(event) => beginResize(index, event)}
-                          onPointerMove={moveResize}
-                          onPointerUp={endResize}
-                          onPointerCancel={endResize}
-                          onLostPointerCapture={() => {
-                            resizeStart.current = null;
-                          }}
-                          onKeyDown={(event) => handleResizeKey(index, event)}
-                        />
-                      </div>
-                    ),
-                  )}
+                  {(
+                    [
+                      'program',
+                      'time',
+                      'component',
+                      'level',
+                      'message',
+                    ] as const
+                  ).map((label, index) => (
+                    <div className="column-title" key={label}>
+                      <span>{t(label)}</span>
+                      <div
+                        className="column-resizer"
+                        role="separator"
+                        tabIndex={0}
+                        aria-orientation="vertical"
+                        aria-label={t('resizeColumn', { label: t(label) })}
+                        aria-valuemin={
+                          index === 4 ? 180 : index === 3 ? 64 : 96
+                        }
+                        aria-valuenow={columnWidths[index]}
+                        onPointerDown={(event) => beginResize(index, event)}
+                        onPointerMove={moveResize}
+                        onPointerUp={endResize}
+                        onPointerCancel={endResize}
+                        onLostPointerCapture={() => {
+                          resizeStart.current = null;
+                        }}
+                        onKeyDown={(event) => handleResizeKey(index, event)}
+                      />
+                    </div>
+                  ))}
                 </div>
-                <section className="events" aria-label="事件历史">
+                <section className="events" aria-label={t('eventHistory')}>
                   {loading ? (
-                    <p className="empty">正在读取事件…</p>
+                    <p className="empty">{t('readingEvents')}</p>
                   ) : events.length === 0 ? (
-                    <p className="empty">当前条件下暂无事件</p>
+                    <p className="empty">{t('emptyEvents')}</p>
                   ) : (
                     events.map((event) => (
                       <button
@@ -599,7 +625,7 @@ export function App() {
                           setSelectedId(event.id);
                           if (narrow) setDrawer('detail');
                         }}
-                        aria-label={`查看事件 ${event.id}`}
+                        aria-label={t('viewEvent', { id: event.id })}
                       >
                         <span
                           className="program"
@@ -607,18 +633,19 @@ export function App() {
                         >
                           {programName(event)}
                         </span>
-                        <time>
-                          {new Date(event.received_at).toLocaleString()}
-                        </time>
+                        <time>{formatDate(event.received_at)}</time>
                         <span>
                           {event.message.component ??
-                            event.message.type ??
-                            '事件'}
+                            enumLabel(event.message.type ?? 'event')}
                         </span>
                         <span
                           className={`level ${event.message.level === 'error' ? 'error' : ''}`}
                         >
-                          {event.message.level ?? event.message.type ?? 'event'}
+                          {enumLabel(
+                            event.message.level ??
+                              event.message.type ??
+                              'event',
+                          )}
                         </span>
                         <span className="summary">{summary(event)}</span>
                       </button>
@@ -634,7 +661,7 @@ export function App() {
                 className="detail-resizer"
                 role="separator"
                 tabIndex={0}
-                aria-label="调整详情宽度"
+                aria-label={t('resizeDetails')}
                 aria-orientation="vertical"
                 aria-valuemin={260}
                 aria-valuemax={maxDetailWidth}

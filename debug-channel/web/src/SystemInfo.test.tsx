@@ -1,6 +1,7 @@
 import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
+import { setLanguagePreference } from './i18n';
 import { SystemInfo } from './SystemInfo';
 
 const report = {
@@ -95,7 +96,9 @@ test('刷新期间保留报告与时间，失败后重试更新报告', async ()
   pending = deferredResponse();
   await user.click(screen.getByRole('button', { name: '刷新' }));
   expect(screen.getByText('Degraded')).toBeVisible();
-  expect(screen.getByText('2026-11-11T10:00:00Z')).toBeVisible();
+  expect(screen.getByText(/采集时间/)).toHaveTextContent(
+    '2026年11月11日 10:00:00',
+  );
   expect(screen.getByRole('button', { name: '正在刷新' })).toBeDisabled();
   expect(
     screen.getByRole('status', { name: '正在采集系统信息…' }),
@@ -105,20 +108,25 @@ test('刷新期间保留报告与时间，失败后重试更新报告', async ()
   );
   expect(screen.getByText('客户机暂时离线')).toBeVisible();
   expect(screen.getByText('Degraded')).toBeVisible();
-  expect(screen.getByText('2026-11-11T10:00:00Z')).toBeVisible();
+  expect(screen.getByText(/采集时间/)).toHaveTextContent(
+    '2026年11月11日 10:00:00',
+  );
   expect(screen.queryByRole('status')).not.toBeInTheDocument();
   pending = deferredResponse();
   await user.click(screen.getByRole('button', { name: '刷新' }));
   expect(screen.queryByText('客户机暂时离线')).not.toBeInTheDocument();
-  expect(screen.getByText('2026-11-11T10:00:00Z')).toBeVisible();
+  expect(screen.getByText(/采集时间/)).toHaveTextContent(
+    '2026年11月11日 10:00:00',
+  );
   expect(
     screen.getByRole('status', { name: '正在采集系统信息…' }),
   ).toBeVisible();
   await act(async () =>
     pending?.resolve(json({ ...report, collected_at: '2026-11-11T11:30:00Z' })),
   );
-  expect(screen.getByText('2026-11-11T11:30:00Z')).toBeVisible();
-  expect(screen.queryByText('2026-11-11T10:00:00Z')).not.toBeInTheDocument();
+  expect(screen.getByText(/采集时间/)).toHaveTextContent(
+    '2026年11月11日 11:30:00',
+  );
   expect(screen.queryByRole('status')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: '刷新' })).toBeEnabled();
 });
@@ -217,6 +225,103 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+test('report metadata follows language selection and preserves collected hardware and fallback text', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) =>
+      json(
+        url === '/api/connection'
+          ? connection
+          : {
+              ...report,
+              sections: [
+                {
+                  title: 'Guest',
+                  title_message: { id: 'report.guest' },
+                  rows: [
+                    {
+                      key: 'Memory',
+                      key_message: { id: 'report.memory' },
+                      value: '8 GB (7 GB usable)',
+                      value_message: {
+                        id: 'report.memoryValue',
+                        args: ['8 GB', '7 GB'],
+                      },
+                      bad: false,
+                      warning: '',
+                    },
+                    {
+                      key: 'Display',
+                      key_message: { id: 'report.display' },
+                      value: '1920 × 1080 at 60 Hz, 150% scale',
+                      value_message: {
+                        id: 'report.displayValue',
+                        args: ['1920', '1080', '60', '150'],
+                      },
+                      bad: false,
+                      warning: '',
+                    },
+                    {
+                      key: 'Version',
+                      key_message: { id: 'report.version' },
+                      value: 'Not installed',
+                      value_message: { id: 'report.notInstalled' },
+                      bad: true,
+                      warning: 'Failed (原始诊断)\nC:\\GPU',
+                      warning_message: {
+                        id: 'report.apiFailed',
+                        args: ['原始诊断'],
+                        diagnostic: '\nC:\\GPU',
+                      },
+                    },
+                    {
+                      key: 'GPU',
+                      value: '设备 🚀 C:\\GPU',
+                      bad: false,
+                      warning: '',
+                    },
+                    {
+                      key: 'Future key',
+                      key_message: { id: 'report.future' },
+                      value: 'Original value',
+                      value_message: {
+                        id: 'report.memoryValue',
+                        args: ['8 GB'],
+                      },
+                      bad: false,
+                      warning: '',
+                    },
+                  ],
+                },
+              ],
+            },
+      ),
+    ),
+  );
+  render(<SystemInfo />);
+  expect(await screen.findByRole('heading', { name: '虚拟机' })).toBeVisible();
+  expect(screen.getByText('内存')).toBeVisible();
+  expect(screen.getByText('8 GB（可用 7 GB）')).toBeVisible();
+  expect(screen.getByText('1920 × 1080，60 Hz，缩放 150%')).toBeVisible();
+  expect(screen.getByText('尚未安装')).toBeVisible();
+  expect(screen.getByText(/失败（原始诊断）/)).toHaveTextContent(
+    '失败（原始诊断） C:\\GPU',
+  );
+  expect(screen.getByText('Future key')).toBeVisible();
+  expect(screen.getByText('Original value')).toBeVisible();
+  await act(async () => {
+    await setLanguagePreference('en');
+  });
+  expect(screen.getByRole('heading', { name: 'Guest' })).toBeVisible();
+  expect(screen.getByText('8 GB (7 GB usable)')).toBeVisible();
+  expect(screen.getByText('1920 × 1080 at 60 Hz, 150% scale')).toBeVisible();
+  expect(screen.getByText('Not installed')).toBeVisible();
+  expect(screen.getByText('设备 🚀 C:\\GPU')).toBeVisible();
+  await act(async () => {
+    await setLanguagePreference('zh-CN');
+  });
+});
+
 test('展示连接上下文、系统字段与诊断提示，刷新失败保留报告并可恢复', async () => {
   let failed = false;
   let updated = false;
@@ -260,13 +365,15 @@ test('展示连接上下文、系统字段与诊断提示，刷新失败保留�
   expect(await screen.findAllByText('采集通道尚未配置')).toHaveLength(2);
   expect(screen.getByText('Degraded')).toBeVisible();
   expect(screen.getByText(/最后采集时间/)).toHaveTextContent(
-    '2026-11-11T10:00:00Z',
+    '2026年11月11日 10:00:00',
   );
   failed = false;
   updated = true;
   await user.click(screen.getByRole('button', { name: '刷新' }));
   expect(await screen.findByText('已连接')).toBeVisible();
-  expect(screen.getByText(/会话：5/)).toHaveTextContent('2026-11-11T10:02:00Z');
+  expect(screen.getByText(/会话：5/)).toHaveTextContent(
+    '2026年11月11日 10:02:00',
+  );
 });
 
 test('初次采集失败展示实际错误，刷新后显示系统报告', async () => {
@@ -323,7 +430,9 @@ test('系统报告保持本次采集直到用户刷新', async () => {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(5000);
   });
-  expect(screen.getByText('2026-11-11T10:00:00Z')).toBeVisible();
+  expect(screen.getByText(/采集时间/)).toHaveTextContent(
+    '2026年11月11日 10:00:00',
+  );
 });
 
 test('连接响应完成后采集系统报告，每次刷新依次完成两项读取', async () => {

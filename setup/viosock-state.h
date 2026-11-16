@@ -5,7 +5,7 @@
 #include <string_view>
 #include <vector>
 
-namespace vioserial {
+namespace viosock {
 inline bool equal_id(std::wstring_view left, std::wstring_view right)
 {
     if (left.size() != right.size())
@@ -18,7 +18,7 @@ inline bool equal_id(std::wstring_view left, std::wstring_view right)
 
 inline bool matches(std::wstring_view id)
 {
-    for (auto base : {L"PCI\\VEN_1AF4&DEV_1003", L"PCI\\VEN_1AF4&DEV_1043"}) {
+    for (auto base : {L"PCI\\VEN_1AF4&DEV_1012", L"PCI\\VEN_1AF4&DEV_1053"}) {
         std::wstring_view prefix(base);
         if (id.size() >= prefix.size() && equal_id(id.substr(0, prefix.size()), prefix) &&
             (id.size() == prefix.size() || id[prefix.size()] == L'&'))
@@ -49,4 +49,19 @@ inline bool accepted(unsigned long code, bool controllers_ready)
 {
     return code == 0 || code == 3010 || code == 1641 || (code == 259 && controllers_ready);
 }
-} // namespace vioserial
+struct Provider {
+    bool service_running;
+    bool registered;
+    bool listener_ready;
+};
+
+inline bool ready(bool controllers_ready, const Provider& provider)
+{
+    return controllers_ready && provider.service_running && provider.registered && provider.listener_ready;
+}
+
+inline bool restart_required(unsigned long code, bool transport_ready)
+{
+    return code == 3010 || code == 1641 || !transport_ready;
+}
+} // namespace viosock

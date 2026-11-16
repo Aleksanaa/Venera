@@ -1,6 +1,6 @@
 # Venera Protocol 1.0.0
 
-Rust types and method declarations generate OpenRPC 1.4.1 receiving interface documents for both endpoints. Messages use JSON-RPC 2.0, with UTF-8 JSONL transport over VirtIO Serial.
+Rust types and method declarations generate OpenRPC 1.4.1 receiving interface documents for both endpoints. Messages use JSON-RPC 2.0, with UTF-8 JSONL transport over VirtIO socket.
 
 ## Generation and Validation
 
@@ -45,6 +45,10 @@ Serde u32 decoding uses integer lexical syntax; Draft-07 integer uses mathematic
 
 Parameter Schemas follow the deserialization contract, and result Schemas follow the serialization contract. Input/Output prefixes on component names distinguish required-field and nullability rules. The Schema dialect is Draft-07, with references pointing to `/components/schemas`. Optional input fields support omission and null; output follows the type's Serde attributes.
 
+## System Report Messages
+
+Report sections carry `title` and optional `title_message`; rows carry `key`, `value`, `warning` and optional `key_message`, `value_message`, `warning_message`. Each message has a stable semantic `id` such as `report.driver`, `report.notInstalled`, or `report.memory`, an `args` array of raw strings (defaulting to an empty array), and an optional `diagnostic` suffix. Templates substitute numbered placeholders such as `{0}` with the corresponding argument, then append the diagnostic verbatim. The rendered fields provide English fallback text. Consumers use the original field when the message ID is unfamiliar or a required argument is missing. Hardware names, paths, API names, and versions retain their collected spelling.
+
 ## Validation Commands
 
 ```bash
@@ -52,4 +56,4 @@ cargo test --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --f
 python3 debug-channel/protocol/tests/v1_schema.py
 ```
 
-Python validation uses jsonschema to cover the pinned-version OpenRPC meta-Schema, component references, and shared data samples. The test fixture's SOURCE.md records the meta-Schema source. See the [debug channel](virtio-serial-host.md) for integration with the running channel and viewers.
+Python validation uses jsonschema to cover the pinned-version OpenRPC meta-Schema, component references, and shared data samples. The test fixture's SOURCE.md records the meta-Schema source. See the [debug channel](virtio-socket-host.md) for integration with the running channel and viewers.

@@ -10,7 +10,7 @@ use axum::{
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -230,15 +230,9 @@ async fn api_missing() -> ApiError {
 }
 
 async fn control_query(
-    control: Option<PathBuf>,
+    control: PathBuf,
     kind: &'static str,
 ) -> std::result::Result<Json<Value>, ApiError> {
-    let control = control.ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Live connection is not configured".into(),
-        )
-    })?;
     tokio::task::spawn_blocking(move || {
         use std::{
             io::{BufRead, BufReader, Read, Write},
@@ -294,45 +288,46 @@ async fn control_query(
     .map_err(internal)?
 }
 
-pub fn run(
+pub async fn serve(
     database: PathBuf,
     assets: PathBuf,
-    listen: SocketAddr,
-    control: Option<PathBuf>,
+    listener: tokio::net::TcpListener,
+    control: PathBuf,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
-    tokio::runtime::Runtime::new()?.block_on(async move {
-        let static_files =
-            ServeDir::new(&assets).fallback(ServeFile::new(assets.join("index.html")));
-        let system_control = control.clone();
-        let connection_control = control;
-        let app = Router::new()
-            .route(
-                "/api/system-info",
-                get(move || control_query(system_control.clone(), "system.info.get")),
+    let static_files = ServeDir::new(&assets).fallback(ServeFile::new(assets.join("index.html")));
+    let system_control = control.clone();
+    let connection_control = control;
+    let app = Router::new()
+        .route(
+            "/api/system-info",
+            get(move || control_query(system_control.clone(), "system.info.get")),
+        )
+        .route(
+            "/api/connection",
+            get(move || control_query(connection_control.clone(), "connection.get")),
+        )
+        .route(
+            "/api/health",
+            get(|| async { Json(json!({"status":"ok"})) }),
+        )
+        .route("/api/events", get(events))
+        .route("/api/events/{id}", get(detail))
+        .route("/api/export", get(export))
+        .route("/api", get(api_missing))
+        .route("/api/{*path}", get(api_missing))
+        .method_not_allowed_fallback(|| async {
+            ApiError(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "Method not supported".into(),
             )
-            .route(
-                "/api/connection",
-                get(move || control_query(connection_control.clone(), "connection.get")),
-            )
-            .route(
-                "/api/health",
-                get(|| async { Json(json!({"status":"ok"})) }),
-            )
-            .route("/api/events", get(events))
-            .route("/api/events/{id}", get(detail))
-            .route("/api/export", get(export))
-            .route("/api", get(api_missing))
-            .route("/api/{*path}", get(api_missing))
-            .method_not_allowed_fallback(|| async {
-                ApiError(
-                    StatusCode::METHOD_NOT_ALLOWED,
-                    "Method not supported".into(),
-                )
-            })
-            .fallback_service(static_files)
-            .with_state(database);
-        let listener = tokio::net::TcpListener::bind(listen).await?;
-        axum::serve(listener, app).await?;
-        Ok(())
-    })
+        })
+        .fallback_service(static_files)
+        .with_state(database);
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = shutdown.await;
+        })
+        .await?;
+    Ok(())
 }

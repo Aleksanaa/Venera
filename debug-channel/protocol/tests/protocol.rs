@@ -12,18 +12,25 @@ fn panel_report_rows_preserve_warning_text_and_findings() {
         sections,
         vec![SystemInfoSection {
             title: "Host".into(),
+            title_message: None,
             rows: vec![
                 SystemInfoRow {
                     key: "GPU".into(),
                     value: "Unknown: Venus did not answer".into(),
                     bad: true,
-                    warning: "请检查图形驱动。\n重新启动 Windows 后重试。".into()
+                    warning: "请检查图形驱动。\n重新启动 Windows 后重试。".into(),
+                    key_message: None,
+                    value_message: None,
+                    warning_message: None,
                 },
                 SystemInfoRow {
                     key: "Renderer".into(),
                     value: "Venus".into(),
                     bad: false,
-                    warning: "".into()
+                    warning: "".into(),
+                    key_message: None,
+                    value_message: None,
+                    warning_message: None,
                 },
             ],
         }]
@@ -168,11 +175,15 @@ fn expected_vectors() -> Vec<Envelope> {
                 session_id: Some(1),
                 sections: vec![SystemInfoSection {
                     title: "Graphics".into(),
+                    title_message: None,
                     rows: vec![SystemInfoRow {
                         key: "Adapter".into(),
                         value: "Unavailable".into(),
                         bad: true,
                         warning: "请检查图形驱动。\n重新启动 Windows 后重试。".into(),
+                        key_message: None,
+                        value_message: None,
+                        warning_message: None,
                     }],
                 }],
                 error: None,

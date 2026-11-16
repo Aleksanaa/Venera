@@ -30,16 +30,17 @@ constexpr wchar_t kErrorGlyph[] = L"", kWarningGlyph[] = L"";  // StatusEr
 // them.
 struct Row {
     const InfoRow* info;
-    Ui::Paragraph value, warning;
+    Ui::Paragraph key, value, warning;
     float valueH, warningH = 0;
 };
 
 Row layoutRow(Ui& ui, const InfoRow& r, float w)
 {
-    Row row{&r, ui.wrap(r.value, Ui::kBody, w - 16 - kValueX - (r.bad ? kGlyphW : 0))};
-    row.valueH = std::max(32.f, row.value.height + 12);
+    Row row{&r, ui.wrap(r.keyText(), Ui::kBody, kValueX - 56 - 12),
+            ui.wrap(r.valueText(), Ui::kBody, w - 16 - kValueX - (r.bad ? kGlyphW : 0))};
+    row.valueH = std::max(32.f, std::max(row.key.height, row.value.height) + 12);
     if (!r.warning.empty()) {
-        row.warning = ui.wrap(r.warning, Ui::kBody, w - 16 - 56 - kWarningIndent - kGlyphW);
+        row.warning = ui.wrap(r.warningText(), Ui::kBody, w - 16 - 56 - kWarningIndent - kGlyphW);
         row.warningH = std::max(28.f, row.warning.height + 8);
     }
     return row;
@@ -119,7 +120,7 @@ public:
             check();
     }
 
-    const wchar_t* title() const override { return L"Overview"; }
+    const wchar_t* title() const override { return locale::text(IDS_Overview); }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui, float x, float w, float& y) override;
     void click(int id) override;
@@ -152,9 +153,9 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
     std::wstring gpu, vkDriver;
     hostGpu(probe(), gpu, vkDriver);
     std::wstring name = !gpu.empty() ? gpu : info_.ours ? L"VirtIO GPU" : info_.driverDesc;
-    std::wstring sub = info_.ours ? L"VirtIO GPU through Venus" : info_.deviceFound ? L"VirtIO GPU" : L"";
+    std::wstring sub = info_.ours ? locale::text(IDS_GpuThroughVenus) : info_.deviceFound ? L"VirtIO GPU" : L"";
     ui.text(L"", Ui::kGlyph, {x + 24, y, x + 72, y + 104}, accent, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
-    const wchar_t* label = copied_ ? L"Copied" : L"Copy";
+    const wchar_t* label = copied_ ? locale::text(IDS_Copied) : locale::text(IDS_Copy);
     float bw = ui.buttonWidth(label);
     ui.selectable(kNameText, name, Ui::kSubtitle, {x + 96, y + 24, x + w - bw - 40, y + 54});
     ui.text(sub, Ui::kBody, {x + 96, y + 56, x + w - bw - 40, y + 78}, kWhite, kTextSecondary);
@@ -177,13 +178,13 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
             }
         float h = ui.expander(x, y, w, kExpanderId + int(i), open, bodyH);
         ui.text(s.icon, Ui::kIconLarge, {x + 16, y, x + 36, y + 64}, kWhite, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
-        ui.text(s.title, Ui::kBody, {x + 56, y, x + w - 260, y + 64});
-        if (s.title == L"Graphics APIs" && !probing_)
-            ui.buttonRight(L"Check again", x + w - 52, y + 32, kCheckId, false);
+        ui.text(s.titleText(), Ui::kBody, {x + 56, y, x + w - 260, y + 64});
+        if (s.titleId == IDS_ReportApis && !probing_)
+            ui.buttonRight(locale::text(IDS_CheckAgain), x + w - 52, y + 32, kCheckId, false);
         if (open) {
             float ry = y + 65 + 12;
             for (const Row& r : rows) {
-                ui.text(r.info->key, Ui::kBody, {x + 56, ry, x + kValueX, ry + 32}, kWhite, kTextSecondary);
+                ui.text(r.key, x + 56, ry + (r.valueH - r.key.height) / 2, kWhite, kTextSecondary);
                 float vx = x + kValueX;
                 if (r.info->bad) {
                     ui.text(kErrorGlyph, Ui::kIcon, {vx, ry, vx + 16, ry + 32}, kCritical, 1);
@@ -208,7 +209,7 @@ void Overview::draw(Ui& ui, float x, float w, float& y)
 void Overview::click(int id)
 {
     if (id == kCopyId) {
-        setClipboard(window_, reportText(describe(info_, probe())));
+        setClipboard(window_, reportText(describe(info_, probe()), true));
         copied_ = true;
         SetTimer(window_, kCopiedTimer, 2000, nullptr);
     } else if (id == kCheckId && !g_mockOverview) {

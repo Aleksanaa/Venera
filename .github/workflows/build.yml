@@ -78,10 +78,10 @@ jobs:
       - name: Check the debug channel and workbench
         run: nix develop -c scripts/build check
 
-      - name: Cache the VirtIO serial release
+      - name: Cache the VirtIO socket release
         uses: actions/cache@v4
         with:
-          path: build/vioserial-cache
+          path: build/viosock-cache
           key: virtio-win-0.1.302-1
 
       # The kernel takes any signature in test mode: a throwaway certificate per build.
@@ -110,7 +110,9 @@ jobs:
           path: |
             build/release/venera-setup-${{ env.VERSION }}.exe
             build/release/venera-setup-${{ env.VERSION }}.iso
-            build/release/vioserial-LICENSE.txt
+            build/release/virtio-win-LICENSE.txt
+            build/release/viosock-LICENSE.txt
+            build/release/viosock-lib-LICENSE.txt
             build/release/nlohmann-json-LICENSE.txt
 
       - name: Release
@@ -140,5 +142,5 @@ jobs:
             }
             END { if (cur != "") print cur }
           ' > notes.md
-          gh release create "$GITHUB_REF_NAME" "build/release/venera-setup-$VERSION.exe" "build/release/venera-setup-$VERSION.iso" build/release/vioserial-LICENSE.txt build/release/nlohmann-json-LICENSE.txt \
+          gh release create "$GITHUB_REF_NAME" "build/release/venera-setup-$VERSION.exe" "build/release/venera-setup-$VERSION.iso" build/release/virtio-win-LICENSE.txt build/release/viosock-LICENSE.txt build/release/viosock-lib-LICENSE.txt build/release/nlohmann-json-LICENSE.txt \
             --title "Venera $VERSION" --notes-file notes.md

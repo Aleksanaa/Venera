@@ -52,5 +52,8 @@
   {"type":"Empty","component":"InputEmpty","value":{"extra":1},"serde":true,"schema":true},
   {"type":"SystemInfo","component":"OutputSystemInfo","value":{"collected_at":"2026-11-11T00:00:00Z","session_id":null,"sections":[]},"serde":true,"schema":true},
   {"type":"SystemInfo","component":"OutputSystemInfo","value":{"collected_at":"2026-11-11T00:00:00Z","sections":[]},"serde":true,"schema":false},
-  {"type":"SystemInfo","component":"OutputSystemInfo","value":{"collected_at":"2026-11-11T00:00:00Z","session_id":4294967295,"sections":[{"title":"GPU","rows":[{"key":"driver","value":"Venera","bad":false,"warning":""}]}]},"serde":true,"schema":true}
+  {"type":"SystemInfo","component":"OutputSystemInfo","value":{"collected_at":"2026-11-11T00:00:00Z","session_id":4294967295,"sections":[{"title":"GPU","rows":[{"key":"driver","value":"Venera","bad":false,"warning":""}]}]},"serde":true,"schema":true},
+  {"type":"SystemInfo","component":"OutputSystemInfo","value":{"collected_at":"2026-11-11T00:00:00Z","session_id":null,"sections":[{"title":"Guest","title_message":{"id":"report.guest","args":[]},"rows":[{"key":"Memory","key_message":{"id":"report.memory","args":[]},"value":"8 GB (7 GB usable)","value_message":{"id":"report.memoryValue","args":["8 GB","7 GB"],"diagnostic":"\n原始诊断 🚀"},"bad":false,"warning":"","warning_message":null}]}]},"serde":true,"schema":true},
+  {"type":"SystemInfo","component":"OutputSystemInfo","value":{"collected_at":"2026-11-11T00:00:00Z","session_id":null,"sections":[{"title":"Guest","title_message":{"id":"report.guest"},"rows":[]}]},"serde":true,"schema":false},
+  {"type":"SystemInfo","component":"OutputSystemInfo","value":{"collected_at":"2026-11-11T00:00:00Z","session_id":null,"sections":[{"title":"Guest","title_message":{"id":"report.guest","args":[12]},"rows":[]}]},"serde":false,"schema":false}
 ]

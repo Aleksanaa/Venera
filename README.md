@@ -61,6 +61,13 @@ Do take a VM snapshot first.
 After installation, you can run Venera Display Control Panel from start menu. It can help you diagnose issues
 and download updates.
 
+Setup offers Graphics, Panel, Debug collector, and VirtIO debug transport components. Graphics is required;
+the collector uses Panel and the transport package. Run setup again to modify the component selection or repair
+the installation. See the [guest guide](docs/virtio-socket-guest.md) for unattended setup and maintenance.
+
+Panel Settings and the browser workbench offer System, English, and Simplified Chinese language preferences.
+Changes take effect immediately and are remembered for the next launch.
+
 ## Building
 
 Build on Linux with the repository's Nix development shell. `flake.nix` selects the tools, including Node, Yarn,
@@ -87,16 +94,16 @@ nix develop -c scripts/build check
 scripts/build --help
 ```
 
-Installer builds prepare the WDK/SDK headers, official VirtIO serial package, Mesa drivers, KMD and main CMake
-targets. `build/release/` contains `venera-setup-<version>.exe`, its ISO, `vioserial-LICENSE.txt` and
+Installer builds prepare the WDK/SDK headers, official VirtIO socket driver/provider package, Mesa drivers, KMD and main CMake
+targets. `build/release/` contains `venera-setup-<version>.exe`, its ISO, VirtIO socket license materials and
 `nlohmann-json-LICENSE.txt`. The version comes from `build/win/setup/version.txt`; the unversioned installer is
 `build/win/setup/venera-setup.exe`. Mesa and the UMDs build for both x86_64 and i686.
 
 The workbench produces `build/debug-channel/release/venera-debug-host` and `debug-channel/web/dist`.
 Cargo downloads use `build/cargo-home` and build output uses `build/debug-channel`; existing `CARGO_HOME` and
 `CARGO_TARGET_DIR` settings take precedence for the host build and checks.
-See [host deployment](docs/virtio-serial-host.md) and [VirtIO serial packaging](docs/vioserial-distribution.md)
-for deployment and custom package configuration. Component build details live in
+See [host deployment](docs/virtio-socket-host.md) and the [guest build guide](docs/virtio-socket-guest.md)
+for deployment and package configuration. Component build details live in
 [`icd/build.sh`](icd/build.sh), [`kmd/CMakeLists.txt`](kmd/CMakeLists.txt) and [`CMakeLists.txt`](CMakeLists.txt).
 
 For testing, make `build/` visible in the guest and run this from an elevated PowerShell in `build\win\tests\win`; it

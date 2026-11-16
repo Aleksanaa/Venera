@@ -7,6 +7,8 @@ import {
 } from '@fluentui/react-components';
 import { ClipboardRegular } from '@fluentui/react-icons';
 import { useEffect, useId, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { enumLabel, formatDate } from './i18n';
 import './EventDetails.css';
 
 export type LogEvent = {
@@ -30,14 +32,15 @@ export type EventDetailsProps = {
 
 type DetailTab = 'overview' | 'metadata' | 'raw';
 const tabLabels = {
-  overview: '概览',
-  metadata: '元数据',
-  raw: '原始记录',
-};
+  overview: 'overview',
+  metadata: 'metadata',
+  raw: 'raw',
+} as const;
 
 export function EventDetails({ selected, detailError }: EventDetailsProps) {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<DetailTab>('overview');
-  const [copyState, setCopyState] = useState('');
+  const [copyState, setCopyState] = useState<'' | 'copied' | 'copyFailed'>('');
   const selection = useRef(selected);
   selection.current = selected;
   const id = useId();
@@ -51,15 +54,15 @@ export function EventDetails({ selected, detailError }: EventDetailsProps) {
     const event = selected;
     try {
       await navigator.clipboard.writeText(event.raw_message);
-      if (selection.current === event) setCopyState('已复制');
+      if (selection.current === event) setCopyState('copied');
     } catch {
-      if (selection.current === event) setCopyState('复制失败，请重试');
+      if (selection.current === event) setCopyState('copyFailed');
     }
   }
 
   return (
-    <section className="event-details" aria-label="事件详情">
-      <h2 className="event-details-title">事件详情</h2>
+    <section className="event-details" aria-label={t('eventDetails')}>
+      <h2 className="event-details-title">{t('eventDetails')}</h2>
       {detailError && (
         <MessageBar intent="error">
           <MessageBarBody>{detailError}</MessageBarBody>
@@ -69,7 +72,7 @@ export function EventDetails({ selected, detailError }: EventDetailsProps) {
         <>
           <TabList
             className="event-details-tabs"
-            aria-label="详情视图"
+            aria-label={t('detailViews')}
             selectedValue={tab}
             onTabSelect={(_, data) => setTab(data.value as DetailTab)}
           >
@@ -80,7 +83,7 @@ export function EventDetails({ selected, detailError }: EventDetailsProps) {
                 id={`${id}-${value}`}
                 aria-controls={`${id}-panel`}
               >
-                {tabLabels[value]}
+                {t(tabLabels[value])}
               </Tab>
             ))}
           </TabList>
@@ -94,22 +97,22 @@ export function EventDetails({ selected, detailError }: EventDetailsProps) {
             {tab === 'overview' && (
               <>
                 <dl>
-                  <dt>事件编号</dt>
+                  <dt>{t('eventId')}</dt>
                   <dd>{selected.id}</dd>
-                  <dt>接收时间</dt>
-                  <dd>{selected.received_at}</dd>
-                  <dt>类型</dt>
-                  <dd>{selected.message.type ?? '事件'}</dd>
-                  <dt>组件</dt>
+                  <dt>{t('receivedAt')}</dt>
+                  <dd>{formatDate(selected.received_at)}</dd>
+                  <dt>{t('type')}</dt>
+                  <dd>{enumLabel(selected.message.type ?? 'event')}</dd>
+                  <dt>{t('component')}</dt>
                   <dd>{selected.message.component ?? '—'}</dd>
-                  <dt>级别</dt>
-                  <dd>{selected.message.level ?? '—'}</dd>
-                  <dt>程序</dt>
+                  <dt>{t('level')}</dt>
+                  <dd>{enumLabel(selected.message.level ?? '—')}</dd>
+                  <dt>{t('program')}</dt>
                   <dd>{selected.message.process?.exe_path ?? '—'}</dd>
-                  <dt>进程编号</dt>
+                  <dt>{t('processId')}</dt>
                   <dd>{selected.message.process?.pid ?? '—'}</dd>
                 </dl>
-                <h3>正文</h3>
+                <h3>{t('message')}</h3>
                 <pre>
                   {selected.message.text ?? JSON.stringify(selected.message)}
                 </pre>
@@ -125,9 +128,9 @@ export function EventDetails({ selected, detailError }: EventDetailsProps) {
                     icon={<ClipboardRegular />}
                     onClick={() => void copyRaw()}
                   >
-                    复制原始 JSON
+                    {t('copyRaw')}
                   </Button>
-                  {copyState && <span role="status">{copyState}</span>}
+                  {copyState && <span role="status">{t(copyState)}</span>}
                 </div>
                 <pre>{selected.raw_message}</pre>
               </>
@@ -135,9 +138,7 @@ export function EventDetails({ selected, detailError }: EventDetailsProps) {
           </div>
         </>
       ) : (
-        <p className="event-details-empty">
-          选择一条事件，查看完整正文、元数据与原始记录。
-        </p>
+        <p className="event-details-empty">{t('selectEvent')}</p>
       )}
     </section>
   );

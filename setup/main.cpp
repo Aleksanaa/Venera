@@ -2,8 +2,9 @@
 // venera-setup.exe: the installer, a wizard window (ui.cpp) with the log in view while it works. It checks the system (Windows 11 x64, a VirtIO GPU, Secure Boot off, test signing
 // on; it offers to turn test signing on), says what it will replace, and installs, updates or reinstalls the driver
 // package (install.cpp). The copy it leaves in Program Files uninstalls.
-//   venera-setup.exe [/S] [/testsigning]     install or update; /S: silently; /testsigning: with /S, turn test signing
-//                                         on if it is off (then restart and run it again)
+//   venera-setup.exe [/S] [/components=graphics,panel,collector,transport] [/testsigning]
+//   venera-setup.exe /modify [/S] [/components=graphics,panel,collector,transport]
+//   venera-setup.exe /repair [/S]
 //   venera-setup.exe /uninstall [/S]
 //   venera-setup.exe /cleanup              run by a one-shot task at the boot after an install (install.cpp)
 // Exit codes as MSI's: 0 done, 3010 done but restart, 1602 cancelled, 1603 failed, 1633 this system cannot take it
@@ -16,6 +17,8 @@
 #include <cwchar>
 #include <memory>
 #include <mutex>
+#include <algorithm>
+#include <cwctype>
 
 namespace {
 
@@ -24,11 +27,12 @@ constexpr int kDone = 0, kRestart = ERROR_SUCCESS_REBOOT_REQUIRED, kCancelled = 
               kRunning = ERROR_INSTALL_ALREADY_RUNNING;
 constexpr wchar_t kTitle[] = L"Venera Setup";
 constexpr int kButtonPrimary = 100, kButtonReboot = 102;
+constexpr int kModify = 103, kRepair = 104, kUninstall = 105;
 
 struct Options {
     bool silent = false, uninstall = false, test_signing = false, cleanup = false;
-    bool vioserial_only = false;
-    int vioserial = -1;
+    bool modify = false, repair = false, has_components = false;
+    components::Selection selected;
 };
 
 std::wstring version, build_id;
@@ -79,8 +83,9 @@ int run_work(const std::wstring& heading, const std::function<bool(const Progres
         }
     }
     if (!error.empty()) {
-        if (wizard)
-            wizard->ask({heading, L"Log: " + log_path(), {}, L"Failed: " + error, {{IDCANCEL, L"Close"}}});
+        if (wizard && wizard->ask({heading, L"Log: " + log_path(), {}, L"Failed: " + error,
+                                  {{kButtonPrimary, L"Retry"}, {IDCANCEL, L"Close"}}}) == kButtonPrimary)
+            return run_work(heading, work, done_text);
         return kFailed;
     }
     log(done_text);
@@ -149,59 +154,65 @@ std::wstring warnings(const SystemState& s)
     return w;
 }
 
-bool confirm_install(const SystemState& s, bool& vioserial)
+bool confirm_install(const SystemState& s, components::Selection& selected, components::Action action)
 {
-    std::wstring heading, action = L"Install";
-    if (s.installed_version.empty()) {
-        heading = L"Install Venera " + version;
-    } else {
-        int c = compare_versions(version, s.installed_version);
-        action = c > 0 ? L"Update" : c == 0 ? L"Reinstall" : L"Downgrade";
-        heading = c > 0  ? L"Update Venera " + s.installed_version + L" to " + version
-                : c == 0 ? L"Reinstall Venera " + version
-                         : L"Replace Venera " + s.installed_version + L" with the older " + version;
-    }
-    std::wstring text = L"Venera brings Direct3D 9 to 12, Vulkan and OpenGL to the VirtIO GPU, rendered on the host's "
-                        L"GPU through Venus.";
-    if (s.device_driver.empty())
-        text += L"\n\nThe VirtIO GPU has no driver configured now.";
-    else if (_wcsicmp(s.device_provider.c_str(), kProvider) != 0)
-        text += format(L"\n\nThe VirtIO GPU runs on %ls (%ls %ls) now; Venera replaces it.", s.device_driver.c_str(),
-                       s.device_provider.c_str(), s.device_version.c_str());
-    std::wstring others;
-    for (const auto& p : s.packages)
-        if (!p.ours())
-            others += format(L"\n  •  %ls %ls (%ls)", p.provider.c_str(), p.version.c_str(), p.inf.c_str());
-    if (!others.empty())
-        text += L"\n\nThese drivers for it are removed from the driver store, so that Windows does not pick them "
-                L"over Venera again:" + others;
-    if (!s.cert_exists)
-        text += std::wstring(L"\n\nThe installer signs the driver package with a certificate it creates on this "
-                             L"computer, \"") + kCertSubject + L"\", and trusts it, so that Windows installs the "
-                L"package without asking. Its private key cannot leave this computer. Uninstalling removes it.";
-    std::wstring w = warnings(s);
-    if (!w.empty())
-        text += L"\n\nWarnings:" + w;
-    text += L"\n\nThe new driver starts at the next reboot; the drivers it replaces are removed then.";
-    Page page{heading, {}, text, L"Ready.", {{kButtonPrimary, action}, {IDCANCEL, L"Cancel"}}};
-    if (vioserial_available()) {
-        page.option = L"Install the VirtIO serial driver for debug logging";
-        page.option_checked = vioserial;
-    }
+    const std::wstring label = action == components::Action::Modify ? L"Apply" :
+        action == components::Action::Repair ? L"Repair" : action == components::Action::Update ? L"Update" : L"Install";
+    Page page{action == components::Action::Modify ? L"Choose your Venera components" :
+                  action == components::Action::Repair ? L"Repair Venera" : L"Install Venera " + version,
+              L"Select the features for this virtual machine", {}, L"Ready.",
+              {{kButtonPrimary, label}, {IDCANCEL, L"Cancel"}}};
+    page.component_page = action == components::Action::Install || action == components::Action::Modify;
+    page.selected = selected;
+    page.transport_available = s.components.transport_available;
+    page.transport_ready = s.components.transport_ready;
     bool confirmed = wizard->ask(page) == kButtonPrimary;
-    vioserial = vioserial_available() && wizard->option_checked();
+    if (page.component_page)
+        selected = wizard->selection();
     return confirmed;
 }
 
+int run_uninstall();
+
 int run_install(const Options& opts)
 {
-    bool vioserial = vioserial_available() && opts.vioserial != 0;
-    if (opts.silent && opts.vioserial == -1)
-        fail(L"Choose /with-vioserial or /skip-vioserial for unattended installation", ERROR_INVALID_PARAMETER);
-    if (opts.vioserial == 1 && !vioserial_available())
-        fail(L"The VirtIO serial driver package is unavailable in this installer", ERROR_FILE_NOT_FOUND);
     SystemState s = inspect();
     log(s.summary());
+    auto action = opts.modify ? components::Action::Modify : opts.repair ? components::Action::Repair :
+        s.components.installed ? components::Action::Update : components::Action::Install;
+    if ((opts.modify || opts.repair) && !s.components.installed)
+        fail(L"Install Venera before running maintenance", ERROR_UNKNOWN_PRODUCT);
+    if (wizard && s.components.installed && !opts.modify && !opts.repair) {
+        std::wstring status = format(L"Graphics: %ls   Panel: %ls   Debug collector: %ls   Debug transport: %ls",
+            s.components.graphics ? L"installed" : L"needs repair", s.components.panel ? L"installed" : L"available",
+            s.components.collector ? L"installed" : L"available", s.components.transport_ready ? L"ready" : L"needs setup");
+        Page home{L"Maintain Venera " + s.installed_version, status, {}, L"Choose a task.",
+                  {{kModify, L"Modify"}, {kRepair, L"Repair"}, {kUninstall, L"Uninstall"}, {IDCANCEL, L"Close"}}};
+        if (compare_versions(version, s.installed_version) > 0)
+            home.buttons.insert(home.buttons.begin(), {kButtonPrimary, L"Update"});
+        int choice = wizard->ask(home);
+        if (choice == IDCANCEL)
+            return kCancelled;
+        if (choice == kUninstall)
+            return run_uninstall();
+        action = choice == kModify ? components::Action::Modify : choice == kRepair ? components::Action::Repair :
+            components::Action::Update;
+    }
+    auto selected = opts.has_components ? opts.selected : components::current_selection(s.components);
+    auto validate = [&] {
+        auto plan = components::plan(s.components, action, selected);
+        if (!plan.error.empty())
+            fail(std::wstring(plan.error.begin(), plan.error.end()), ERROR_INVALID_PARAMETER);
+        return plan;
+    };
+    if (opts.silent)
+        validate();
+    if (wizard && !confirm_install(s, selected, action))
+        return kCancelled;
+    const auto plan = validate();
+    if (!plan.graphics)
+        return run_work(L"Modifying Venera", [&s, plan](const Progress& p) { return install(s, version, p, plan); },
+                        L"Venera components are configured");
     if (!s.x64 || s.build < 22000)
         return blocked(s, L"Venera needs 64-bit Windows 11",
                        format(L"This is Windows build %lu%ls.", s.build, s.x64 ? L"" : L", not x64"));
@@ -222,21 +233,9 @@ int run_install(const Options& opts)
     std::wstring w = warnings(s);
     if (!w.empty())
         log(L"Warnings:" + w);
-    if (wizard && !confirm_install(s, vioserial))
-        return kCancelled;
-    return run_work(L"Installing Venera " + version, [&s, vioserial](const Progress& p) { return install(s, version, p, vioserial); },
+    return run_work(action == components::Action::Repair ? L"Repairing Venera" : L"Installing Venera " + version,
+                    [&s, plan](const Progress& p) { return install(s, version, p, plan); },
                     L"Venera " + version + L" is installed");
-}
-
-int run_vioserial()
-{
-    if (!vioserial_available())
-        fail(L"The VirtIO serial driver package is unavailable in this installer", ERROR_FILE_NOT_FOUND);
-    if (wizard && wizard->ask({L"Install the VirtIO serial driver", {},
-                              L"Connect Venera debug logging to the virtual machine's VirtIO serial controller.",
-                              L"Ready.", {{kButtonPrimary, L"Install"}, {IDCANCEL, L"Cancel"}}}) != kButtonPrimary)
-        return kCancelled;
-    return run_work(L"Installing the VirtIO serial driver", install_vioserial, L"The VirtIO serial driver is installed");
 }
 
 int run_uninstall()
@@ -392,11 +391,27 @@ DWORD run(const std::wstring& exe, const std::wstring& args)
     }
     std::string output;
     char buf[4096];
-    DWORD n;
-    while (ReadFile(read_end, buf, sizeof(buf), &n, nullptr) && n)
-        output.append(buf, n);
+    const auto deadline = GetTickCount64() + 300000;
+    bool timed_out = false;
+    for (;;) {
+        DWORD available = 0, n = 0;
+        for (int reads = 0; reads < 16 && PeekNamedPipe(read_end, nullptr, 0, nullptr, &available, nullptr) &&
+             available; ++reads) {
+            if (!ReadFile(read_end, buf, std::min<DWORD>(sizeof(buf), available), &n, nullptr) || !n)
+                break;
+            output.append(buf, n);
+        }
+        if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0 && available == 0)
+            break;
+        if (GetTickCount64() >= deadline) {
+            timed_out = true;
+            TerminateProcess(pi.hProcess, ERROR_TIMEOUT);
+            WaitForSingleObject(pi.hProcess, 5000);
+            break;
+        }
+        Sleep(50);
+    }
     CloseHandle(read_end);
-    WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
@@ -404,6 +419,8 @@ DWORD run(const std::wstring& exe, const std::wstring& args)
     std::wstring wide(MultiByteToWideChar(CP_OEMCP, 0, output.data(), output.size(), nullptr, 0), L'\0');
     MultiByteToWideChar(CP_OEMCP, 0, output.data(), output.size(), wide.data(), wide.size());
     log(format(L"%ls: exit code %lu\n%ls", cmd.c_str(), code, wide.c_str()));
+    if (timed_out)
+        fail(L"Running " + exe + L" timed out", ERROR_TIMEOUT);
     return code;
 }
 
@@ -426,36 +443,47 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     version = resource_string(1);
     build_id = resource_string(2);
     Options opts;
+    bool invalid = false;
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
         std::wstring a = argv[i];
+        std::transform(a.begin(), a.end(), a.begin(), [](wchar_t c) { return std::towlower(c); });
         if (_wcsicmp(a.c_str(), L"/S") == 0 || _wcsicmp(a.c_str(), L"/quiet") == 0)
             opts.silent = true;
         else if (_wcsicmp(a.c_str(), L"/uninstall") == 0)
             opts.uninstall = true;
+        else if (a == L"/modify")
+            opts.modify = true;
+        else if (a == L"/repair")
+            opts.repair = true;
+        else if (a.rfind(L"/components=", 0) == 0) {
+            const auto text = a.substr(12);
+            invalid |= opts.has_components || !components::parse_selection(std::string(text.begin(), text.end()), opts.selected);
+            opts.has_components = true;
+        }
         else if (_wcsicmp(a.c_str(), L"/testsigning") == 0)
             opts.test_signing = true;
         else if (_wcsicmp(a.c_str(), L"/cleanup") == 0)
             opts.cleanup = opts.silent = true;
-        else if (_wcsicmp(a.c_str(), L"/vioserial") == 0)
-            opts.vioserial_only = true;
-        else if (_wcsicmp(a.c_str(), L"/with-vioserial") == 0)
-            opts.vioserial = 1;
-        else if (_wcsicmp(a.c_str(), L"/skip-vioserial") == 0)
-            opts.vioserial = 0;
         else {
-            MessageBoxW(nullptr,
-                         L"venera-setup.exe [/S /with-vioserial | /S /skip-vioserial] [/testsigning]\n    Install or update; /S silently; /testsigning with "
-                         L"/S: turn test signing on if it is off.\n\nvenera-setup.exe /uninstall [/S]\n\n"
-                         L"venera-setup.exe /vioserial [/S]\n    Install the VirtIO serial driver.",
-                        kTitle, MB_ICONINFORMATION);
-            return a == L"/?" ? kDone : ERROR_INVALID_PARAMETER;
+            if (a == L"/?" && argc == 2) {
+                MessageBoxW(nullptr,
+                    L"venera-setup.exe [/S] [/components=graphics,panel,collector,transport] [/testsigning]\n\n"
+                    L"venera-setup.exe /modify [/S] [/components=graphics,panel,collector,transport]\n\n"
+                    L"venera-setup.exe /repair [/S]\n\nvenera-setup.exe /uninstall [/S]",
+                    kTitle, MB_ICONINFORMATION);
+                LocalFree(argv);
+                return kDone;
+            }
+            invalid = true;
         }
     }
     LocalFree(argv);
-    if (static_cast<int>(opts.uninstall) + static_cast<int>(opts.cleanup) +
-            static_cast<int>(opts.vioserial_only) > 1) {
+    if (invalid || static_cast<int>(opts.uninstall) + static_cast<int>(opts.cleanup) +
+            static_cast<int>(opts.modify) + static_cast<int>(opts.repair) > 1 ||
+        (opts.has_components && (opts.uninstall || opts.cleanup || opts.repair)) ||
+        (opts.test_signing && (opts.uninstall || opts.cleanup))) {
         if (!opts.silent)
             MessageBoxW(nullptr, L"Choose an installation task.", kTitle, MB_ICONINFORMATION);
         return ERROR_INVALID_PARAMETER;
@@ -477,7 +505,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             cleanup();
             code = kDone;
         } else {
-            code = opts.vioserial_only ? run_vioserial() : opts.uninstall ? run_uninstall() : run_install(opts);
+            code = opts.uninstall ? run_uninstall() : run_install(opts);
         }
     } catch (const Failure& f) {
         log(L"Failed: " + f.message);

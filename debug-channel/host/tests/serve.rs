@@ -12,6 +12,383 @@ use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_venera-debug-host");
 
+#[test]
+fn help_lists_service_and_history_commands() {
+    let output = Command::new(BIN).arg("--help").output().unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    let commands: Vec<_> = help
+        .lines()
+        .filter_map(|line| {
+            if line.starts_with("  ") {
+                line.split_whitespace().next()
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(commands.contains(&"serve"));
+    assert!(commands.contains(&"export"));
+    assert!(!commands.contains(&"receive"));
+    assert!(!commands.contains(&"web"));
+}
+
+#[test]
+fn serve_cli_validates_guest_addresses_before_initialization() {
+    let dir = TempDir::new().unwrap();
+    for (cid, port) in [
+        ("0", "49152"),
+        ("1", "49152"),
+        ("2", "49152"),
+        ("4294967295", "49152"),
+        ("42", "0"),
+        ("42", "4294967295"),
+        ("guest", "49152"),
+    ] {
+        let output = Command::new(BIN)
+            .args(["serve", "--cid", cid, "--port", port, "--database"])
+            .arg(dir.path().join("history.db"))
+            .args(["--max-bytes", "1048576", "--control"])
+            .arg(dir.path().join("control.sock"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("invalid value"));
+    }
+    assert!(!dir.path().join("history.db").exists());
+    let output = Command::new(BIN)
+        .args(["serve", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--cid <CID>"), "{help}");
+    assert!(help.contains("--port <PORT>"), "{help}");
+    assert!(help.contains("[default: 49152]"), "{help}");
+}
+
+#[cfg(not(feature = "web"))]
+#[test]
+fn dashboard_request_reports_build_requirement() {
+    let dir = TempDir::new().unwrap();
+    let output = Command::new(BIN)
+        .args(["serve", "--cid", "42"])
+        .arg("--database")
+        .arg(dir.path().join("history.db"))
+        .args(["--max-bytes", "1048576", "--control"])
+        .arg(dir.path().join("control.sock"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "Build with the web feature to serve the dashboard, or select --no-web\n"
+    );
+    assert!(!dir.path().join("control.sock").exists());
+    assert!(!dir.path().join("history.db").exists());
+}
+
+#[cfg(feature = "web")]
+fn serve_command(dir: &Path, addr: std::net::SocketAddr) -> Command {
+    let mut command = mock_service(dir, "1048576");
+    command
+        .env("VENERA_TEST_WEB", addr.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    command
+}
+
+#[cfg(feature = "web")]
+fn http(addr: std::net::SocketAddr, path: &str) -> Value {
+    use std::net::TcpStream;
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(stream, "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    assert_eq!(headers.split_whitespace().nth(1), Some("200"), "{response}");
+    serde_json::from_str(body).unwrap()
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn combined_service_captures_controls_reconnects_and_restarts() {
+    use std::net::TcpListener;
+    let dir = TempDir::new().unwrap();
+    let listener = UnixListener::bind(dir.path().join("guest.sock")).unwrap();
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = tcp.local_addr().unwrap();
+    drop(tcp);
+    let mut service = Receiver(serve_command(dir.path(), addr).spawn().unwrap());
+    let mut guest = accept(&listener);
+    let mut reader = BufReader::new(guest.try_clone().unwrap());
+    bootstrap(&mut guest, &mut reader);
+    let initial = read_request(&mut reader, "status.get");
+    send(
+        &mut guest,
+        result(initial["id"].as_str().unwrap(), status()),
+    );
+    let literal = r#"{ "jsonrpc":"2.0", "method":"log", "params":{"stream_id":"once","seq":"1","observed_at":"2026-11-10T08:00:01Z","source":"dbwin","component":"dxvk","level":"trace","raw_level":"trace","text":"combined 🙂","counter":18446744073709551615} }"#;
+    writeln!(guest, "{literal}").unwrap();
+    wait_for(dir.path(), |rows| {
+        rows.iter().any(|r| r["message"]["text"] == "combined 🙂")
+    });
+    assert_eq!(http(addr, "/api/health"), json!({"status":"ok"}));
+    let history = http(addr, "/api/events?q=combined");
+    assert_eq!(history["events"].as_array().unwrap().len(), 1);
+    assert_eq!(history["events"][0]["raw_message"], literal);
+    assert_eq!(http(addr, "/api/connection")["ready"], true);
+    let web = std::thread::spawn(move || http(addr, "/api/system-info"));
+    let request = read_request(&mut reader, "system.info.get");
+    let report = json!({"collected_at":"2026-11-11T00:00:00Z","session_id":1,"sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Venera","bad":false,"warning":""}]}]});
+    send(&mut guest, result(request["id"].as_str().unwrap(), report));
+    assert_eq!(
+        web.join().unwrap(),
+        json!({"major":1,"type":"system.info.result","request_id":"web","ok":true,"collected_at":"2026-11-11T00:00:00Z","session_id":1,"sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Venera","bad":false,"warning":""}]}]})
+    );
+    let web = std::thread::spawn(move || http(addr, "/api/system-info"));
+    let request = read_request(&mut reader, "system.info.get");
+    send(
+        &mut guest,
+        json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32001,"message":"System report collection timed out","data":{"retry_after_ms":1000}}}),
+    );
+    assert_eq!(
+        web.join().unwrap(),
+        json!({"major":1,"type":"system.info.result","request_id":"web","ok":false,"error":{"code":-32001,"message":"System report collection timed out","data":{"retry_after_ms":1000}}})
+    );
+    let cli = Command::new(BIN)
+        .args(["status", "--control"])
+        .arg(dir.path().join("control.sock"))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let request = read_request(&mut reader, "status.get");
+    send(
+        &mut guest,
+        result(request["id"].as_str().unwrap(), status()),
+    );
+    let output = cli.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        result("cli", status())
+    );
+    drop(listener);
+    std::fs::remove_file(dir.path().join("guest.sock")).unwrap();
+    drop(reader);
+    drop(guest);
+    wait_for(dir.path(), |rows| {
+        rows.iter().any(|r| r["message"]["connected"] == false)
+    });
+    assert_eq!(http(addr, "/api/connection")["connected"], false);
+    assert_eq!(
+        http(addr, "/api/events?q=combined")["events"],
+        history["events"]
+    );
+    let listener = UnixListener::bind(dir.path().join("guest.sock")).unwrap();
+    let mut guest = accept(&listener);
+    let mut reader = BufReader::new(guest.try_clone().unwrap());
+    bootstrap(&mut guest, &mut reader);
+    let initial = read_request(&mut reader, "status.get");
+    send(
+        &mut guest,
+        result(initial["id"].as_str().unwrap(), status()),
+    );
+    assert_eq!(http(addr, "/api/connection")["ready"], true);
+    // Keep a guest request in flight while the service stops.
+    let pending_http = std::thread::spawn(move || {
+        use std::net::TcpStream;
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "GET /api/system-info HTTP/1.0\r\nHost: localhost\r\n\r\n"
+        )
+        .unwrap();
+        let mut body = String::new();
+        stream.read_to_string(&mut body).unwrap();
+        body
+    });
+    read_request(&mut reader, "system.info.get");
+    let started = Instant::now();
+    assert!(Command::new("kill")
+        .args(["-TERM", &service.0.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = service.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "service stop timed out");
+        sleep(Duration::from_millis(10));
+    }
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(pending_http.join().unwrap().contains("503"));
+    assert!(!dir.path().join("control.sock").exists());
+    drop(reader);
+    drop(guest);
+    let _restarted = Receiver(serve_command(dir.path(), addr).spawn().unwrap());
+    let _guest = accept(&listener);
+    assert_eq!(
+        http(addr, "/api/events?q=combined")["events"],
+        history["events"]
+    );
+    let db = Connection::open(dir.path().join("history.db")).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM events WHERE json_extract(message,'$.text')='combined 🙂'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn startup_failures_release_owned_resources() {
+    use std::net::TcpListener;
+    for failure in ["database", "control", "tcp"] {
+        let dir = TempDir::new().unwrap();
+        let guest = UnixListener::bind(dir.path().join("guest.sock")).unwrap();
+        guest.set_nonblocking(true).unwrap();
+        let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let occupied = if failure == "tcp" {
+            Some(tcp)
+        } else {
+            drop(tcp);
+            None
+        };
+        if failure == "database" {
+            std::fs::write(dir.path().join("history.db"), "broken database").unwrap();
+        }
+        if failure == "control" {
+            std::fs::write(dir.path().join("control.sock"), "existing file").unwrap();
+        }
+        let started = Instant::now();
+        let mut service = Receiver(serve_command(dir.path(), addr).spawn().unwrap());
+        loop {
+            if let Some(status) = service.0.try_wait().unwrap() {
+                assert!(!status.success(), "{failure}");
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{failure} startup hung"
+            );
+            sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            guest.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        if failure == "control" {
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("control.sock")).unwrap(),
+                "existing file"
+            );
+        } else {
+            assert!(!dir.path().join("control.sock").exists());
+        }
+        drop(occupied);
+        let _released = TcpListener::bind(addr).unwrap();
+    }
+}
+
+#[cfg(feature = "web")]
+#[test]
+fn collection_failure_stops_http_and_cleans_control() {
+    use std::net::TcpListener;
+    let dir = TempDir::new().unwrap();
+    let listener = UnixListener::bind(dir.path().join("guest.sock")).unwrap();
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = tcp.local_addr().unwrap();
+    drop(tcp);
+    let mut service = Receiver(serve_command(dir.path(), addr).spawn().unwrap());
+    let mut guest = accept(&listener);
+    assert_eq!(http(addr, "/api/health"), json!({"status":"ok"}));
+    let db = Connection::open(dir.path().join("history.db")).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_log BEFORE INSERT ON events WHEN json_extract(NEW.message,'$.type')='log' BEGIN SELECT RAISE(ABORT,'collection fixture failure'); END;").unwrap();
+    send(&mut guest, log(1, "trigger failure"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = service.0.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "service did not stop after collection failed"
+        );
+        sleep(Duration::from_millis(10));
+    }
+    let mut diagnostic = String::new();
+    service
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut diagnostic)
+        .unwrap();
+    assert!(
+        diagnostic.contains("collection fixture failure"),
+        "{diagnostic}"
+    );
+    assert!(!dir.path().join("control.sock").exists());
+    let _released = TcpListener::bind(addr).unwrap();
+}
+
+#[test]
+fn headless_interrupt_closes_partial_control_and_cleans_socket() {
+    let dir = TempDir::new().unwrap();
+    let mut service = start(dir.path(), "1048576");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut client = loop {
+        if let Ok(client) = UnixStream::connect(dir.path().join("control.sock")) {
+            break client;
+        }
+        assert!(service.0.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline);
+        sleep(Duration::from_millis(10));
+    };
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    client.write_all(b"{\"jsonrpc\":").unwrap();
+    assert!(Command::new("kill")
+        .args(["-INT", &service.0.id().to_string()])
+        .status()
+        .unwrap()
+        .success());
+    loop {
+        if let Some(status) = service.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "interrupt timed out");
+        sleep(Duration::from_millis(10));
+    }
+    let mut response = String::new();
+    match client.read_to_string(&mut response) {
+        Ok(_) => assert_eq!(response, ""),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset),
+    }
+    assert!(!dir.path().join("control.sock").exists());
+    let _released = UnixListener::bind(dir.path().join("control.sock")).unwrap();
+}
+
 fn discovery() -> Value {
     serde_json::from_str(include_str!("../../protocol/v1/guest.openrpc.json")).unwrap()
 }
@@ -97,18 +474,69 @@ impl Drop for Receiver {
 }
 fn start(dir: &Path, budget: &str) -> Receiver {
     Receiver(
-        Command::new(BIN)
-            .args(["receive", "--socket"])
-            .arg(dir.join("guest.sock"))
-            .args(["--database"])
-            .arg(dir.join("history.db"))
-            .args(["--max-bytes", budget, "--control"])
-            .arg(dir.join("control.sock"))
+        mock_service(dir, budget)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
     )
+}
+
+fn mock_service(dir: &Path, budget: &str) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--ignored", "--exact", "injected_service", "--nocapture"])
+        .env("VENERA_TEST_DIR", dir)
+        .env("VENERA_TEST_BUDGET", budget);
+    command
+}
+
+#[test]
+#[ignore]
+fn injected_service() {
+    struct UnixConnector(std::path::PathBuf);
+    struct Chunked(UnixStream);
+    impl Read for Chunked {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let len = bytes.len().min(4096);
+            self.0.read(&mut bytes[..len])
+        }
+    }
+    impl Write for Chunked {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(&bytes[..bytes.len().min(31)])
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.flush()
+        }
+    }
+    impl venera_debug_host::transport::Connector for UnixConnector {
+        fn connect(
+            &mut self,
+            _: Duration,
+        ) -> std::io::Result<Box<dyn venera_debug_host::transport::Stream>> {
+            let stream = UnixStream::connect(&self.0)?;
+            stream.set_nonblocking(true)?;
+            Ok(Box::new(Chunked(stream)))
+        }
+    }
+    let dir = std::path::PathBuf::from(std::env::var_os("VENERA_TEST_DIR").unwrap());
+    let web = std::env::var("VENERA_TEST_WEB").ok();
+    if let Err(error) = venera_debug_host::serve(
+        UnixConnector(dir.join("guest.sock")),
+        dir.join("history.db"),
+        std::env::var("VENERA_TEST_BUDGET")
+            .unwrap()
+            .parse()
+            .unwrap(),
+        dir.join("control.sock"),
+        Some(dir),
+        web.as_deref().unwrap_or("127.0.0.1:8787").parse().unwrap(),
+        web.is_none(),
+    ) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 }
 fn accept(listener: &UnixListener) -> UnixStream {
     listener.set_nonblocking(true).unwrap();
@@ -218,6 +646,7 @@ fn connection_query_tracks_live_receiver_and_disconnect() {
     };
     let connected = query();
     assert_eq!(connected["result"]["connected"], true);
+    assert_eq!(connected["result"]["transport"], "VirtIO socket");
     send(&mut guest, log(1, "connection time"));
     wait_for(dir.path(), |rows| {
         rows.iter().any(|r| r["message"]["seq"] == "1")
@@ -462,7 +891,8 @@ fn service_termination_and_restart_preserve_committed_history() {
         .status()
         .unwrap()
         .success());
-    let _ = receiver.0.wait();
+    assert!(receiver.0.wait().unwrap().success());
+    assert!(!dir.path().join("control.sock").exists());
     drop(guest);
     let _receiver = start(dir.path(), "131072");
     let mut guest = accept(&listener);

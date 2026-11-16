@@ -6,6 +6,7 @@
 #include <setupapi.h>
 #include <wincrypt.h>
 #include <winternl.h>
+#include <shellapi.h>
 
 #include <algorithm>
 #include <cwctype>
@@ -198,6 +199,44 @@ SystemState inspect()
     s.installed_version = reg_string(HKEY_LOCAL_MACHINE, kUninstallKey, L"DisplayVersion");
     s.packages = gpu_packages();
     s.cert_exists = has_cert();
+    auto& c = s.components;
+    c.installed = !s.installed_version.empty();
+    c.graphics = std::any_of(s.packages.begin(), s.packages.end(), [](const auto& p) { return p.ours(); });
+    c.installed |= c.graphics;
+    if (c.graphics && !s.device_inf.empty())
+        c.collector_coupled = upper(read_inf_text(std::filesystem::path(known_folder(FOLDERID_Windows)) /
+            L"INF" / s.device_inf)).find(L"VENERADEBUGGUEST,") != std::wstring::npos;
+    const auto panel = known_folder(FOLDERID_ProgramFiles) + L"\\Venera\\" + kPanelExe;
+    c.panel = std::filesystem::is_regular_file(panel) &&
+        std::filesystem::is_regular_file(known_folder(FOLDERID_ProgramFiles) + L"\\Venera\\" + kPanelCom) &&
+        std::filesystem::is_regular_file(known_folder(FOLDERID_CommonPrograms) + L"\\Venera\\" + kPanelName + L".lnk") &&
+        !reg_string(HKEY_CLASSES_ROOT, L"DesktopBackground\\Shell\\Venera\\command", nullptr).empty();
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    SC_HANDLE service = scm ? OpenServiceW(scm, L"VeneraDebugGuest", SERVICE_QUERY_CONFIG) : nullptr;
+    if (service) {
+        std::vector<BYTE> buffer(8192);
+        DWORD needed = 0;
+        auto config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buffer.data());
+        if (QueryServiceConfigW(service, config, buffer.size(), &needed)) {
+            int count = 0;
+            auto args = CommandLineToArgvW(config->lpBinaryPathName, &count);
+            if (args && count == 2 && _wcsicmp(args[1], L"service") == 0 &&
+                _wcsicmp(std::filesystem::path(args[0]).filename().c_str(), L"venera-debug-guest.exe") == 0) {
+                s.collector_path = args[0];
+                c.collector = std::filesystem::is_regular_file(s.collector_path);
+            }
+            LocalFree(args);
+        }
+        CloseServiceHandle(service);
+    }
+    if (scm)
+        CloseServiceHandle(scm);
+    c.transport_ready = viosock_ready();
+    c.transport_available = viosock_available();
+    DWORD flags = reg_dword(HKEY_LOCAL_MACHINE, kUninstallKey, L"SelectedComponents", MAXDWORD);
+    c.selection_recorded = flags != MAXDWORD;
+    if (c.selection_recorded)
+        c.requested = {true, (flags & 2) != 0, (flags & 4) != 0, (flags & 8) != 0};
     return s;
 }
 

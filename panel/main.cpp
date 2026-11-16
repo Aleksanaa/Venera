@@ -318,8 +318,8 @@ void Window::contextMenu(int id, POINT screen)
         ui_.selectAll(id);
     InvalidateRect(hwnd_, nullptr, FALSE);
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 1, L"Copy\tCtrl+C");
-    AppendMenuW(menu, MF_STRING, 2, L"Select all\tCtrl+A");
+    AppendMenuW(menu, MF_STRING, 1, locale::text(IDS_CopyMenu));
+    AppendMenuW(menu, MF_STRING, 2, locale::text(IDS_SelectAllMenu));
     int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y, 0, hwnd_, nullptr);
     DestroyMenu(menu);
     if (cmd == 1)
@@ -341,6 +341,11 @@ void Window::applyScale(UINT dpi)
 LRESULT Window::proc(UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
+    case kLanguageChanged:
+        ui_.languageChanged();
+        SetWindowTextW(hwnd_, locale::text(IDS_WindowTitle));
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd_, &ps);
@@ -366,6 +371,14 @@ LRESULT Window::proc(UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
+        if (msg == WM_SETTINGCHANGE) {
+            auto before = locale::language();
+            locale::init();
+            if (before != locale::language()) {
+                ui_.languageChanged();
+                SetWindowTextW(hwnd_, locale::text(IDS_WindowTitle));
+            }
+        }
         for (auto& p : pages_)
             p->refresh();
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -573,7 +586,7 @@ int Window::run(HINSTANCE inst, int show, int page)
     UINT dpi = GetDpiForSystem();
     RECT r = {0, 0, MulDiv(1180, dpi, 96), MulDiv(760, dpi, 96)};
     AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
-    hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"Venera Display Control Panel", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+    hwnd_ = CreateWindowExW(0, wc.lpszClassName, locale::text(IDS_WindowTitle), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                             CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
     if (!hwnd_)
         return 1;
@@ -666,6 +679,7 @@ extern "C" __declspec(dllexport) const int VeneraDirect2DSoftwareOnly = 1;
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
 {
+    panel::locale::init();
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     int page = 0;

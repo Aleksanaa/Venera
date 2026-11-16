@@ -1,6 +1,6 @@
 use serde_json::json;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::mpsc::SyncSender,
     time::{Duration, Instant},
 };
@@ -8,7 +8,7 @@ use venera_debug_protocol::{
     Envelope, Filter, Message, RequestError, RequestResult, Status, Target,
 };
 
-pub(crate) mod serial {
+pub(crate) mod wire {
     use super::*;
     use serde_json::{json, Value};
     use venera_debug_protocol::v1;
@@ -35,7 +35,7 @@ pub(crate) mod serial {
             _ => {
                 return Err(serde_json::Error::io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "unsupported serial message",
+                    "unsupported remote message",
                 )))
             }
         };
@@ -176,7 +176,7 @@ pub(crate) mod serial {
     fn response(result: &RequestResult) -> Result<Value, serde_json::Error> {
         Ok(if result.ok {
             let status = result.status.as_ref().ok_or_else(|| {
-                encoding_error("successful serial response requires a status snapshot")
+                encoding_error("successful remote response requires a status snapshot")
             })?;
             json!({"jsonrpc":"2.0","id":result.request_id,"result":status_v1(status)?})
         } else {
@@ -185,9 +185,27 @@ pub(crate) mod serial {
     }
     fn system_response(result: &venera_debug_protocol::SystemInfoResult) -> Value {
         if result.ok {
-            json!({"jsonrpc":"2.0","id":result.request_id,"result":v1::SystemInfo { collected_at: result.collected_at.clone(), session_id: result.session_id, sections: result.sections.iter().map(|section| v1::SystemInfoSection { title: section.title.clone(), rows: section.rows.iter().map(|row| v1::SystemInfoRow { key: row.key.clone(), value: row.value.clone(), bad: row.bad, warning: row.warning.clone() }).collect() }).collect() }})
+            json!({"jsonrpc":"2.0","id":result.request_id,"result":v1::SystemInfo {
+                collected_at: result.collected_at.clone(), session_id: result.session_id,
+                sections: result.sections.iter().map(|section| v1::SystemInfoSection {
+                    title: section.title.clone(), title_message: section.title_message.as_ref().map(localized),
+                    rows: section.rows.iter().map(|row| v1::SystemInfoRow {
+                        key: row.key.clone(), value: row.value.clone(), bad: row.bad, warning: row.warning.clone(),
+                        key_message: row.key_message.as_ref().map(localized),
+                        value_message: row.value_message.as_ref().map(localized),
+                        warning_message: row.warning_message.as_ref().map(localized),
+                    }).collect()
+                }).collect()
+            }})
         } else {
             json!({"jsonrpc":"2.0","id":result.request_id,"error":{"code":-32000,"message":result.error.as_ref().map(|e| e.message.clone()).unwrap_or_else(|| "System report failed".into()),"data":result.error}})
+        }
+    }
+    fn localized(message: &venera_debug_protocol::LocalizedMessage) -> v1::LocalizedMessage {
+        v1::LocalizedMessage {
+            id: message.id.clone(),
+            args: message.args.clone(),
+            diagnostic: message.diagnostic.clone(),
         }
     }
 
@@ -198,6 +216,7 @@ pub(crate) mod serial {
         #[test]
         fn filter_results_encode_current_health_and_loss() {
             let mut state = State::new("run-1".into(), true);
+            state.add_peer();
             state.status.health = json!({"port":"connected","session_helper_loss":{"2":{"pid":10852,"dropped_total":18446744073709551615u64,"reported_total":9}}});
             state.status.loss = json!({"process_event_parse_errors":7,"process_capture_queue_dropped":8,"etw_events_lost":4,"process_tracking_overflow":true});
             state.dropped = u64::MAX;
@@ -219,9 +238,15 @@ pub(crate) mod serial {
                 ),
             ] {
                 let response = state.control(request, None).unwrap();
-                // Exercise the queued representation used by the serial transport.
+                // Exercise the queued representation used by remote peers.
                 state.queue_control(&response);
-                let queued = state.controls.pop_back().unwrap();
+                let queued = state
+                    .peers
+                    .get_mut(&1)
+                    .unwrap()
+                    .controls
+                    .pop_back()
+                    .unwrap();
                 let response = venera_debug_protocol::decode(&queued).unwrap();
                 let value: Value = serde_json::from_slice(&encode(&response).unwrap()).unwrap();
                 assert_eq!(
@@ -253,7 +278,7 @@ pub(crate) mod serial {
             }
             assert_eq!(
                 encode(&response).unwrap_err().to_string(),
-                "successful serial response requires a status snapshot"
+                "successful remote response requires a status snapshot"
             );
         }
 
@@ -450,16 +475,14 @@ pub struct State {
     local_sequence: u64,
     deadline: Option<Instant>,
     pub filter_started_filetime: u64,
-    pub controls: VecDeque<Vec<u8>>,
-    pub logs: VecDeque<(u64, Vec<u8>)>,
-    log_bytes: usize,
+    pub peers: BTreeMap<u64, PeerQueue>,
+    next_peer: u64,
     pub subscribers: Vec<SyncSender<Vec<u8>>>,
+    // Counts discarded deliveries across all peer queues, rather than unique captures.
     pub dropped: u64,
     pub parse_errors: u64,
-    pub pending_gap: Option<(u64, u64, u64)>,
     #[cfg(windows)]
     pub helpers: std::collections::BTreeMap<u32, venera_debug_protocol::ProcessIdentity>,
-    helper_drops: std::collections::BTreeMap<u32, (u32, u64)>,
     #[cfg(windows)]
     pub processes: crate::ancestry::Processes,
     #[cfg(windows)]
@@ -484,16 +507,13 @@ impl State {
             local_sequence: 0,
             deadline: None,
             filter_started_filetime: 0,
-            controls: VecDeque::new(),
-            logs: VecDeque::new(),
-            log_bytes: 0,
+            peers: BTreeMap::new(),
+            next_peer: 0,
             subscribers: Vec::new(),
             dropped: 0,
             parse_errors: 0,
-            pending_gap: None,
             #[cfg(windows)]
             helpers: Default::default(),
-            helper_drops: Default::default(),
             #[cfg(windows)]
             processes: Default::default(),
             #[cfg(windows)]
@@ -512,8 +532,15 @@ impl State {
         let bytes =
             venera_debug_protocol::encode(&Envelope::new(Message::Status { status })).unwrap();
         self.broadcast(bytes.clone());
-        if self.controls.len() < CONTROL_RECORDS {
-            self.controls.push_back(bytes);
+        for peer in self.peers.values_mut() {
+            if peer.closed {
+                continue;
+            }
+            if peer.control_room() {
+                peer.controls.push_back(bytes.clone());
+            } else {
+                peer.closed = true;
+            }
         }
     }
     pub fn broadcast(&mut self, bytes: Vec<u8>) {
@@ -569,13 +596,14 @@ impl State {
         }
         let bytes = venera_debug_protocol::encode(&envelope).unwrap();
         if bytes.len() > venera_debug_protocol::DEFAULT_MAX_LINE_BYTES {
-            self.queue_control(&Envelope::new(Message::Gap {
+            let gap = Envelope::new(Message::Gap {
                 stream_id: self.stream_id.clone(),
                 reason: "record_size_exceeded".into(),
                 count: Some(1),
                 first_seq: Some(self.sequence),
                 last_seq: Some(self.sequence),
-            }));
+            });
+            self.enqueue_log(self.sequence, venera_debug_protocol::encode(&gap).unwrap());
             return;
         }
         self.enqueue_log(self.sequence, bytes);
@@ -679,45 +707,66 @@ impl State {
             _ => None,
         }
     }
-    fn dropped(&mut self, sequence: u64) {
-        self.dropped += 1;
-        match &mut self.pending_gap {
-            Some((_, last, count)) => {
-                *last = sequence;
-                *count += 1;
-            }
-            None => self.pending_gap = Some((sequence, sequence, 1)),
-        }
-    }
     pub fn clear_logs(&mut self) {
-        while let Some((seq, _)) = self.logs.pop_front() {
-            self.dropped(seq);
+        for peer in self.peers.values_mut() {
+            if peer.closed {
+                continue;
+            }
+            while let Some((seq, _)) = peer.logs.pop_front() {
+                peer.dropped(seq);
+                self.dropped += 1;
+            }
+            peer.log_bytes = 0;
         }
-        self.log_bytes = 0;
     }
     pub fn enqueue_log(&mut self, seq: u64, bytes: Vec<u8>) {
         if !self.status.forwarding_enabled {
             return;
         }
-        while !self.logs.is_empty()
-            && (self.logs.len() >= LOG_RECORDS || self.log_bytes + bytes.len() > LOG_BYTES)
-        {
-            let (seq, bytes) = self.logs.pop_front().unwrap();
-            self.log_bytes -= bytes.len();
-            self.dropped(seq);
+        for peer in self.peers.values_mut() {
+            if peer.closed {
+                continue;
+            }
+            while !peer.logs.is_empty()
+                && (peer.logs.len() >= LOG_RECORDS || peer.log_bytes + bytes.len() > LOG_BYTES)
+            {
+                let (seq, bytes) = peer.logs.pop_front().unwrap();
+                peer.log_bytes -= bytes.len();
+                peer.dropped(seq);
+                self.dropped += 1;
+            }
+            if bytes.len() > LOG_BYTES {
+                peer.dropped(seq);
+                self.dropped += 1;
+                continue;
+            }
+            peer.log_bytes += bytes.len();
+            peer.logs.push_back((seq, bytes.clone()));
         }
-        if bytes.len() > LOG_BYTES {
-            self.dropped(seq);
-            return;
-        }
-        self.log_bytes += bytes.len();
-        self.logs.push_back((seq, bytes));
     }
-    pub fn next_line(&mut self) -> Option<(Option<u64>, Vec<u8>)> {
-        if let Some(bytes) = self.controls.pop_front() {
+    pub fn add_peer(&mut self) -> u64 {
+        self.next_peer += 1;
+        self.peers.insert(self.next_peer, PeerQueue::default());
+        self.status.health["host"] = json!("connected");
+        self.next_peer
+    }
+    pub fn remove_peer(&mut self, peer: u64) {
+        self.peers.remove(&peer);
+        self.status.health["host"] = json!(if self.peers.is_empty() {
+            "waiting"
+        } else {
+            "connected"
+        });
+    }
+    pub fn next_line(&mut self, peer: u64) -> Option<(Option<u64>, Vec<u8>)> {
+        let peer = self.peers.get_mut(&peer)?;
+        if peer.closed {
+            return None;
+        }
+        if let Some(bytes) = peer.controls.pop_front() {
             return Some((None, bytes));
         }
-        if let Some((first, last, count)) = self.pending_gap.take() {
+        if let Some((first, last, count)) = peer.pending_gap.take() {
             return Some((
                 None,
                 venera_debug_protocol::encode(&Envelope::new(Message::Gap {
@@ -730,45 +779,111 @@ impl State {
                 .unwrap(),
             ));
         }
-        self.logs.pop_front().map(|(_, bytes)| {
-            self.log_bytes -= bytes.len();
+        peer.logs.pop_front().map(|(_, bytes)| {
+            peer.log_bytes -= bytes.len();
             (Some(self.forwarding_generation), bytes)
         })
     }
     pub fn queue_control(&mut self, message: &Envelope) -> bool {
-        if self.controls.len() == CONTROL_RECORDS {
+        let bytes = venera_debug_protocol::encode(message).unwrap();
+        let mut complete = true;
+        for peer in self.peers.values_mut() {
+            if peer.closed {
+                continue;
+            }
+            if !peer.control_room() {
+                complete = false;
+                peer.closed = true;
+            } else {
+                peer.controls.push_back(bytes.clone());
+            }
+        }
+        complete
+    }
+    pub fn queue_peer_control(&mut self, peer: u64, message: &Envelope) -> bool {
+        let Some(peer) = self.peers.get_mut(&peer) else {
+            return true;
+        };
+        if peer.closed {
+            return true;
+        }
+        if !peer.control_room() {
             return false;
         }
-        self.controls
+        peer.controls
             .push_back(venera_debug_protocol::encode(message).unwrap());
         true
     }
-    pub fn observe_helper_drops(&mut self, session: u32, pid: u32, dropped: u64) -> bool {
-        let reported = self
-            .helper_drops
-            .get(&session)
-            .filter(|(previous_pid, _)| *previous_pid == pid)
-            .map(|(_, count)| *count)
-            .unwrap_or(0);
-        if dropped > reported
-            && self.queue_control(&Envelope::new(Message::Gap {
-                stream_id: self.stream_id.clone(),
-                reason: format!("session_{session}_queue_overflow"),
-                count: Some(dropped - reported),
-                first_seq: None,
-                last_seq: None,
-            }))
-        {
-            self.helper_drops.insert(session, (pid, dropped));
-        } else if dropped == 0 && reported == 0 {
-            self.helper_drops.insert(session, (pid, 0));
+    pub fn queue_peer_reply(&mut self, peer: u64, bytes: Vec<u8>) -> bool {
+        let Some(peer) = self.peers.get_mut(&peer) else {
+            return false;
+        };
+        if peer.closed || !peer.control_room() {
+            return false;
         }
+        peer.replies.push_back(bytes);
+        true
+    }
+    pub fn peer_control_room(&self, peer: u64) -> bool {
+        self.peers
+            .get(&peer)
+            .is_some_and(|peer| !peer.closed && peer.control_room())
+    }
+    pub fn peer_closed(&self, peer: u64) -> bool {
+        self.peers.get(&peer).is_none_or(|peer| peer.closed)
+    }
+    pub fn next_reply(&mut self, peer: u64) -> Option<Vec<u8>> {
+        let peer = self.peers.get_mut(&peer)?;
+        if peer.closed {
+            return None;
+        }
+        peer.replies.pop_front()
+    }
+    pub fn observe_helper_drops(&mut self, session: u32, pid: u32, dropped: u64) -> bool {
+        for peer in self.peers.values_mut() {
+            if peer.closed {
+                continue;
+            }
+            let reported = peer
+                .helper_drops
+                .get(&session)
+                .filter(|(previous_pid, _)| *previous_pid == pid)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+            if dropped > reported {
+                if !peer.control_room() {
+                    peer.closed = true;
+                    continue;
+                }
+                let message = Envelope::new(Message::Gap {
+                    stream_id: self.stream_id.clone(),
+                    reason: format!("session_{session}_queue_overflow"),
+                    count: Some(dropped - reported),
+                    first_seq: None,
+                    last_seq: None,
+                });
+                peer.controls
+                    .push_back(venera_debug_protocol::encode(&message).unwrap());
+                peer.helper_drops.insert(session, (pid, dropped));
+            } else if dropped == 0 && reported == 0 {
+                peer.helper_drops.insert(session, (pid, 0));
+            }
+        }
+        // Minimum cumulative loss admitted to active peers' queues; with no
+        // active peer the current total is the completed reporting baseline.
         let reported_total = self
-            .helper_drops
-            .get(&session)
-            .filter(|(previous_pid, _)| *previous_pid == pid)
-            .map(|(_, count)| *count)
-            .unwrap_or(0);
+            .peers
+            .values()
+            .filter(|peer| !peer.closed)
+            .map(|peer| {
+                peer.helper_drops
+                    .get(&session)
+                    .filter(|(previous_pid, _)| *previous_pid == pid)
+                    .map(|(_, count)| *count)
+                    .unwrap_or(0)
+            })
+            .min()
+            .unwrap_or(dropped);
         let key = session.to_string();
         let snapshot = json!({"pid":pid,"dropped_total":dropped,"reported_total":reported_total});
         let changed = self.status.health["session_helper_loss"][&key] != snapshot;
@@ -776,6 +891,31 @@ impl State {
             self.status.health["session_helper_loss"][&key] = snapshot;
         }
         changed
+    }
+}
+
+#[derive(Default)]
+pub struct PeerQueue {
+    closed: bool,
+    pub controls: VecDeque<Vec<u8>>,
+    replies: VecDeque<Vec<u8>>,
+    logs: VecDeque<(u64, Vec<u8>)>,
+    log_bytes: usize,
+    pending_gap: Option<(u64, u64, u64)>,
+    helper_drops: BTreeMap<u32, (u32, u64)>,
+}
+impl PeerQueue {
+    fn control_room(&self) -> bool {
+        self.controls.len() + self.replies.len() < CONTROL_RECORDS
+    }
+    fn dropped(&mut self, sequence: u64) {
+        match &mut self.pending_gap {
+            Some((_, last, count)) => {
+                *last = sequence;
+                *count += 1;
+            }
+            None => self.pending_gap = Some((sequence, sequence, 1)),
+        }
     }
 }
 
@@ -806,9 +946,331 @@ mod tests {
         let class = crate::collector::classify_capture(&capture);
         state.publish_capture(capture, class, &[]);
     }
+    fn peer_value(state: &mut State, peer: u64) -> serde_json::Value {
+        let (_, bytes) = state.next_line(peer).unwrap();
+        let envelope = venera_debug_protocol::decode(&bytes).unwrap();
+        serde_json::from_slice(&wire::encode(&envelope).unwrap()).unwrap()
+    }
+    fn fill_controls(state: &mut State, peer: u64) {
+        let response = state.result("queued".into(), "status.get");
+        for _ in 0..64 {
+            assert!(state.queue_peer_control(peer, &response));
+        }
+    }
     #[test]
-    fn ordinary_program_reaches_local_subscription_and_v1_serial_with_identity() {
+    fn status_pressure_closes_slow_peer_and_normal_peer_receives_each_revision() {
         let mut state = State::new("run-1".into(), true);
+        let slow = state.add_peer();
+        let normal = state.add_peer();
+        fill_controls(&mut state, slow);
+        state.apply(Filter::default(), None, None);
+        assert!(state.peer_closed(slow));
+        assert!(!state.peer_closed(normal));
+        assert_eq!(peer_value(&mut state, normal)["params"]["revision"], "1");
+        state.apply(
+            Filter {
+                levels: vec!["error".into()],
+                ..Filter::default()
+            },
+            None,
+            None,
+        );
+        let value = peer_value(&mut state, normal);
+        assert_eq!(value["params"]["revision"], "2");
+        assert_eq!(
+            value["params"]["effective_filter"]["levels"],
+            json!(["error"])
+        );
+        assert_eq!(state.next_line(normal), None);
+        state.remove_peer(slow);
+        let reconnected = state.add_peer();
+        let response = state
+            .control(
+                Message::StatusGet {
+                    request_id: "reconnected".into(),
+                },
+                None,
+            )
+            .unwrap();
+        assert!(state.queue_peer_control(reconnected, &response));
+        assert_eq!(
+            peer_value(&mut state, reconnected)["result"]["revision"],
+            "2"
+        );
+        assert_eq!(state.current().health["host"], "connected");
+    }
+    #[test]
+    fn capture_loss_pressure_closes_slow_peer_and_normal_peer_receives_each_gap_once() {
+        let mut state = State::new("run-1".into(), true);
+        let slow = state.add_peer();
+        let normal = state.add_peer();
+        fill_controls(&mut state, slow);
+        for reason in ["native_capture_incomplete", "process_identity_unavailable"] {
+            state.queue_control(&Envelope::new(Message::Gap {
+                stream_id: "run-1".into(),
+                reason: reason.into(),
+                count: Some(2),
+                first_seq: None,
+                last_seq: None,
+            }));
+            assert!(state.peer_closed(slow));
+            assert!(!state.peer_closed(normal));
+            assert_eq!(
+                peer_value(&mut state, normal),
+                json!({"jsonrpc":"2.0","method":"gap","params":{
+                    "stream_id":"run-1","reason":reason,"count":"2","first_seq":null,"last_seq":null
+                }})
+            );
+            assert_eq!(state.next_line(normal), None);
+        }
+    }
+    #[test]
+    fn oversized_record_gap_follows_earlier_logs_for_both_peers_under_control_pressure() {
+        let mut state = State::new("run-1".into(), true);
+        let slow = state.add_peer();
+        let normal = state.add_peer();
+        fill_controls(&mut state, slow);
+        publish(&mut state, "first");
+        publish(&mut state, "second");
+        publish(
+            &mut state,
+            &"x".repeat(venera_debug_protocol::DEFAULT_MAX_LINE_BYTES),
+        );
+        publish(&mut state, "fourth");
+        for peer in [normal, slow] {
+            if peer == slow {
+                for _ in 0..64 {
+                    assert_eq!(peer_value(&mut state, peer)["id"], "queued");
+                }
+            }
+            assert!(!state.peer_closed(peer));
+            let first = peer_value(&mut state, peer);
+            assert_eq!(
+                json!([first["params"]["seq"], first["params"]["text"]]),
+                json!(["1", "first"])
+            );
+            let second = peer_value(&mut state, peer);
+            assert_eq!(
+                json!([second["params"]["seq"], second["params"]["text"]]),
+                json!(["2", "second"])
+            );
+            assert_eq!(
+                peer_value(&mut state, peer),
+                json!({"jsonrpc":"2.0","method":"gap","params":{
+                    "stream_id":"run-1","reason":"record_size_exceeded","count":"1","first_seq":"3","last_seq":"3"
+                }})
+            );
+            let fourth = peer_value(&mut state, peer);
+            assert_eq!(
+                json!([fourth["params"]["seq"], fourth["params"]["text"]]),
+                json!(["4", "fourth"])
+            );
+            assert_eq!(state.next_line(peer), None);
+        }
+    }
+    #[test]
+    fn one_capture_reaches_local_and_both_peers_with_one_remote_sequence() {
+        let mut state = State::new("run-1".into(), true);
+        let a = state.add_peer();
+        let b = state.add_peer();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        state.subscribers.push(sender);
+        publish(&mut state, "hello");
+        let local: serde_json::Value =
+            serde_json::from_slice(&receiver.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            (
+                local["stream_id"].clone(),
+                local["seq"].clone(),
+                local["text"].clone()
+            ),
+            (json!("run-1"), json!(1), json!("hello"))
+        );
+        for peer in [a, b] {
+            let value = peer_value(&mut state, peer);
+            assert_eq!(
+                (
+                    value["params"]["stream_id"].clone(),
+                    value["params"]["seq"].clone(),
+                    value["params"]["text"].clone()
+                ),
+                (json!("run-1"), json!("1"), json!("hello"))
+            );
+            assert_eq!(state.next_line(peer), None);
+        }
+        assert_eq!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+    }
+    #[test]
+    fn slow_peer_overflow_preserves_the_other_peers_contiguous_delivery() {
+        let mut state = State::new("run-1".into(), true);
+        let a = state.add_peer();
+        let b = state.add_peer();
+        let mut delivered = Vec::new();
+        for _ in 1..=2050 {
+            publish(&mut state, "ready");
+            let value = peer_value(&mut state, b);
+            delivered.push(
+                value["params"]["seq"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<u64>()
+                    .unwrap(),
+            );
+            assert_eq!(value["params"]["text"], "ready");
+        }
+        assert_eq!(delivered, (1..=2050).collect::<Vec<u64>>());
+        assert_eq!(
+            peer_value(&mut state, a),
+            json!({"jsonrpc":"2.0","method":"gap","params":{
+                "stream_id":"run-1","reason":"queue_overflow_or_local_clear","count":"2","first_seq":"1","last_seq":"2"
+            }})
+        );
+        assert_eq!(peer_value(&mut state, a)["params"]["seq"], "3");
+        assert_eq!(state.current().loss["queue_dropped"], 2);
+        assert_eq!(state.next_line(b), None);
+    }
+    #[test]
+    fn byte_capacity_and_control_capacity_belong_to_each_peer() {
+        let mut state = State::new("run-1".into(), true);
+        let a = state.add_peer();
+        let b = state.add_peer();
+        let payload = vec![b'x'; 1024 * 1024];
+        for sequence in 1..=9 {
+            state.enqueue_log(sequence, payload.clone());
+            assert_eq!(state.next_line(b), Some((Some(0), payload.clone())));
+        }
+        assert_eq!(
+            peer_value(&mut state, a)["params"],
+            json!({
+                "stream_id":"run-1","reason":"queue_overflow_or_local_clear","count":"1","first_seq":"1","last_seq":"1"
+            })
+        );
+        let response = state.result("reply".into(), "status.get");
+        for _ in 0..64 {
+            assert!(state.queue_peer_control(a, &response));
+        }
+        assert!(!state.queue_peer_control(a, &response));
+        assert!(state.queue_peer_control(b, &response));
+        assert_eq!(peer_value(&mut state, b)["id"], "reply");
+    }
+    #[test]
+    fn host_health_tracks_all_connected_peers() {
+        let mut state = State::new("run-1".into(), true);
+        let a = state.add_peer();
+        let b = state.add_peer();
+        assert_eq!(state.current().health["host"], "connected");
+        state.remove_peer(a);
+        assert_eq!(state.current().health["host"], "connected");
+        state.remove_peer(b);
+        assert_eq!(state.current().health["host"], "waiting");
+    }
+    #[test]
+    fn replies_and_notifications_share_each_peers_control_capacity() {
+        let mut state = State::new("run-1".into(), true);
+        let a = state.add_peer();
+        let b = state.add_peer();
+        let response = state.result("status".into(), "status.get");
+        for _ in 0..63 {
+            assert!(state.queue_peer_control(a, &response));
+        }
+        assert!(state.queue_peer_reply(a, b"reply\n".to_vec()));
+        assert!(!state.peer_control_room(a));
+        assert!(!state.queue_peer_control(a, &response));
+        assert!(!state.queue_peer_reply(a, b"later\n".to_vec()));
+        assert!(state.peer_control_room(b));
+        assert!(state.queue_peer_reply(b, b"other\n".to_vec()));
+        assert_eq!(state.next_reply(b), Some(b"other\n".to_vec()));
+        assert_eq!(state.next_reply(a), Some(b"reply\n".to_vec()));
+        assert!(state.peer_control_room(a));
+        assert!(state.queue_peer_control(a, &response));
+        assert_eq!(peer_value(&mut state, a)["id"], "status");
+    }
+    #[test]
+    fn helper_loss_closes_congested_peer_and_reports_each_delta_once_to_normal_peer() {
+        let mut state = State::new("run-1".into(), true);
+        let a = state.add_peer();
+        let b = state.add_peer();
+        let response = state.result("queued".into(), "status.get");
+        for _ in 0..64 {
+            assert!(state.queue_peer_control(a, &response));
+        }
+        state.observe_helper_drops(2, 100, 3);
+        assert_eq!(
+            peer_value(&mut state, b)["params"],
+            json!({
+                "stream_id":"run-1","reason":"session_2_queue_overflow","count":"3","first_seq":null,"last_seq":null
+            })
+        );
+        assert!(state.peer_closed(a));
+        assert_eq!(
+            state.current().health["session_helper_loss"]["2"],
+            json!({"pid":100,"dropped_total":3,"reported_total":3})
+        );
+        state.observe_helper_drops(2, 100, 3);
+        assert_eq!(state.next_line(b), None);
+        state.observe_helper_drops(2, 100, 5);
+        assert_eq!(peer_value(&mut state, b)["params"]["count"], "2");
+        assert_eq!(state.next_line(b), None);
+    }
+    #[test]
+    fn forwarding_restart_invalidates_both_peer_frames_and_local_capture_continues() {
+        let mut state = State::new("run-1".into(), true);
+        let a = state.add_peer();
+        let b = state.add_peer();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(16);
+        state.subscribers.push(sender);
+        publish(&mut state, "old");
+        let old_a = state.next_line(a).unwrap();
+        let old_b = state.next_line(b).unwrap();
+        for (_, bytes) in [&old_a, &old_b] {
+            let value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(
+                (value["seq"].clone(), value["text"].clone()),
+                (json!(1), json!("old"))
+            );
+        }
+        state.set_forwarding(false);
+        publish(&mut state, "during");
+        state.set_forwarding(true);
+        assert!(!state.write_allowed(old_a.0));
+        assert!(!state.write_allowed(old_b.0));
+        publish(&mut state, "new");
+        for peer in [a, b] {
+            assert_eq!(
+                peer_value(&mut state, peer)["params"]["forwarding_enabled"],
+                false
+            );
+            assert_eq!(
+                peer_value(&mut state, peer)["params"]["forwarding_enabled"],
+                true
+            );
+            let value = peer_value(&mut state, peer);
+            assert_eq!(
+                (
+                    value["params"]["seq"].clone(),
+                    value["params"]["text"].clone()
+                ),
+                (json!("3"), json!("new"))
+            );
+        }
+        let logs: Vec<serde_json::Value> = receiver
+            .try_iter()
+            .map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+            .filter(|value| value["type"] == "log")
+            .map(|value| json!([value["seq"], value["text"]]))
+            .collect();
+        assert_eq!(
+            logs,
+            vec![json!([1, "old"]), json!([2, "during"]), json!([3, "new"])]
+        );
+    }
+    #[test]
+    fn ordinary_program_reaches_local_subscription_and_v1_wire_with_identity() {
+        let mut state = State::new("run-1".into(), true);
+        state.add_peer();
         let (sender, receiver) = std::sync::mpsc::sync_channel(4);
         state.subscribers.push(sender);
         publish(&mut state, "ordinary program: hello 中文");
@@ -822,11 +1284,11 @@ mod tests {
                 "process":{"pid":42,"start_time_filetime":"100","exe_path":"C:\\Tools\\ordinary.exe"},
                 "tid":null,"text":"ordinary program: hello 中文"})
         );
-        let (_, queued) = state.next_line().unwrap();
+        let (_, queued) = state.next_line(1).unwrap();
         assert_eq!(queued, bytes);
-        let serial = serial::encode(&venera_debug_protocol::decode(&queued).unwrap()).unwrap();
+        let wire = wire::encode(&venera_debug_protocol::decode(&queued).unwrap()).unwrap();
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&serial).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&wire).unwrap(),
             json!({"jsonrpc":"2.0","method":"log","params":{
                 "stream_id":"run-1","seq":"1","observed_at":"2026-11-12T00:00:00Z",
                 "source_time":null,"source":"dbwin","component":"","level":"unknown",
@@ -838,6 +1300,7 @@ mod tests {
     #[test]
     fn component_filter_forwards_selected_producer_and_local_subscription_keeps_all() {
         let mut state = State::new("run-1".into(), true);
+        state.add_peer();
         state.apply(
             Filter {
                 components: vec!["venus".into()],
@@ -876,11 +1339,11 @@ mod tests {
         );
         publish(&mut state, "MESA-VIRTIO: info: venus next");
         let mut forwarded = Vec::new();
-        while let Some((generation, bytes)) = state.next_line() {
+        while let Some((generation, bytes)) = state.next_line(1) {
             if generation.is_some() {
                 let envelope = venera_debug_protocol::decode(&bytes).unwrap();
-                let serial = serial::encode(&envelope).unwrap();
-                forwarded.push(serde_json::from_slice::<serde_json::Value>(&serial).unwrap());
+                let wire = wire::encode(&envelope).unwrap();
+                forwarded.push(serde_json::from_slice::<serde_json::Value>(&wire).unwrap());
             } else {
                 let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(value["type"], "status");
@@ -907,6 +1370,7 @@ mod tests {
     #[test]
     fn local_subscription_keeps_program_output_with_host_level_target_and_forwarding_selection() {
         let mut state = State::new("run-1".into(), true);
+        state.add_peer();
         let (sender, receiver) = std::sync::mpsc::sync_channel(4);
         state.subscribers.push(sender);
         for filter in [
@@ -942,10 +1406,10 @@ mod tests {
                 (json!(3), json!("ordinary program: selected locally")),
             ]
         );
-        assert_eq!(state.next_line(), None);
+        assert_eq!(state.next_line(1), None);
         state.status.forwarding_enabled = true;
         publish(&mut state, "ordinary program: forwarding resumed");
-        let (_, bytes) = state.next_line().unwrap();
+        let (_, bytes) = state.next_line(1).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             (value["seq"].clone(), value["text"].clone()),
@@ -953,16 +1417,17 @@ mod tests {
         );
     }
     fn next_gap(state: &mut State) -> serde_json::Value {
-        let (_, bytes) = state.next_line().unwrap();
+        let (_, bytes) = state.next_line(1).unwrap();
         serde_json::to_value(venera_debug_protocol::decode(&bytes).unwrap()).unwrap()
     }
     #[test]
     fn selected_oversized_record_reports_its_wire_sequence_and_next_record_continues() {
         let mut state = State::new("run-1".into(), true);
+        state.add_peer();
         state.status.effective_filter.components = vec!["venus".into()];
         let oversized = "x".repeat(venera_debug_protocol::DEFAULT_MAX_LINE_BYTES);
         publish(&mut state, &oversized);
-        assert_eq!(state.next_line(), None);
+        assert_eq!(state.next_line(1), None);
         publish(&mut state, &format!("MESA-VIRTIO: info: {oversized}"));
         assert_eq!(
             next_gap(&mut state),
@@ -970,7 +1435,7 @@ mod tests {
                 "reason":"record_size_exceeded","count":1,"first_seq":1,"last_seq":1})
         );
         publish(&mut state, "MESA-VIRTIO: info: ready");
-        let (_, bytes) = state.next_line().unwrap();
+        let (_, bytes) = state.next_line(1).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             (
@@ -982,49 +1447,49 @@ mod tests {
         );
     }
     #[test]
-    fn helper_loss_retries_the_entire_unreported_delta_after_control_pressure() {
+    fn helper_loss_reports_current_total_to_reconnected_peer() {
         let mut state = State::new("run-1".into(), true);
-        while state.queue_control(&Envelope::new(Message::StatusGet {
+        let a = state.add_peer();
+        let response = Envelope::new(Message::StatusGet {
             request_id: "queued".into(),
-        })) {}
+        });
+        for _ in 0..64 {
+            assert!(state.queue_peer_control(a, &response));
+        }
         assert!(state.observe_helper_drops(2, 10852, 10925));
+        assert!(state.peer_closed(a));
         assert_eq!(
             serde_json::to_value(state.current()).unwrap()["health"]["session_helper_loss"],
-            json!({"2":{"pid":10852,"dropped_total":10925,"reported_total":0}})
+            json!({"2":{"pid":10852,"dropped_total":10925,"reported_total":10925}})
         );
-        while state.next_line().is_some() {}
-        assert!(state.observe_helper_drops(2, 10852, 10925));
+        state.remove_peer(a);
+        let b = state.add_peer();
+        state.observe_helper_drops(2, 10852, 10925);
         assert_eq!(
             serde_json::to_value(state.current()).unwrap()["health"]["session_helper_loss"],
             json!({"2":{"pid":10852,"dropped_total":10925,"reported_total":10925}})
         );
         assert_eq!(
-            next_gap(&mut state),
-            json!({"major":1,"type":"gap","stream_id":"run-1","reason":"session_2_queue_overflow","count":10925,"first_seq":null,"last_seq":null})
+            peer_value(&mut state, b),
+            json!({"jsonrpc":"2.0","method":"gap","params":{"stream_id":"run-1","reason":"session_2_queue_overflow","count":"10925","first_seq":null,"last_seq":null}})
         );
         assert!(!state.observe_helper_drops(2, 10852, 10925));
         state.queue_control(&Envelope::new(Message::StatusGet {
             request_id: "after-repeat".into(),
         }));
         assert_eq!(
-            next_gap(&mut state),
+            venera_debug_protocol::decode(&state.next_line(b).unwrap().1)
+                .map(|envelope| serde_json::to_value(envelope).unwrap())
+                .unwrap(),
             json!({"major":1,"type":"status.get","request_id":"after-repeat"})
         );
     }
     #[test]
     fn helper_restart_uses_its_own_cumulative_loss_baseline() {
         let mut state = State::new("run-1".into(), true);
+        state.add_peer();
         state.observe_helper_drops(2, 100, 40);
         assert_eq!(next_gap(&mut state)["count"], 40);
-        while state.queue_control(&Envelope::new(Message::StatusGet {
-            request_id: "queued".into(),
-        })) {}
-        state.observe_helper_drops(2, 200, 3);
-        assert_eq!(
-            serde_json::to_value(state.current()).unwrap()["health"]["session_helper_loss"]["2"],
-            json!({"pid":200,"dropped_total":3,"reported_total":0})
-        );
-        while state.next_line().is_some() {}
         state.observe_helper_drops(2, 200, 3);
         assert_eq!(
             serde_json::to_value(state.current()).unwrap()["health"]["session_helper_loss"]["2"],
@@ -1040,8 +1505,9 @@ mod tests {
     #[test]
     fn forwarding_restart_admits_new_lines_and_invalidates_inflight_generation() {
         let mut state = State::new("run-1".into(), true);
+        state.add_peer();
         publish(&mut state, "old");
-        let (old, bytes) = state.next_line().unwrap();
+        let (old, bytes) = state.next_line(1).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             (value["seq"].clone(), value["text"].clone()),
@@ -1055,7 +1521,7 @@ mod tests {
         assert!(!state.write_allowed(old));
         assert!(state.write_allowed(None));
         publish(&mut state, "new");
-        while let Some((generation, bytes)) = state.next_line() {
+        while let Some((generation, bytes)) = state.next_line(1) {
             if generation.is_some() {
                 let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(
@@ -1148,6 +1614,7 @@ mod tests {
     #[test]
     fn controls_precede_queued_logs_and_overflow_reports_actual_range() {
         let mut state = State::new("run-1".into(), true);
+        state.add_peer();
         for seq in 1..=2049 {
             state.enqueue_log(seq, vec![b'x']);
         }
@@ -1155,17 +1622,18 @@ mod tests {
             request_id: "q".into(),
         }));
         assert_eq!(
-            String::from_utf8(state.next_line().unwrap().1).unwrap(),
+            String::from_utf8(state.next_line(1).unwrap().1).unwrap(),
             "{\"major\":1,\"type\":\"status.get\",\"request_id\":\"q\"}\n"
         );
-        let gap = venera_debug_protocol::decode(&state.next_line().unwrap().1).unwrap();
+        let gap = venera_debug_protocol::decode(&state.next_line(1).unwrap().1).unwrap();
         assert_eq!(serde_json::to_value(gap).unwrap()["count"], 1);
-        assert_eq!(state.next_line(), Some((Some(0), vec![b'x'])));
+        assert_eq!(state.next_line(1), Some((Some(0), vec![b'x'])));
     }
 
     #[test]
     fn local_forwarding_clear_and_host_filter_share_authoritative_state() {
         let mut state = State::new("run-1".into(), true);
+        state.add_peer();
         state.enqueue_log(1, b"first\n".to_vec());
         state.status.forwarding_enabled = false;
         state.clear_logs();
@@ -1181,7 +1649,7 @@ mod tests {
         assert_eq!(value["forwarding_enabled"], false);
         assert_eq!(value["revision"], 1);
         assert_eq!(state.dropped, 1);
-        assert_eq!(state.pending_gap, Some((1, 1, 1)));
+        assert_eq!(state.peers[&1].pending_gap, Some((1, 1, 1)));
     }
 
     #[test]

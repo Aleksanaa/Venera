@@ -2,6 +2,7 @@
 // The painter and WinUI's controls drawn with it: Button, AccentButton, ToggleSwitch, ComboBox (closed), Settings
 // cards and section headers, with WinUI's dark-theme colours and sizes.
 #include "panel.h"
+#include <dwrite_2.h>
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +16,7 @@ UINT32 theme::accent = 0x60cdff, theme::accentBase = 0x0078d4;
 IDWriteTextFormat* Ui::format(const wchar_t* family, float size, DWRITE_FONT_WEIGHT weight)
 {
     IDWriteTextFormat* f = nullptr;
-    dw_->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-us",
+    dw_->CreateTextFormat(family, nullptr, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, locale::name(),
                           &f);
     f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -25,6 +26,19 @@ IDWriteTextFormat* Ui::format(const wchar_t* family, float size, DWRITE_FONT_WEI
     f->SetTrimming(&trimming, ellipsis);
     if (ellipsis)
         ellipsis->Release();
+    IDWriteFactory2* factory = nullptr;
+    IDWriteTextFormat1* format = nullptr;
+    IDWriteFontFallback* fallback = nullptr;
+    if (SUCCEEDED(dw_->QueryInterface(__uuidof(IDWriteFactory2), reinterpret_cast<void**>(&factory)))) {
+        if (SUCCEEDED(factory->GetSystemFontFallback(&fallback))) {
+            if (SUCCEEDED(f->QueryInterface(__uuidof(IDWriteTextFormat1), reinterpret_cast<void**>(&format)))) {
+                format->SetFontFallback(fallback);
+                format->Release();
+            }
+            fallback->Release();
+        }
+        factory->Release();
+    }
     return f;
 }
 
@@ -42,6 +56,16 @@ bool Ui::hasFont(const wchar_t* family)
 void Ui::init()
 {
     DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), reinterpret_cast<IUnknown**>(&dw_));
+    languageChanged();
+}
+
+void Ui::languageChanged()
+{
+    clearSelection();
+    for (auto& font : fonts_) {
+        if (font) font->Release();
+        font = nullptr;
+    }
     // Windows 11's fonts, Windows 10's where they are missing.
     const wchar_t* display = hasFont(L"Segoe UI Variable Display") ? L"Segoe UI Variable Display" : L"Segoe UI";
     const wchar_t* text = hasFont(L"Segoe UI Variable Text") ? L"Segoe UI Variable Text" : L"Segoe UI";
@@ -91,6 +115,13 @@ Ui::Paragraph Ui::wrap(const std::wstring& s, Font f, float width)
         p.layout->SetMaxHeight(m.height);  // its lines from the top: the formats centre them in the height
     }
     return p;
+}
+
+void Ui::text(const Paragraph& p, float x, float y, UINT32 c, float a)
+{
+    color(c, a);
+    if (p.layout)
+        rt_->DrawTextLayout({x, y}, p.layout.get(), brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 const Ui::Selectable* Ui::findSelectable(int id) const
@@ -469,7 +500,7 @@ void Ui::toggle(float right, float cy, int id, bool on, bool enabled)
         color(kWhite, kTextSecondary);
         rt_->FillEllipse(D2D1::Ellipse({x + 10, cy}, knob, knob), brush_);
     }
-    text(on ? L"On" : L"Off", kBody, {x - 60, cy - 10, x - 12, cy + 10}, kWhite, enabled ? kTextPrimary : kTextDisabled,
+    text(on ? locale::text(IDS_On) : locale::text(IDS_Off), kBody, {x - 60, cy - 10, x - 12, cy + 10}, kWhite, enabled ? kTextPrimary : kTextDisabled,
          DWRITE_TEXT_ALIGNMENT_TRAILING);
     if (enabled)
         hot({x - 44, cy - 16, right, cy + 16}, id);
@@ -573,12 +604,17 @@ void Ui::progressRing(float cx, float cy, float size, float value)
 float Ui::settingsCard(float x, float& y, float w, const wchar_t* icon, const std::wstring& title,
                        const std::wstring& desc, UINT32 iconColor)
 {
-    constexpr float kH = 68;
-    card({x, y, x + w, y + kH});
-    text(icon, kIconLarge, {x + 16, y, x + 36, y + kH}, iconColor, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
-    float cy = y + kH / 2;
-    titleDesc(x + 56, x + w - 300, cy, title, desc);
-    y += kH + 4;
+    float textWidth = std::max(100.f, w - 356);
+    auto heading = wrap(title, kBody, textWidth);
+    auto description = wrap(desc, kCaption, textWidth);
+    float h = std::max(68.f, heading.height + description.height + 28);
+    card({x, y, x + w, y + h});
+    text(icon, kIconLarge, {x + 16, y, x + 36, y + h}, iconColor, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
+    float cy = y + h / 2;
+    float top = cy - (heading.height + description.height + 4) / 2;
+    text(heading, x + 56, top);
+    text(description, x + 56, top + heading.height + 4, kWhite, kTextSecondary);
+    y += h + 4;
     return cy;
 }
 
