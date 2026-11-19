@@ -139,6 +139,15 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d\n", __FUNCTION__, m_Id));
 }
 
+bool VioGpuAllocation::IsCpuMappableBlob() const
+{
+    if (m_alias_source)
+    {
+        return m_alias_source->IsCpuMappableBlob();
+    }
+    return m_is_blob && (m_blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE) != 0;
+}
+
 UINT VioGpuAllocation::GetStride(void) const
 {
     if (m_stride)

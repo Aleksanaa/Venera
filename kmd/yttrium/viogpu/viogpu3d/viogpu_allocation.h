@@ -110,6 +110,9 @@ class VioGpuAllocation
             return m_alias_source->HasCpuCopyBacking();
         return m_is_blob ? m_blob_kernel_va != NULL : m_cpu_copy_va != NULL;
     }
+    // Whether the KMD can reach this blob's pixels with the CPU: its memory is host-visible
+    // (VIRTGPU_BLOB_FLAG_USE_MAPPABLE). An alias answers for the blob it names, as MakeAliasOf clears its own flag.
+    bool IsCpuMappableBlob() const;
     bool IsBlobPending() const
     {
         return (m_blob_create_state == 1);

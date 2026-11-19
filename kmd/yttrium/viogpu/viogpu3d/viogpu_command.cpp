@@ -306,8 +306,15 @@ NTSTATUS VioGpuCommand::SetCpuCopyBlt(VioGpuAllocation *src,
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (!src->IsBlob() || dst->IsBlob())
+    // The destination is guest memory (a GDI window surface) or a blob the KMD can map: Desktop Duplication has
+    // dxgkrnl copy DWM's frame into the capturing process's shared surface, and shared surfaces are blobs.
+    if (!src->IsBlob() || (dst->IsBlob() && !dst->IsCpuMappableBlob()))
     {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s unsupported pair src_res=0x%x blob=%u alias=%u mappable=%u dst_res=0x%x blob=%u alias=%u mappable=%u\n",
+                  __FUNCTION__, src->GetId(), src->IsBlob() ? 1 : 0, src->IsAlias() ? 1 : 0,
+                  src->IsCpuMappableBlob() ? 1 : 0, dst->GetId(), dst->IsBlob() ? 1 : 0, dst->IsAlias() ? 1 : 0,
+                  dst->IsCpuMappableBlob() ? 1 : 0));
         return STATUS_NOT_SUPPORTED;
     }
 
@@ -554,7 +561,7 @@ static NTSTATUS VioGpuCpuCopyBltPresent(VioGpuCommand *cmd,
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (!src->IsBlob() || dst->IsBlob())
+    if (!src->IsBlob() || (dst->IsBlob() && !dst->IsCpuMappableBlob()))
     {
         return STATUS_NOT_SUPPORTED;
     }
@@ -711,6 +718,25 @@ static UINT CountDmaCompletionPackets(char *command, char *end, UINT fenceId, BO
     }
 
     return packets;
+}
+
+// Does a staged and mapped CPU blt at once and retires it; Run() then only completes the present's NOP.
+// For a blob destination (Desktop Duplication): the capturing process reads its surface on the host GPU as soon as
+// dxgkrnl hands it the frame, outside the scheduler's ordering, so the pixels have to be there when Present returns.
+NTSTATUS VioGpuCommand::CopyCpuCopyBltNow()
+{
+    if (!m_cpuCopyBlt || !m_cpuCopyBltMapped)
+    {
+        return STATUS_NOT_FOUND;
+    }
+
+    NTSTATUS status = VioGpuCpuCopyBltPresent(this, m_cpuCopySrc, m_cpuCopyDst,
+                                              &m_cpuCopySrcRect, &m_cpuCopyDstRect,
+                                              m_cpuCopySrcVa, m_cpuCopySrcMapSize,
+                                              m_cpuCopyDstVa, m_cpuCopyDstMapSize,
+                                              m_cpuCopySubRects, m_cpuCopySubRectCnt);
+    ClearCpuCopyBlt();
+    return status;
 }
 
 void VioGpuCommand::Run()
