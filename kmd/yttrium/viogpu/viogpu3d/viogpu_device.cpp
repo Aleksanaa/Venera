@@ -405,8 +405,11 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
             }
             else if (src && dst &&
                      ((dxgk_src->SegmentId != 0 && dxgk_dst->SegmentId != 0) ||
-                      (src->HasCpuCopyBacking() && dst->HasCpuCopyBacking())))
+                      (src->HasCpuCopyBacking() && dst->HasCpuCopyBacking()) ||
+                      dst->IsBlob()))
             {
+                // A blob destination (Desktop Duplication's shared surface) is mapped here, where a failure can
+                // still refuse the present: Patch has no way to fail but a bugcheck.
                 // Nonzero SegmentId is VidMm's pre-patched residency
                 // contract: Patch may be skipped even if the blob's CPU
                 // mapping has not been established by an earlier Present.
@@ -424,6 +427,18 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
                     // Do not accept it unless its CPU mapping is usable.
                     delete cmd;
                     return mapStatus;
+                }
+                if (dst->IsBlob() && NT_SUCCESS(mapStatus))
+                {
+                    // The source is complete (the UMD waited for its rendering) and its owner is in this call;
+                    // copy now, so the capture's surface is whole before dxgkrnl hands the frame out.
+                    NTSTATUS copyStatus = cmd->CopyCpuCopyBltNow();
+                    if (!NT_SUCCESS(copyStatus))
+                    {
+                        DbgPrint(TRACE_LEVEL_WARNING,
+                                 ("%s Venus/Yttrium BLT CPU-copy into blob failed status=0x%x ctx=0x%x src_res=0x%x dst_res=0x%x\n",
+                                  __FUNCTION__, copyStatus, m_id, src->GetId(), dst->GetId()));
+                    }
                 }
             }
             NTSTATUS status = VioGpuEmitPresentNop(pPresent);

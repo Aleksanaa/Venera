@@ -171,8 +171,10 @@ HRESULT create_shared_surface(Device& d, const D3D11DDIARG_CREATERESOURCE& a, D3
     const bool blt_source = (a.BindFlags & D3D10_DDI_BIND_PRESENT) && !a.pPrimaryDesc &&
                             !(a.MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED);
     out.blt_source = blt_source;
+    // A shared surface may be Desktop Duplication's: dxgkrnl has the KMD copy DWM's frame into it with the CPU.
+    const bool kmd_copies = blt_source || (a.MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED);
     int fd = -1;
-    HRESULT hr = surface_texture(d, desc, -1, 0, out, &fd, blt_source);
+    HRESULT hr = surface_texture(d, desc, -1, 0, out, &fd, kmd_copies);
     if (FAILED(hr)) {
         VENERA_WARN("shared surface: %ux%u format %d failed: 0x%08lx", width, height, a.Format, hr);
         return hr;
@@ -421,12 +423,15 @@ HRESULT present_callback(Device& d, D3DKMT_HANDLE src, D3DKMT_HANDLE dst, void* 
     return d.dxgi->pfnPresentCb(d.rt_device.handle, &p);
 }
 
-HRESULT present_allocations(Device& d, D3DKMT_HANDLE src, D3DKMT_HANDLE dst, void* dxgi_context)
+// `rendered_now`: the rendering has to be complete when the present is called, not only when the GPU reaches it.
+// The KMD copies a Desktop Duplication frame within the present call (see is_dwm).
+HRESULT present_allocations(Device& d, D3DKMT_HANDLE src, D3DKMT_HANDLE dst, void* dxgi_context,
+                            bool rendered_now = false)
 {
     // The runtime presents the allocations as they are: our rendering on them must be complete. The present
     // context waits for it on the GPU where it can, else we wait here.
     d.flush_clears();
-    HRESULT hr = wait_for_rendering_on_gpu(d);
+    HRESULT hr = rendered_now ? E_FAIL : wait_for_rendering_on_gpu(d);
     if (FAILED(hr))
         hr = d.wait_idle();
     if (FAILED(hr))
@@ -510,6 +515,24 @@ HRESULT present_blt_behind(Device& d, BltRing& ring, ResourceObject& src, void* 
     return present_callback(d, ring.stages[show].allocation, 0, dxgi_context);
 }
 
+// DWM presents with a blt only for Desktop Duplication: dxgkrnl has the KMD copy the dirty rectangles of this frame
+// into the capturing process's surface. The frame before would get this frame's rectangles and leave stale pixels
+// behind, so DWM presents the back buffer itself. The KMD copies within the present call, as the capturing process
+// reads the surface (on the host GPU, outside the scheduler's ordering) once dxgkrnl hands the frame out: the back
+// buffer is rendered completely before the call, and DWM cannot render the next frame into it meanwhile.
+bool is_dwm()
+{
+    static const bool dwm = [] {
+        wchar_t path[MAX_PATH];
+        const DWORD n = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
+        if (!n || n >= ARRAYSIZE(path))
+            return false;
+        const wchar_t* name = wcsrchr(path, L'\\');
+        return _wcsicmp(name ? name + 1 : path, L"dwm.exe") == 0;
+    }();
+    return dwm;
+}
+
 D3DKMT_HANDLE allocation_of(DXGI_DDI_HRESOURCE h)
 {
     return h ? ResourceObject::from(h)->allocation : 0;
@@ -535,9 +558,9 @@ HRESULT APIENTRY present(DXGI_DDI_ARG_PRESENT* a)
     if (n < 8 || verbose())
         VENERA_TRACE("Present #%u: src 0x%x, dst 0x%x: begin", n, src, dst);
     ResourceObject& s = *ResourceObject::from(a->hSurfaceToPresent);
-    BltRing* ring = a->Flags.Blt && !dst && s.blt_source ? blt_ring_for(d, s) : nullptr;
+    BltRing* ring = a->Flags.Blt && !dst && s.blt_source && !is_dwm() ? blt_ring_for(d, s) : nullptr;
     HRESULT hr = ring ? present_blt_behind(d, *ring, s, a->pDXGIContext)
-                      : present_allocations(d, src, dst, a->pDXGIContext);
+                      : present_allocations(d, src, dst, a->pDXGIContext, a->Flags.Blt && !dst && is_dwm());
     if (n < 8 || FAILED(hr) || verbose())
         VENERA_TRACE("Present #%u: src 0x%x (sub %u), dst 0x%x (sub %u), flags 0x%x, interval %d -> 0x%08lx", n, src,
                      a->SrcSubResourceIndex, dst, a->DstSubResourceIndex, a->Flags.Value,

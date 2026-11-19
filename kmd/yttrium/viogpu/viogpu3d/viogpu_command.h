@@ -48,6 +48,7 @@ class VioGpuCommand
                            const RECT *subRects,
                            UINT subRectCnt);
     NTSTATUS MapCpuCopyBlt(ULONG ctx_id);
+    NTSTATUS CopyCpuCopyBltNow();
 
     NTSTATUS AttachAllocations(DXGK_ALLOCATIONLIST *allocationList, UINT allocationListLength);
 
