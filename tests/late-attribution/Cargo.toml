@@ -1,0 +1,21 @@
+[package]
+name = "late-attribution-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libc = "0.2.191"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+venera-debug-protocol = { path = "../../debug-channel/protocol" }
+
+[[bin]]
+name = "late-attribution-probe"
+path = "probe.rs"
+test = false
+
+[workspace]
