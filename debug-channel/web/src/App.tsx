@@ -286,8 +286,7 @@ export function App() {
           controller.signal,
         );
         if (generation !== epoch.current) return;
-        cursor.current =
-          page.events.at(-1)?.id ?? (ready ? cursor.current : page.latest_id);
+        cursor.current = page.events.at(-1)?.id ?? page.latest_id ?? '0';
         mergeRef.current(page.events, false, page.oldest_id);
         ready = true;
         setError('');

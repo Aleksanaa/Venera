@@ -149,6 +149,40 @@ test('实时追加去重，暂停后保留历史与筛选', async () => {
   expect(within(region).getByText('帧提交完成')).toBeInTheDocument();
 });
 
+test('follows the entire first burst after opening an empty archive', async () => {
+  vi.useFakeTimers();
+  const burst = Array.from({ length: 250 }, (_, i) => ({
+    ...first,
+    id: String(i + 1),
+  }));
+  let archive = burst.slice(0, 0);
+  vi.stubGlobal('fetch', async (input: string) => {
+    const after = new URL(input, 'http://localhost').searchParams.get('after');
+    const events =
+      after === null
+        ? archive.slice(-200)
+        : archive.filter((e) => Number(e.id) > Number(after)).slice(0, 200);
+    return response({
+      events,
+      oldest_id: archive[0]?.id ?? null,
+      latest_id: archive.at(-1)?.id ?? null,
+    });
+  });
+  await act(async () => {
+    render(<App />);
+  });
+  archive = burst;
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2000);
+  });
+  const history = screen.getByRole('region', { name: '事件历史' });
+  expect(
+    within(history)
+      .getAllByRole('button')
+      .map((row) => row.getAttribute('aria-label')),
+  ).toEqual(burst.map((e) => `查看事件 ${e.id}`));
+});
+
 test('选择事件展示完整多行详情并复制原始 JSON', async () => {
   vi.stubGlobal(
     'fetch',
