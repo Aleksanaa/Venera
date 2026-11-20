@@ -164,6 +164,18 @@ DebugStatus queryDebug(const std::vector<std::wstring>& args) {
     if(v["ok"].type==Value::Bool && v["ok"].boolean) return queryDebug();
     return status(v);
 }
+std::wstring formatLogLine(const LogLine& l)
+{
+    wchar_t time[16];
+    swprintf(time, 16, L"%02u:%02u:%02u.%03u", l.time.wHour, l.time.wMinute, l.time.wSecond, l.time.wMilliseconds);
+    std::wstring s = time + std::wstring(L"  ") + l.process;
+    if (l.pid)
+        s += L"[" + std::to_wstring(l.pid) + L"]";
+    if (!l.component.empty() && l.component != l.process)
+        s += L" " + l.component;
+    return s + L" " + L"IWE"[l.level] + L" " + l.text;
+}
+
 void GuestLogs::start(std::function<void(LogLine&&)> sink) {
     follow(false,[sink=std::move(sink)](GuestLogUpdate&& update) { sink(std::move(update.line)); });
 }

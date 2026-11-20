@@ -20,8 +20,6 @@
 
 #include "tests/tests.h"
 
-struct _EVENT_RECORD;
-
 namespace panel {
 
 // ---- WinUI 3 dark theme tokens (alpha fills are drawn as alpha) ---------------------------------------------------
@@ -332,7 +330,7 @@ TestResult runTest(const std::string& id, HANDLE cancel);
 // The child: `/run-test <id>`.
 int runTestChild(const std::string& id);
 
-// ---- what the drivers log (logcapture.cpp) -------------------------------------------------------------------------
+// ---- log display -------------------------------------------------------------------------------------------------
 
 struct LogLine {
     SYSTEMTIME time;  // local
@@ -343,41 +341,6 @@ struct LogLine {
     std::wstring text;
 };
 
-// Captures debug output (OutputDebugString) from this session, and with administrator rights from services and
-// the kernel's (DbgPrint) too, as DebugView does. Lines reach the sink on the capture's threads, one at a time.
-class LogCapture {
-public:
-    ~LogCapture();
-    void start(std::function<void(LogLine&&)> sink);
-    void stop();
-    bool running() const { return running_; }
-    // Why a source did not start, after start(); empty when it did.
-    std::wstring userError, kernelError;
-
-private:
-    struct Dbwin {
-        HANDLE bufferReady = nullptr, dataReady = nullptr, section = nullptr;
-        const char* view = nullptr;
-        std::thread thread;
-    };
-    bool openDbwin(Dbwin& d, const wchar_t* prefix, std::wstring* error);
-    void closeDbwin(Dbwin& d);
-    void readDbwin(Dbwin& d);
-    bool startKernel(std::wstring* error);
-    void stopKernel();
-    void kernelEvent(_EVENT_RECORD* r);
-    std::wstring processName(DWORD pid);
-    void emit(LogLine&& l);
-
-    bool running_ = false;
-    HANDLE stop_ = nullptr;
-    Dbwin local_, global_;
-    ULONG64 session_ = 0, trace_ = ~0ull;
-    std::thread kernelThread_;
-    std::function<void(LogLine&&)> sink_;
-    std::mutex sinkMutex_, namesMutex_;
-    std::map<DWORD, std::wstring> names_;
-};
 // A line as /log prints it and the Logs page exports it: time, program[pid], component, level (I/W/E), text.
 std::wstring formatLogLine(const LogLine& l);
 // The process runs as administrator.

@@ -625,6 +625,18 @@ int Window::run(HINSTANCE inst, int show, int page)
 
 }  // namespace
 
+bool elevated()
+{
+    HANDLE token;
+    TOKEN_ELEVATION e = {};
+    DWORD size;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    GetTokenInformation(token, TokenElevation, &e, sizeof(e), &size);
+    CloseHandle(token);
+    return e.TokenIsElevated;
+}
+
 // The panel may run from a share, for which ShellExecuteEx would ask first whether to run it: it runs already.
 HANDLE startSelf(HWND window, const std::wstring& args, int show)
 {

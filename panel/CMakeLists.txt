@@ -4,7 +4,7 @@
 # venera-panel.com (shim.c) is its console face for shells.
 enable_language(RC)
 find_package(nlohmann_json CONFIG REQUIRED)
-add_executable(venera-panel WIN32 main.cpp locale.cpp locale_core.cpp testlabels.cpp ui.cpp overview.cpp testspage.cpp logspage.cpp logcapture.cpp
+add_executable(venera-panel WIN32 main.cpp locale.cpp locale_core.cpp testlabels.cpp ui.cpp overview.cpp testspage.cpp logspage.cpp
     debugchannel.cpp debugpage.cpp
     settingspage.cpp toolspage.cpp aboutpage.cpp update.cpp fpsoverlay.cpp report.cpp sysinfo.cpp probe.cpp cli.cpp
     tests/runner.cpp tests/d3d12.cpp tests/d3d11.cpp tests/d3d9.cpp tests/vulkan.cpp panel.rc)
