@@ -1,4 +1,5 @@
 mod history_sync;
+mod libvirt;
 mod store;
 pub mod transport;
 #[cfg(feature = "web")]
@@ -24,17 +25,23 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Show guest names, states and live vsock CIDs from local libvirt.
+    List,
     Serve {
-        #[arg(long, value_parser = clap::value_parser!(u32).range(3..=4294967294))]
-        cid: u32,
+        /// Local libvirt guest name.
+        #[arg(required_unless_present = "cid", conflicts_with = "cid")]
+        name: Option<String>,
+        /// Connect directly to this vsock CID.
+        #[arg(long, requires = "database", value_parser = clap::value_parser!(u32).range(3..=4294967294))]
+        cid: Option<u32>,
         #[arg(long, default_value_t = 49152, value_parser = clap::value_parser!(u32).range(1..=4294967294))]
         port: u32,
         #[arg(long)]
-        database: PathBuf,
-        #[arg(long, value_parser = clap::value_parser!(u64).range(store::MIN_STORAGE_BYTES..))]
+        database: Option<PathBuf>,
+        #[arg(long, default_value_t = 1 << 30, value_parser = clap::value_parser!(u64).range(store::MIN_STORAGE_BYTES..))]
         max_bytes: u64,
         #[arg(long)]
-        control: PathBuf,
+        control: Option<PathBuf>,
         #[arg(long)]
         assets: Option<PathBuf>,
         #[arg(long, default_value = "127.0.0.1:8787")]
@@ -43,19 +50,19 @@ enum Command {
         no_web: bool,
     },
     Discover {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_control())]
         control: PathBuf,
     },
     Status {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_control())]
         control: PathBuf,
     },
     SystemInfo {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_control())]
         control: PathBuf,
     },
     FilterSet {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_control())]
         control: PathBuf,
         #[arg(long)]
         filter: String,
@@ -63,7 +70,7 @@ enum Command {
         duration_ms: Option<u64>,
     },
     FilterReset {
-        #[arg(long)]
+        #[arg(long, default_value_os_t = default_control())]
         control: PathBuf,
     },
     Export {
@@ -83,7 +90,9 @@ pub fn main() {
 }
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::List => Ok(libvirt::list()?),
         Command::Serve {
+            name,
             cid,
             port,
             database,
@@ -92,15 +101,38 @@ fn run() -> Result<()> {
             assets,
             listen,
             no_web,
-        } => serve(
-            transport::VsockConnector::new(cid, port)?,
-            database,
-            max_bytes,
-            control,
-            assets,
-            listen,
-            no_web,
-        ),
+        } => {
+            let (target, database) = match name {
+                Some(name) => {
+                    let uuid = libvirt::resolve(&name)?;
+                    let database = match database {
+                        Some(path) => path,
+                        None => {
+                            let data = absolute_env("XDG_DATA_HOME")
+                                .or_else(|| absolute_env("HOME").map(|p| p.join(".local/share")))
+                                .ok_or("set XDG_DATA_HOME or specify --database")?;
+                            let dir = data.join("venera").join(&uuid);
+                            std::fs::create_dir_all(&dir)?;
+                            dir.join("history.db")
+                        }
+                    };
+                    (libvirt::Target::Domain { uuid, port }, database)
+                }
+                None => (
+                    libvirt::Target::Direct(transport::VsockConnector::new(cid.unwrap(), port)?),
+                    database.unwrap(),
+                ),
+            };
+            let control = match control {
+                Some(path) => path,
+                None => {
+                    let path = default_control();
+                    std::fs::create_dir_all(path.parent().unwrap())?;
+                    path
+                }
+            };
+            serve(target, database, max_bytes, control, assets, listen, no_web)
+        }
         Command::Export {
             database,
             from,
@@ -126,6 +158,16 @@ fn run() -> Result<()> {
             )
         }
     }
+}
+fn absolute_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+fn default_control() -> PathBuf {
+    absolute_env("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() })))
+        .join("venera/control.sock")
 }
 fn command(control: PathBuf, method: &str, params: Value) -> Result<()> {
     let mut stream = UnixStream::connect(control)?;
@@ -401,7 +443,6 @@ async fn initialize(
     max_bytes: u64,
     control: PathBuf,
 ) -> Result<Collector> {
-    let store = Store::open(database, max_bytes)?;
     let listener = match UnixListener::bind(&control) {
         Ok(listener) => listener,
         Err(error) if error.kind() == ErrorKind::AddrInUse => {
@@ -419,12 +460,19 @@ async fn initialize(
                     std::fs::remove_file(&control)?;
                     UnixListener::bind(&control)?
                 }
-                _ => return Err(error.into()),
+                _ => {
+                    return Err(format!(
+                        "control socket {} is in use; choose another --control path",
+                        control.display()
+                    )
+                    .into())
+                }
             }
         }
         Err(error) => return Err(error.into()),
     };
     let cleanup = Cleanup(control);
+    let store = Store::open(database, max_bytes)?;
     listener.set_nonblocking(true)?;
     store.append(&json!({"major":1,"type":"host.started"}))?;
     Ok(Collector {
@@ -450,7 +498,19 @@ pub fn serve(
     let assets = if no_web {
         assets
     } else {
-        Some(assets.ok_or("--assets is required to serve the dashboard")?)
+        Some(match assets {
+            Some(path) => path,
+            None => {
+                let exe = std::env::current_exe()?;
+                [
+                    exe.with_file_name("../share/venera/web"),
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist"),
+                ]
+                .into_iter()
+                .find(|dir| dir.join("index.html").is_file())
+                .ok_or("dashboard assets not found; specify --assets or select --no-web")?
+            }
+        })
     };
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async move {
