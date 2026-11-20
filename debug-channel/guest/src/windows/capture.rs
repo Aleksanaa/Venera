@@ -120,22 +120,11 @@ fn finish_source(
     history: &crate::history::History,
     path: &Path,
     source: ImportSource,
-    diagnostic: Option<(String, Option<u64>)>,
-    graphics: Option<crate::engine_events::GraphicsUpdate>,
+    diagnostics: capture_storage::ImportDiagnostics,
 ) -> io::Result<()> {
     let boot = state.lock().unwrap().boot_id.parse().unwrap_or(0);
     let name = path.file_name().unwrap().to_string_lossy();
-    let recorder = name.starts_with("recorder-").then(|| match &diagnostic {
-        Some((reason, _)) => serde_json::json!({
-            "error": format!("{reason}; source={}", source.id), "file": name
-        }),
-        None => serde_json::json!("exported"),
-    });
-    history.complete_graphics_import(source, diagnostic, boot, now_ms(), graphics)?;
-    if let Some(result) = recorder {
-        state.lock().unwrap().status.health["recorder"] = result;
-    }
-    Ok(())
+    diagnostics.finish(state, history, source, &name, boot, now_ms())
 }
 
 fn corrupt(error: &io::Error) -> bool {
@@ -415,24 +404,25 @@ fn import_file(
             visit_failed |= result.is_err();
             result
         });
-        let (through, diagnostic) = match summary {
-            Ok(summary) => {
-                let limit = if name.starts_with("recorder-") { 4 } else { 32 } * 1024 * 1024;
-                let capacity = summary.physical_bytes >= limit;
-                (
-                    summary.events,
-                    capture_storage::capture_loss(
-                        summary.events_lost,
-                        summary.buffers_lost,
-                        invalid_events + if graphics { decoder.evicted() } else { decoder.incomplete() },
-                        capacity,
-                        recovered,
-                    ),
-                )
-            }
-            Err(error) if !visit_failed && corrupt(&error) => {
-                (last, Some((format!("capture_read_failed: {error}"), None)))
-            }
+        let (through, diagnostics) = match summary {
+            Ok(summary) => (
+                summary.events,
+                capture_storage::ImportDiagnostics::sealed(
+                    &name,
+                    summary.physical_bytes,
+                    recovered,
+                    summary.events_lost,
+                    summary.buffers_lost,
+                    invalid_events
+                        + if graphics { decoder.evicted() } else { decoder.incomplete() },
+                ),
+            ),
+            Err(error) if !visit_failed && corrupt(&error) => (
+                last,
+                capture_storage::ImportDiagnostics::source_failure(format!(
+                    "capture_read_failed: {error}"
+                )),
+            ),
             Err(error) => return Err(error),
         };
         history.import_batch(ImportBatch {
@@ -442,17 +432,19 @@ fn import_file(
             entries: pending,
             now_ms: (clock::filetime() - 116444736000000000) / 10000,
         })?;
-        if let Some(pid) = missing_process.filter(|_| diagnostic.is_none()) {
+        if let Some(pid) = missing_process.filter(|_| diagnostics.loss.is_none()) {
             state.lock().unwrap().status.health["process_history"] = serde_json::json!({
                 "error": "Process history unavailable for captured record", "pid": pid, "file": name,
             });
         }
-        finish_source(
+        let boot = state.lock().unwrap().boot_id.parse().unwrap_or(0);
+        diagnostics.finish_with_graphics(
             state,
             history,
-            path,
             source.clone(),
-            diagnostic,
+            &name,
+            boot,
+            now_ms(),
             graphics.then(|| decoder.checkpoint(source.boot_filetime)),
         )?;
     }
@@ -607,8 +599,7 @@ fn import_sealed(
                     history,
                     &path,
                     source.clone(),
-                    Some((reason, None)),
-                    None,
+                    capture_storage::ImportDiagnostics::source_failure(reason),
                 )?;
                 if !same_file(&source, &path)? {
                     return Err(io::ErrorKind::InvalidData.into());
@@ -2828,21 +2819,24 @@ mod tests {
         state.lock().unwrap().boot_id = clock::boot_id().unwrap();
         import_sealed(&state, &history, &directory, &[]).unwrap();
         assert_eq!(traces(&directory).unwrap().len(), 0);
-        let range = history.range().unwrap();
-        let records = history
-            .read(venera_debug_protocol::v1::HistoryRead {
-                after: Some(venera_debug_protocol::v1::HistoryCursor {
-                    journal_id: range.journal_id,
-                    position: venera_debug_protocol::v1::DecimalU64(
-                        range.high_water.0.saturating_sub(1),
-                    ),
-                }),
-                through: None,
-                limit: 100,
-            })
-            .unwrap()
-            .records;
-        assert!(records.iter().any(|record| matches!(&record.event, venera_debug_protocol::v1::HistoryEvent::Gap { gap } if gap.reason.contains("recovered_export=true") || gap.reason.starts_with("capture_header_failed:"))));
+        let records = history_records(&history);
+        let health = state.lock().unwrap().status.health.clone();
+        let file = original[0].file_name().unwrap().to_str().unwrap();
+        if let Some(gap) = records.iter().find_map(|record| match &record.event {
+            venera_debug_protocol::v1::HistoryEvent::Gap { gap }
+                if gap.reason.starts_with("capture_header_failed:")
+                    || gap.reason.starts_with("capture_read_failed:") => Some(gap),
+            _ => None,
+        }) {
+            assert_eq!(gap.count, None);
+            assert_eq!(health["recorder"], serde_json::json!({"error": gap.reason, "file": file}));
+        } else {
+            assert_eq!(health["capture_session"]["file"], file);
+            assert_eq!(health["capture_session"]["recovered_export"], true);
+            if health["recorder"] == "exported" {
+                assert!(records.iter().all(|record| matches!(record.event, venera_debug_protocol::v1::HistoryEvent::Log { .. })));
+            }
+        }
         stop.store(true, Ordering::Release);
         owner.join().unwrap().unwrap();
     }
