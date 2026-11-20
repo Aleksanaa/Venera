@@ -48,16 +48,6 @@ pub(crate) mod wire {
     }
 
     pub(crate) fn status_v1(status: &Status) -> Result<v1::Status, serde_json::Error> {
-        let mut health = status.health.clone();
-        if let Some(sessions) = health
-            .get_mut("session_helper_loss")
-            .and_then(Value::as_object_mut)
-        {
-            for session in sessions.values_mut() {
-                decimal_counter(session, "dropped_total")?;
-                decimal_counter(session, "reported_total")?;
-            }
-        }
         let mut loss = status.loss.clone();
         for key in [
             "queue_dropped",
@@ -72,7 +62,7 @@ pub(crate) mod wire {
             revision: v1::DecimalU64(status.revision),
             effective_filter: filter_v1(&status.effective_filter)?,
             expires_at: status.expires_at.clone(),
-            health,
+            health: status.health.clone(),
             loss,
         })
     }
@@ -191,7 +181,7 @@ pub(crate) mod wire {
         fn filter_results_encode_current_health_and_loss() {
             let mut state = State::new("run-1".into(), true);
             state.add_peer();
-            state.status.health = json!({"port":"connected","session_helper_loss":{"2":{"pid":10852,"dropped_total":18446744073709551615u64,"reported_total":9}}});
+            state.status.health = json!({"port":"connected"});
             state.status.loss = json!({"process_event_parse_errors":7,"process_capture_queue_dropped":8,"etw_events_lost":4,"process_tracking_overflow":true});
             state.dropped = u64::MAX;
             state.parse_errors = 3;
@@ -227,17 +217,13 @@ pub(crate) mod wire {
                     value["result"],
                     json!({
                         "forwarding_enabled":true,"revision":revision,"effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,
-                        "health":{"port":"connected","session_helper_loss":{"2":{"pid":10852,"dropped_total":"18446744073709551615","reported_total":"9"}}},
+                        "health":{"port":"connected"},
                         "loss":{"queue_dropped":"18446744073709551615","parse_errors":"3","process_event_parse_errors":"7","process_capture_queue_dropped":"8","etw_events_lost":4,"process_tracking_overflow":true}
                     })
                 );
                 let local = serde_json::to_value(response).unwrap();
                 assert_eq!(
                     local["status"]["loss"]["queue_dropped"],
-                    json!(18446744073709551615u64)
-                );
-                assert_eq!(
-                    local["status"]["health"]["session_helper_loss"]["2"]["dropped_total"],
                     json!(18446744073709551615u64)
                 );
             }
@@ -259,7 +245,7 @@ pub(crate) mod wire {
         #[test]
         fn status_notifications_encode_known_counters_and_preserve_other_values() {
             let mut state = State::new("run-1".into(), true);
-            state.status.health = json!({"sessions":[2],"session_helper_loss":{"2":{"pid":4294967295u32,"dropped_total":4,"reported_total":3}},"vendor":{"value":42}});
+            state.status.health = json!({"sessions":[2],"vendor":{"value":42}});
             state.dropped = 5;
             state.parse_errors = 6;
             let envelope = Envelope::new(Message::Status {
@@ -270,7 +256,7 @@ pub(crate) mod wire {
                 value,
                 json!({"jsonrpc":"2.0","method":"status.changed","params":{
                     "forwarding_enabled":true,"revision":"0","effective_filter":{"components":[],"levels":[],"targets":[]},"expires_at":null,
-                    "health":{"sessions":[2],"session_helper_loss":{"2":{"pid":4294967295u32,"dropped_total":"4","reported_total":"3"}},"vendor":{"value":42}},
+                    "health":{"sessions":[2],"vendor":{"value":42}},
                     "loss":{"queue_dropped":"5","parse_errors":"6"}
                 }})
             );
@@ -482,7 +468,7 @@ impl State {
                 revision: 0,
                 effective_filter: Filter::default(),
                 expires_at: None,
-                health: json!({"driver":"probing","controller":"probing","port":"waiting","host":"waiting","dbwin":"starting","etw":"starting","sessions":[]}),
+                health: json!({"driver":"probing","controller":"probing","port":"waiting","host":"waiting","etw":"starting","sessions":[]}),
                 loss: json!({"queue_dropped":0,"parse_errors":0}),
             },
             stream_id,
@@ -745,59 +731,6 @@ impl State {
         }
         peer.replies.pop_front()
     }
-    pub fn observe_helper_drops(&mut self, session: u32, pid: u32, dropped: u64) -> bool {
-        for peer in self.peers.values_mut() {
-            if peer.closed {
-                continue;
-            }
-            let reported = peer
-                .helper_drops
-                .get(&session)
-                .filter(|(previous_pid, _)| *previous_pid == pid)
-                .map(|(_, count)| *count)
-                .unwrap_or(0);
-            if dropped > reported {
-                if !peer.control_room() {
-                    peer.closed = true;
-                    continue;
-                }
-                let message = Envelope::new(Message::Gap {
-                    stream_id: self.stream_id.clone(),
-                    reason: format!("session_{session}_queue_overflow"),
-                    count: Some(dropped - reported),
-                    first_seq: None,
-                    last_seq: None,
-                });
-                peer.controls
-                    .push_back(venera_debug_protocol::encode(&message).unwrap());
-                peer.helper_drops.insert(session, (pid, dropped));
-            } else if dropped == 0 && reported == 0 {
-                peer.helper_drops.insert(session, (pid, 0));
-            }
-        }
-        // Minimum cumulative loss admitted to active peers' queues; with no
-        // active peer the current total is the completed reporting baseline.
-        let reported_total = self
-            .peers
-            .values()
-            .filter(|peer| !peer.closed)
-            .map(|peer| {
-                peer.helper_drops
-                    .get(&session)
-                    .filter(|(previous_pid, _)| *previous_pid == pid)
-                    .map(|(_, count)| *count)
-                    .unwrap_or(0)
-            })
-            .min()
-            .unwrap_or(dropped);
-        let key = session.to_string();
-        let snapshot = json!({"pid":pid,"dropped_total":dropped,"reported_total":reported_total});
-        let changed = self.status.health["session_helper_loss"][&key] != snapshot;
-        if changed {
-            self.status.health["session_helper_loss"][&key] = snapshot;
-        }
-        changed
-    }
 }
 
 #[derive(Default)]
@@ -806,7 +739,6 @@ pub struct PeerQueue {
     closed: bool,
     pub controls: VecDeque<Vec<u8>>,
     replies: VecDeque<(Option<u64>, Vec<u8>)>,
-    helper_drops: BTreeMap<u32, (u32, u64)>,
 }
 impl PeerQueue {
     fn control_room(&self) -> bool {
@@ -1066,96 +998,6 @@ mod tests {
         assert!(state.peer_control_room(a));
         assert!(state.queue_peer_control(a, &response));
         assert_eq!(peer_value(&mut state, a)["id"], "status");
-    }
-    #[test]
-    fn helper_loss_closes_congested_peer_and_reports_each_delta_once_to_normal_peer() {
-        let mut state = State::new("run-1".into(), true);
-        let a = state.add_peer();
-        let b = state.add_peer();
-        let response = state.result("queued".into(), "status.get");
-        for _ in 0..64 {
-            assert!(state.queue_peer_control(a, &response));
-        }
-        state.observe_helper_drops(2, 100, 3);
-        assert_eq!(
-            peer_value(&mut state, b)["params"],
-            json!({
-                "stream_id":"run-1","reason":"session_2_queue_overflow","count":"3","first_seq":null,"last_seq":null
-            })
-        );
-        assert!(state.peer_closed(a));
-        assert_eq!(
-            state.current().health["session_helper_loss"]["2"],
-            json!({"pid":100,"dropped_total":3,"reported_total":3})
-        );
-        state.observe_helper_drops(2, 100, 3);
-        assert_eq!(state.next_line(b), None);
-        state.observe_helper_drops(2, 100, 5);
-        assert_eq!(peer_value(&mut state, b)["params"]["count"], "2");
-        assert_eq!(state.next_line(b), None);
-    }
-    fn next_gap(state: &mut State) -> serde_json::Value {
-        let (_, bytes) = state.next_line(1).unwrap();
-        serde_json::to_value(venera_debug_protocol::decode(&bytes).unwrap()).unwrap()
-    }
-    #[test]
-    fn helper_loss_reports_current_total_to_reconnected_peer() {
-        let mut state = State::new("run-1".into(), true);
-        let a = state.add_peer();
-        let response = Envelope::new(Message::StatusGet {
-            request_id: "queued".into(),
-        });
-        for _ in 0..64 {
-            assert!(state.queue_peer_control(a, &response));
-        }
-        assert!(state.observe_helper_drops(2, 10852, 10925));
-        assert!(state.peer_closed(a));
-        assert_eq!(
-            serde_json::to_value(state.current()).unwrap()["health"]["session_helper_loss"],
-            json!({"2":{"pid":10852,"dropped_total":10925,"reported_total":10925}})
-        );
-        state.remove_peer(a);
-        let b = state.add_peer();
-        state.observe_helper_drops(2, 10852, 10925);
-        assert_eq!(
-            serde_json::to_value(state.current()).unwrap()["health"]["session_helper_loss"],
-            json!({"2":{"pid":10852,"dropped_total":10925,"reported_total":10925}})
-        );
-        assert_eq!(
-            peer_value(&mut state, b),
-            json!({"jsonrpc":"2.0","method":"gap","params":{"stream_id":"run-1","reason":"session_2_queue_overflow","count":"10925","first_seq":null,"last_seq":null}})
-        );
-        assert!(!state.observe_helper_drops(2, 10852, 10925));
-        state.queue_peer_control(
-            b,
-            &Envelope::new(Message::StatusGet {
-                request_id: "after-repeat".into(),
-            }),
-        );
-        assert_eq!(
-            venera_debug_protocol::decode(&state.next_line(b).unwrap().1)
-                .map(|envelope| serde_json::to_value(envelope).unwrap())
-                .unwrap(),
-            json!({"major":1,"type":"status.get","request_id":"after-repeat"})
-        );
-    }
-    #[test]
-    fn helper_restart_uses_its_own_cumulative_loss_baseline() {
-        let mut state = State::new("run-1".into(), true);
-        state.add_peer();
-        state.observe_helper_drops(2, 100, 40);
-        assert_eq!(next_gap(&mut state)["count"], 40);
-        state.observe_helper_drops(2, 200, 3);
-        assert_eq!(
-            serde_json::to_value(state.current()).unwrap()["health"]["session_helper_loss"]["2"],
-            json!({"pid":200,"dropped_total":3,"reported_total":3})
-        );
-        assert_eq!(next_gap(&mut state)["count"], 3);
-        state.observe_helper_drops(2, 200, 8);
-        assert_eq!(next_gap(&mut state)["count"], 5);
-        state.observe_helper_drops(2, 300, 0);
-        state.observe_helper_drops(2, 300, 2);
-        assert_eq!(next_gap(&mut state)["count"], 2);
     }
     #[test]
     fn forwarding_resume_admits_fresh_history_replies() {

@@ -5,7 +5,7 @@ This file defines the debug channel vocabulary. See the [guest service](docs/vir
 | Term | Meaning |
 |---|---|
 | Log producer | A component, driver, service, or helper process that produces diagnostic records. Users set its debug verbosity through component configuration, determining the actual output volume. |
-| Session collector | A collection process running in a Windows logon session, covering local sessions, RDP sessions, and sessions retained after switching users. |
+| Session helper | A process that gathers system information in a particular Windows logon session, including local and RDP sessions. |
 | Machine aggregator | The continuously running guest background process that aggregates session and system records, listens for VirtIO socket connections, and maintains the authoritative reception filter. |
 | Host receiver | The host background process that continuously receives and saves records and provides queries and controls. |
 | Host service | The background application that connects to a guest, continuously collects history, and provides the browser workbench and local controls. |

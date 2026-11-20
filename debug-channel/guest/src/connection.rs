@@ -677,7 +677,7 @@ mod tests {
                 output,
                 vec![json!({"jsonrpc":"2.0","id":id,"result":{
                     "forwarding_enabled":true,"revision":"0","effective_filter":{"components":[],"levels":[],"targets":[]},
-                    "expires_at":null,"health":{"driver":"probing","controller":"probing","port":"waiting","host":"waiting","dbwin":"starting","etw":"starting","sessions":[]},
+                    "expires_at":null,"health":{"driver":"probing","controller":"probing","port":"waiting","host":"waiting","etw":"starting","sessions":[]},
                     "loss":{"queue_dropped":"0","parse_errors":"0"}
                 }})]
             );

@@ -1,6 +1,6 @@
 # Windows Debug Background Service
 
-`venera-debug-guest.exe` collects debug output from logon sessions, system debug events, and Venera engine records into Windows history. Panel displays live records locally, and Linux clients archive history over VirtIO sockets. Windows listens on port 49152 through the viosock Winsock provider; Linux clients connect using the VM's guest CID. The service is named `VeneraDebugGuest` and starts automatically as LocalSystem. Each logon session runs the same program in `session-helper` mode, including disconnected RDP sessions that remain logged on.
+`VeneraDebugGuest` starts automatically as LocalSystem and collects Windows event traces from the graphics stack, the resolution service and its session helper. Panel displays the records locally, and Linux clients archive them over VirtIO sockets on guest port 49152. Each logon session also runs `venera-debug-guest.exe session-helper` to answer system information requests for that session.
 
 ## Windows History
 
@@ -89,11 +89,11 @@ Local clients connect through `\\.\pipe\VeneraDebugGuest.v1`. Both the named pip
 
 ## Sources and Metadata
 
-Recognized components are `venera_d3d11`, `venera_d3d12`, `mesa`, `venus`, `dxvk`, `vkd3d`, `vkd3d-shader`, `kernel`, and `service`. Venus uses the `MESA-VIRTIO` tag. Service/helper logs are identified by actual executable paths in the installation directory. For structured Venera driver records, `structured.event_id` identifies kernel events (1–4), D3D11 messages (5), and D3D12 messages (6).
+The Venera ETW provider identifies each producer by event ID: kernel (1–4), D3D11 and D3D12 (5–6), DXVK (7), vkd3d-proton (8), Mesa (9–10), the resolution service `vgpusrv` (11), and its display helper `viogpuap` (12). Venus uses Mesa event 10 with the `MESA-VIRTIO` tag. Look at `component` to identify the producer and `process` to see which executable emitted the event.
 
 On installations where Venera owns GlobalLogger, the service imports legacy kernel `DbgPrint` messages from its boot trace. Setup preserves an existing externally managed GlobalLogger configuration; on those systems, early `DbgPrint` coverage depends on the external logger settings. Venera's structured kernel events use a separate boot trace.
 
-DXVK/vkd3d `VDBG1` records are reassembled by producer, thread, sequence, and fragment number from the native adapter. Original bytes are concatenated and decoded as strict UTF-8. Ordinary DBWIN content is decoded as UTF-8 first; other bytes are converted using the current Windows ANSI code page. Complete text is retained in `text`, and the original level in `raw_level`. Sources without a level use `unknown`.
+Long engine messages are reassembled before they appear in history. The complete message is in `text`; `raw_level` preserves the producer's severity or reads `unknown` if the producer supplied none. The resolution service and display helper publish Unicode text to the trace and also append to their existing `vgpusvp.log` file.
 
 The canonical record preserves `observed_at`, the collection timestamp, separately from `source_time`, the timestamp supplied by the source. ETW source timestamps use UTC with millisecond precision. Panel displays the original observation time in local time. Optional unknown metadata uses the protocol's null values.
 
@@ -101,7 +101,7 @@ Log `seq` is a decimal-string sequence within `stream_id`. The durable history c
 
 The service tracks process creation and exit events and supplements them with process snapshots. A record carries the available process identity and an optional `ancestors` chain, nearest parent first. Each instance uses PID and creation FILETIME, plus the executable path when available. The saved identities support historical descendant matching after a parent exits or its PID is reused.
 
-Native reassembly losses, session-helper capture losses and incremental ETW event losses are retained as `gap` events. If a sealed trace reports lost events, the journal stores a `gap` record with its own cursor and a reason beginning with `capture_loss`. In contrast, `history.read` lists expired journal positions in the page's `missing` intervals with reason `retention_expired`.
+Incomplete messages and ETW event losses are retained as `gap` events. If a sealed trace reports lost events, the journal stores a `gap` record with its own cursor and a reason beginning with `capture_loss`. In contrast, `history.read` lists expired journal positions in the page's `missing` intervals with reason `retention_expired`.
 
 ## Build
 

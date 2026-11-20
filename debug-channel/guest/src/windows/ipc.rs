@@ -17,18 +17,14 @@ use windows_sys::Win32::{
 };
 const PIPE: &str = "\\\\.\\pipe\\VeneraDebugGuest.v1";
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
-// The command reader may be collecting a system report (30 s) before it reads a receipt.
-const CAPTURE_ACK_TIMEOUT: Duration = Duration::from_secs(35);
+// The command reader may be collecting a system report before reading a receipt.
+const HELPER_ACK_TIMEOUT: Duration = Duration::from_secs(35);
 const LIMIT: usize = venera_debug_protocol::DEFAULT_MAX_LINE_BYTES;
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct HelperFrame {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Delivery receipts keep older helpers' report replies working across reconnects.
     delivery: Option<u64>,
-    capture: Option<Capture>,
-    health: serde_json::Value,
-    dropped: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     system_info: Option<venera_debug_protocol::SystemInfoResult>,
 }
 
@@ -309,11 +305,11 @@ fn client(file: File, state: Shared, finite: &mut bool, local_stop: &AtomicBool)
                 if reliable {
                     let id = frame.delivery.ok_or(io::ErrorKind::InvalidData)?;
                     receive_once(&cursor, id, || {
-                        receive_helper_frame(&state, session, pid, frame)
+                        receive_helper_frame(session, frame)
                     })?;
                     write_capture_ack(&mut file, id)?;
                 } else {
-                    receive_helper_frame(&state, session, pid, frame);
+                    receive_helper_frame(session, frame);
                 }
                 if let Some(request_id) = system_info::helper_command(session) {
                     reply(
@@ -344,76 +340,10 @@ fn receive_once(cursor: &Mutex<u64>, id: u64, receive: impl FnOnce()) -> io::Res
     Ok(())
 }
 
-fn receive_helper_frame(state: &Shared, session: u32, pid: u32, mut frame: HelperFrame) {
-    if let Some(result) = frame.system_info.take() {
+fn receive_helper_frame(session: u32, frame: HelperFrame) {
+    if let Some(result) = frame.system_info {
         system_info::helper_result(session, result);
     }
-    let (lost, stream_id) = {
-        let mut state = state.lock().unwrap();
-        let key = session.to_string();
-        let previous = &state.status.health["session_helper_loss"][&key];
-        let before = if previous["pid"] == pid {
-            previous["dropped_total"].as_u64().unwrap_or(0)
-        } else {
-            0
-        };
-        let lost = frame.dropped.saturating_sub(before);
-        let mut changed = state.status.health["session_capture"][&key] != frame.health;
-        state.status.health["session_capture"][&key] = frame.health;
-        changed |= state.observe_helper_drops(session, pid, frame.dropped);
-        if changed {
-            state.notify();
-        }
-        (lost, state.stream_id.clone())
-    };
-    if lost != 0 {
-        retain_event(
-            state,
-            venera_debug_protocol::v1::HistoryEvent::Gap {
-                gap: venera_debug_protocol::v1::Gap {
-                    stream_id,
-                    reason: "session_capture_overflow".into(),
-                    count: Some(venera_debug_protocol::v1::DecimalU64(lost)),
-                    first_seq: None,
-                    last_seq: None,
-                },
-            },
-        );
-    }
-    let Some(mut capture) = frame.capture else {
-        return;
-    };
-    if let Some(source_pid) = capture.pid {
-        let mut actual = 0;
-        let cached = state
-            .lock()
-            .unwrap()
-            .processes
-            .observed(source_pid, capture.observed_filetime);
-        let verified = cached
-            .as_ref()
-            .is_some_and(|(_, actual)| *actual == Some(session))
-            || (unsafe { ProcessIdToSessionId(source_pid, &mut actual) } != 0 && actual == session);
-        if !verified {
-            return;
-        }
-        let captured = capture
-            .process
-            .take()
-            .filter(|identity| identity.pid == source_pid);
-        capture.process = crate::collector::merge_identity(
-            captured,
-            cached
-                .map(|(identity, _)| identity)
-                .or_else(|| Some(process::identity(source_pid))),
-        );
-    }
-    capture.session_id = Some(session);
-    capture.source = "dbwin".into();
-    capture.tid = None;
-    capture.raw_level = None;
-    capture.component = None;
-    accept(state, capture);
 }
 
 fn rpc_client(
@@ -758,7 +688,7 @@ fn helper_commands_with(
     stop.store(true, Ordering::Release);
 }
 
-fn capture_handshake(
+fn helper_handshake(
     file: &mut ClientPipe,
     deadline: Instant,
 ) -> io::Result<(BufReader<ClientPipe>, bool)> {
@@ -775,13 +705,10 @@ fn capture_handshake(
     Ok((reader, ack["capture_ack"] == true))
 }
 
+#[derive(Default)]
 struct HelperOutput {
     confirmed: u64,
     replay: Option<Vec<u8>>,
-    captures: mpsc::Receiver<Capture>,
-    pending: Option<Capture>,
-    status: Arc<Mutex<serde_json::Value>>,
-    dropped: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HelperOutput {
@@ -790,74 +717,47 @@ impl HelperOutput {
         file: &mut impl Write,
         reports: mpsc::Receiver<venera_debug_protocol::SystemInfoResult>,
         acks: Option<&mpsc::Receiver<u64>>,
-        commands_finished: impl Fn() -> bool,
     ) -> io::Result<()> {
+        let mut report = None;
         loop {
+            if self.replay.is_none() {
+                // Heartbeats prompt the service to send a pending report request.
+                // Keep the envelope readable by older services.
+                let mut frame = serde_json::json!({"capture":null,"health":null,"dropped":0});
+                if let Some(result) = report.take() {
+                    frame["system_info"] = serde_json::to_value(result)?;
+                }
+                if acks.is_some() {
+                    let id = self.confirmed.checked_add(1).ok_or(io::ErrorKind::InvalidData)?;
+                    frame["delivery"] = serde_json::json!(id);
+                }
+                let mut bytes = serde_json::to_vec(&frame)?;
+                bytes.push(b'\n');
+                if acks.is_some() {
+                    self.replay = Some(bytes);
+                } else {
+                    file.write_all(&bytes)?;
+                }
+            }
             if let Some(bytes) = &self.replay {
                 let acks = acks.ok_or(io::ErrorKind::InvalidData)?;
                 file.write_all(bytes)?;
-                let id = acks
-                    .recv_timeout(CAPTURE_ACK_TIMEOUT)
-                    .map_err(|e| match e {
-                        mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
-                        mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::BrokenPipe,
-                    })?;
+                let id = acks.recv_timeout(HELPER_ACK_TIMEOUT).map_err(|e| match e {
+                    mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                    mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::BrokenPipe,
+                })?;
                 if self.confirmed.checked_add(1) != Some(id) {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 self.confirmed = id;
                 self.replay = None;
-                continue;
             }
-            if self.pending.is_none() {
-                self.pending = match self.captures.recv_timeout(Duration::from_secs(1)) {
-                    Ok(capture) => Some(capture),
-                    Err(mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                };
-            }
-            if commands_finished() {
-                return Ok(());
-            }
-            let frame = HelperFrame {
-                delivery: acks.map(|_| self.confirmed + 1),
-                capture: self.pending.take(),
-                health: self.status.lock().unwrap().clone(),
-                dropped: self.dropped.load(Ordering::Relaxed),
-                system_info: reports.try_recv().ok(),
+            report = match reports.recv_timeout(Duration::from_secs(1)) {
+                Ok(result) => Some(result),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             };
-            let encoded = serde_json::to_vec(&frame);
-            self.pending = frame.capture;
-            let mut bytes = encoded?;
-            bytes.push(b'\n');
-            if acks.is_some() {
-                self.pending.take();
-                self.replay = Some(bytes);
-                continue;
-            }
-            let first = file.write(&bytes)?;
-            if first == 0 {
-                return Err(io::ErrorKind::WriteZero.into());
-            }
-            // Only an untouched capture can move to the next connection.
-            let had_capture = self.pending.take().is_some();
-            if let Err(issue) = file.write_all(&bytes[first..]) {
-                if had_capture {
-                    self.dropped.fetch_add(1, Ordering::Relaxed);
-                }
-                return Err(issue);
-            }
         }
-    }
-}
-
-fn enqueue_capture(
-    tx: &mpsc::SyncSender<Capture>,
-    dropped: &std::sync::atomic::AtomicU64,
-    capture: Capture,
-) {
-    if tx.try_send(capture).is_err() {
-        dropped.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -866,38 +766,11 @@ pub fn helper() -> io::Result<()> {
     if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) } == 0 {
         return Err(error());
     }
-    let (tx, rx) = mpsc::sync_channel(2048);
-    let status = Arc::new(Mutex::new(serde_json::json!("starting")));
-    let dropped = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let collector_status = status.clone();
-    let collector_dropped = dropped.clone();
-    std::thread::spawn(move || loop {
-        let result = dbwin::collect(
-            false,
-            |capture| enqueue_capture(&tx, &collector_dropped, capture),
-            || true,
-            || {
-                *collector_status.lock().unwrap() = serde_json::json!("collecting");
-            },
-        );
-        if let Err(e) = result {
-            *collector_status.lock().unwrap() = serde_json::json!({"error":e.to_string()});
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
-    });
-    let mut output = HelperOutput {
-        captures: rx,
-        pending: None,
-        confirmed: 0,
-        replay: None,
-        status,
-        dropped,
-    };
+    let mut output = HelperOutput::default();
     loop {
         if let Ok(mut file) = connect_pipe() {
             let connection_stop = file.stop.clone();
-            if let Ok((reader, reliable)) =
-                capture_handshake(&mut file, Instant::now() + RPC_TIMEOUT)
+            if let Ok((reader, reliable)) = helper_handshake(&mut file, Instant::now() + RPC_TIMEOUT)
             {
                 let reader_stop = connection_stop.clone();
                 let (report_tx, report_rx) = mpsc::sync_channel(1);
@@ -913,10 +786,7 @@ pub fn helper() -> io::Result<()> {
                             reliable.then_some(ack_tx),
                         )
                     })?;
-                let _ =
-                    output.send_frames(&mut file, report_rx, reliable.then_some(&ack_rx), || {
-                        commands.is_finished()
-                    });
+                let _ = output.send_frames(&mut file, report_rx, reliable.then_some(&ack_rx));
                 connection_stop.store(true, Ordering::Release);
                 let _ = commands.join();
             }
@@ -1204,11 +1074,11 @@ mod tests {
         let (done, result) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let failure =
-                capture_handshake(&mut first, Instant::now() + Duration::from_millis(250))
+                helper_handshake(&mut first, Instant::now() + Duration::from_millis(250))
                     .err()
                     .unwrap();
             assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
-            capture_handshake(&mut second, Instant::now() + RPC_TIMEOUT).unwrap();
+            helper_handshake(&mut second, Instant::now() + RPC_TIMEOUT).unwrap();
             done.send(()).unwrap();
         });
         result.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -1219,149 +1089,35 @@ mod tests {
         worker.join().unwrap();
     }
 
-    fn helper_output() -> (mpsc::Sender<Capture>, HelperOutput) {
-        let (tx, captures) = mpsc::channel();
-        (
-            tx,
-            HelperOutput {
-                captures,
-                pending: None,
-                confirmed: 0,
-                replay: None,
-                status: Arc::new(Mutex::new(serde_json::json!("collecting"))),
-                dropped: Arc::default(),
-            },
-        )
-    }
-
     #[test]
-    fn helper_reconnect_delivers_captures_in_order() {
-        for (finished, capacity, expected, drops) in [
-            (true, 0, vec!["first", "second"], 0),
-            (false, 0, vec!["first", "second"], 0),
-            (false, 4, vec!["second"], 1),
-        ] {
-            let (tx, mut output) = helper_output();
-            for text in ["first", "second"] {
-                tx.send(serde_json::from_value(serde_json::json!({"text":text,"source":"dbwin","observed_at":"now","observed_filetime":0})).unwrap()).unwrap();
-            }
-            drop(tx);
-            let mut prefix = [0u8; 4];
-            let mut old = &mut prefix[..capacity];
-            let outcome = output.send_frames(&mut old, mpsc::channel().1, None, || finished);
-            assert_eq!(outcome.is_ok(), finished);
-            let (service, mut helper) = helper_pair();
-            output
-                .send_frames(&mut helper, mpsc::channel().1, None, || false)
-                .unwrap();
-            helper.write_all(b"\n").unwrap();
-            let frames: Vec<HelperFrame> = BufReader::new(service)
-                .lines()
-                .map(Result::unwrap)
-                .take_while(|s| !s.is_empty())
-                .map(|s| serde_json::from_str(&s).unwrap())
-                .collect();
-            assert_eq!(
-                frames
-                    .iter()
-                    .map(|f| f.capture.as_ref().unwrap().text.as_str())
-                    .collect::<Vec<_>>(),
-                expected
-            );
-            assert_eq!(frames[0].dropped, drops);
-        }
-    }
-
-    #[test]
-    fn helper_replays_in_order_and_reports_queue_overflow() {
-        let (tx, rx) = mpsc::sync_channel(2);
-        let (_, mut output) = helper_output();
-        output.captures = rx;
-        for text in ["first", "second", "third", "fourth", "fifth"] {
-            enqueue_capture(&tx, &output.dropped, serde_json::from_value(serde_json::json!({"text":text,"source":"dbwin","observed_at":"now","observed_filetime":0})).unwrap());
-        }
-        drop(tx);
-        let (mut prefix, mut first) = ([0; 8], Vec::new());
-        let (closed, lost_ack) = mpsc::channel();
-        drop(closed);
+    fn helper_replays_unacknowledged_system_report() {
+        let result = serde_json::json!({"request_id":"report-2","ok":true,"collected_at":"2026-11-11T00:00:00Z","session_id":2,"sections":[]});
+        let (report_tx, reports) = mpsc::channel();
+        report_tx.send(serde_json::from_value(result.clone()).unwrap()).unwrap();
+        drop(report_tx);
+        let (ack_tx, acks) = mpsc::channel();
+        ack_tx.send(1).unwrap();
+        drop(ack_tx);
+        let mut output = HelperOutput::default();
+        let mut first = Vec::new();
         assert_eq!(
-            output
-                .send_frames(
-                    &mut &mut prefix[..],
-                    mpsc::channel().1,
-                    Some(&lost_ack),
-                    || false
-                )
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::WriteZero
-        );
-        assert!(line(&mut BufReader::new(&prefix[..])).is_err());
-        assert_eq!(
-            output
-                .send_frames(&mut first, mpsc::channel().1, Some(&lost_ack), || false)
-                .unwrap_err()
-                .kind(),
+            output.send_frames(&mut first, reports, Some(&acks)).unwrap_err().kind(),
             io::ErrorKind::BrokenPipe
         );
-        let (receipts, acks) = mpsc::sync_channel(1);
-        let (mut server, mut pipe) = helper_pair();
-        let command_pipe = pipe.clone();
-        let stop = pipe.stop.clone();
-        let commands = std::thread::spawn(move || {
-            helper_commands(
-                BufReader::new(command_pipe),
-                2,
-                stop,
-                mpsc::sync_channel(1).0,
-                Some(receipts),
-            )
-        });
-        let worker = std::thread::spawn(move || {
-            output.send_frames(&mut pipe, mpsc::channel().1, Some(&acks), || false)
-        });
-        let mut reader = BufReader::new(server.try_clone().unwrap());
-        let replay = line(&mut reader).unwrap();
-        assert_eq!(replay, first);
-        let cursor = Mutex::new(0);
-        let mut records = Vec::new();
-        let state = Arc::new(Mutex::new(State::new("helper-test".into(), false)));
-        let peer = state.lock().unwrap().add_local_peer();
-        let mut consume = |bytes: &[u8]| {
-            let frame: HelperFrame = serde_json::from_slice(bytes).unwrap();
-            let id = frame.delivery.unwrap();
-            receive_once(&cursor, id, || {
-                records.push(frame.capture.as_ref().unwrap().text.clone());
-                receive_helper_frame(&state, 2, 42, frame);
-            })
-            .unwrap();
-            id
-        };
-        consume(&first);
-        write_capture_ack(&mut server, consume(&replay)).unwrap();
-        write_capture_ack(&mut server, consume(&line(&mut reader).unwrap())).unwrap();
-        drop(reader);
-        drop(server);
-        commands.join().unwrap();
-        worker.join().unwrap().unwrap();
-        assert_eq!(records, ["first", "second"]);
-        let mut gaps = Vec::new();
-        while let Some((_, bytes)) = state.lock().unwrap().next_line(peer) {
-            if let Message::Gap { reason, count, .. } =
-                venera_debug_protocol::decode(&bytes).unwrap().body
-            {
-                gaps.push((reason, count));
-            }
-        }
-        assert_eq!(gaps, [("session_2_queue_overflow".to_owned(), Some(3))]);
-        assert_eq!(
-            state.lock().unwrap().status.health["session_helper_loss"]["2"]["dropped_total"],
-            3
-        );
+
+        let (ack_tx, acks) = mpsc::channel();
+        ack_tx.send(2).unwrap();
+        let (report_tx, reports) = mpsc::channel();
+        drop(report_tx);
+        let mut replay = Vec::new();
+        output.send_frames(&mut replay, reports, Some(&acks)).unwrap();
+        let replayed: serde_json::Value = serde_json::from_slice(&replay).unwrap();
+        assert_eq!(replayed, serde_json::json!({"delivery":2,"capture":null,"health":null,"dropped":0,"system_info":result}));
+        assert_eq!(first.split_inclusive(|byte| *byte == b'\n').nth(1), Some(replay.as_slice()));
     }
 
     #[test]
-    fn helper_duplex_delivers_health_before_report_command() {
+    fn helper_duplex_delivers_system_report() {
         let (mut service, mut helper) = helper_pair();
         let pending_read = Arc::new(AtomicBool::new(false));
         let stop = helper.stop.clone();
@@ -1369,38 +1125,50 @@ mod tests {
         let server = std::thread::spawn(move || {
             let mut reader = BufReader::new(service.try_clone().expect("service reader"));
             assert_eq!(
-                line(&mut reader).expect("capture handshake"),
+                line(&mut reader).expect("helper handshake"),
                 b"{\"type\":\"local.capture\",\"capture_ack\":true}\n"
             );
             service
-                .write_all(b"{\"ok\":true}\n")
+                .write_all(b"{\"ok\":true,\"capture_ack\":true}\n")
                 .expect("service acknowledgement");
             assert_eq!(
-                line(&mut reader).expect("service health frame"),
-                b"{\"capture\":null,\"health\":\"collecting\",\"dropped\":0}\n"
+                serde_json::from_slice::<serde_json::Value>(
+                    &line(&mut reader).expect("helper heartbeat")
+                ).unwrap(),
+                serde_json::json!({"capture":null,"health":null,"dropped":0,"delivery":1})
             );
-            observed.send("health").unwrap();
+            write_capture_ack(&mut service, 1).unwrap();
+            observed.send("heartbeat").unwrap();
             service
                 .write_all(b"{\"type\":\"local.system.info.get\",\"request_id\":\"duplex-2\"}\n")
                 .expect("service command write");
+            let mut expected_delivery = 2;
             let result = loop {
                 let bytes = line(&mut reader).expect("service report frame");
-                let frame: serde_json::Value =
+                let mut frame: serde_json::Value =
                     serde_json::from_slice(&bytes).expect("service report JSON");
+                assert_eq!(
+                    frame.as_object_mut().unwrap().remove("delivery"),
+                    Some(serde_json::json!(expected_delivery))
+                );
+                write_capture_ack(&mut service, expected_delivery).unwrap();
+                expected_delivery += 1;
                 if !frame["system_info"].is_null() {
                     break frame;
                 }
             };
             assert_eq!(
                 result,
-                serde_json::json!({"capture":null,"health":"collecting","dropped":0,"system_info":{"request_id":"duplex-2","ok":true,"collected_at":"2026-11-11T00:00:00Z","session_id":2,"sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Venera","bad":false,"warning":""}]}]}})
+                serde_json::json!({"capture":null,"health":null,"dropped":0,"system_info":{"request_id":"duplex-2","ok":true,"collected_at":"2026-11-11T00:00:00Z","session_id":2,"sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Venera","bad":false,"warning":""}]}]}})
             );
             observed.send("result").unwrap();
         });
-        let (mut helper_reader, _) =
-            capture_handshake(&mut helper, Instant::now() + Duration::from_millis(750)).unwrap();
+        let (mut helper_reader, reliable) =
+            helper_handshake(&mut helper, Instant::now() + Duration::from_millis(750)).unwrap();
+        assert!(reliable);
         helper_reader.get_mut().io_pending = Some(pending_read.clone());
         let (reports, report_rx) = mpsc::sync_channel(1);
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         let reader_stop = stop.clone();
         let commands = std::thread::spawn(move || {
             helper_commands_with(
@@ -1408,7 +1176,7 @@ mod tests {
                 2,
                 reader_stop,
                 reports,
-                None,
+                Some(ack_tx),
                 |request_id, session, _| {
                     assert_eq!(request_id, "duplex-2");
                     assert_eq!(session, 2);
@@ -1428,19 +1196,14 @@ mod tests {
         };
         let connection = helper.clone();
         let (written, completion) = mpsc::channel();
-        let (captures, mut output) = helper_output();
-        let writer_stop = stop.clone();
         let writer = std::thread::spawn(move || {
-            let _ = output.send_frames(&mut helper, report_rx, None, || {
-                writer_stop.load(Ordering::Acquire)
-            });
+            let _ = HelperOutput::default().send_frames(&mut helper, report_rx, Some(&ack_rx));
             written.send(()).unwrap();
         });
-        let health = received.recv_timeout(std::time::Duration::from_secs(2));
+        let heartbeat = received.recv_timeout(std::time::Duration::from_secs(2));
         let result = received.recv_timeout(std::time::Duration::from_secs(3));
-        drop(captures);
-        let completed = completion.recv_timeout(std::time::Duration::from_secs(3));
         stop.store(true, Ordering::Release);
+        let completed = completion.recv_timeout(std::time::Duration::from_secs(3));
         for _ in 0..100 {
             if server.is_finished() && writer.is_finished() && commands.is_finished() {
                 break;
@@ -1455,12 +1218,12 @@ mod tests {
         }
         assert!(
             pending,
-            "helper command read must be pending before health is sent"
+            "helper command read must be pending before the heartbeat is sent"
         );
         assert_eq!(
-            health,
-            Ok("health"),
-            "health must reach the service while command read is pending"
+            heartbeat,
+            Ok("heartbeat"),
+            "heartbeat must reach the service while command read is pending"
         );
         assert_eq!(
             completed,
@@ -1476,21 +1239,6 @@ mod tests {
         server.join().unwrap();
         commands.join().unwrap();
         drop(connection);
-    }
-
-    #[test]
-    fn capture_frames_keep_health_and_report_results() {
-        let old: HelperFrame = serde_json::from_value(
-            serde_json::json!({"capture":null,"health":"collecting","dropped":4}),
-        )
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(old).unwrap(),
-            serde_json::json!({"capture":null,"health":"collecting","dropped":4})
-        );
-        let report = serde_json::json!({"capture":null,"health":"collecting","dropped":4,"system_info":{"request_id":"report-2","ok":true,"collected_at":"2026-11-11T00:00:00Z","session_id":2,"sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Unavailable","bad":true,"warning":"请检查图形驱动。\n重新启动 Windows 后重试。"}]}]}});
-        let decoded: HelperFrame = serde_json::from_value(report.clone()).unwrap();
-        assert_eq!(serde_json::to_value(decoded).unwrap(), report);
     }
 
     #[test]
@@ -1696,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn local_history_reads_ordinary_program_capture() {
+    fn local_history_reads_etw_with_legacy_helper_connected() {
         let (server, mut pipe_client) = helper_pair();
         let state = Arc::new(Mutex::new(State::new("pipe-test".into(), false)));
         state.lock().unwrap().status.effective_filter.components = vec!["venus".into()];
@@ -1722,7 +1470,63 @@ mod tests {
             let mut finite = false;
             let _ = client(server, shared, &mut finite, &local_stop);
         }));
+
+        let pid = unsafe { GetCurrentProcessId() };
+        let mut session = 0;
+        assert_ne!(unsafe { ProcessIdToSessionId(pid, &mut session) }, 0);
+        state.lock().unwrap().helpers.insert(
+            session,
+            crate::state::RegisteredHelper {
+                identity: process::identity(pid),
+                delivered: Default::default(),
+            },
+        );
+        let (server, mut legacy_helper) = helper_pair();
+        legacy_helper.deadline = Some(Instant::now() + RPC_TIMEOUT);
+        let shared = state.clone();
+        let local_stop = owner.local_stop.clone();
+        owner.threads.push(std::thread::spawn(move || {
+            let mut finite = false;
+            let _ = client(server, shared, &mut finite, &local_stop);
+        }));
+        let mut helper_replies = BufReader::new(legacy_helper.clone());
+        legacy_helper
+            .write_all(b"{\"type\":\"local.capture\",\"capture_ack\":true}\n")
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&line(&mut helper_replies).unwrap()).unwrap(),
+            serde_json::json!({"ok":true,"capture_ack":true})
+        );
+        let legacy_capture = serde_json::json!({
+            "delivery":1,"health":"collecting","dropped":4,
+            "capture":{"source":"dbwin","pid":pid,"text":"legacy debug string",
+                "observed_at":"2026-11-12T00:00:00Z","observed_filetime":100}
+        });
+        for _ in 0..2 {
+            legacy_helper
+                .write_all(format!("{legacy_capture}\n").as_bytes())
+                .unwrap();
+            assert_eq!(
+                line(&mut helper_replies).unwrap(),
+                b"{\"type\":\"local.capture.ack\",\"delivery\":1}\n"
+            );
+        }
+
         let mut rpc = rpc_negotiate(&mut pipe_client).unwrap();
+        let status = rpc_call(
+            &mut rpc,
+            &mut pipe_client,
+            venera_debug_protocol::v1::Method::StatusGet,
+            serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(
+            status["health"],
+            serde_json::json!({
+                "driver":"probing","controller":"probing","port":"waiting","host":"waiting",
+                "etw":"starting","sessions":[]
+            })
+        );
         accept(
             &state,
             Capture {
@@ -1733,7 +1537,7 @@ mod tests {
                 observed_at: "2026-11-12T00:00:00Z".into(),
                 observed_filetime: 100,
                 source_time: None,
-                source: "dbwin".into(),
+                source: "etw".into(),
                 text: "ordinary program: hello 中文".into(),
                 raw_level: None,
                 process: Some(venera_debug_protocol::ProcessIdentity {
@@ -1754,20 +1558,32 @@ mod tests {
                 serde_json::json!({"after":null,"through":null,"limit":256}),
             )
             .unwrap();
-            if page["records"].as_array().unwrap().len() == 1 {
+            if page["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["event"]["record"]["source"] == "etw")
+            {
                 break page;
             }
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
         assert_eq!(
-            page["records"][0]["event"]["record"],
-            serde_json::json!({"stream_id":"pipe-test","seq":"1",
-                "observed_at":"2026-11-12T00:00:00Z","source_time":null,"source":"dbwin",
+            page["records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| &entry["event"])
+                .collect::<Vec<_>>(),
+            [&serde_json::json!({"type":"log","record":{"stream_id":"pipe-test","seq":"1",
+                "observed_at":"2026-11-12T00:00:00Z","source_time":null,"source":"etw",
                 "component":"","level":"unknown","raw_level":"unknown","session_id":2,
                 "process":{"pid":42,"start_time_filetime":"100","exe_path":"C:\\Tools\\ordinary.exe"},
-                "tid":null,"text":"ordinary program: hello 中文"})
+                "tid":null,"text":"ordinary program: hello 中文"}})]
         );
+        drop(helper_replies);
+        drop(legacy_helper);
         drop(pipe_client);
         drop(owner);
         stop.store(true, Ordering::Release);

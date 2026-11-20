@@ -110,27 +110,6 @@ unsafe extern "system" fn main(_: u32, _: *mut *mut u16) {
     threads.push(std::thread::spawn(move || etw::collect(shared)));
     let shared = state.clone();
     threads.push(std::thread::spawn(move || capture::collect(shared)));
-    let shared = state.clone();
-    threads.push(std::thread::spawn(move || {
-        while !stopped() {
-            let result = dbwin::collect(
-                true,
-                |capture| accept(&shared, capture),
-                || !stopped(),
-                || transport::health(&shared, "dbwin", serde_json::json!("collecting")),
-            );
-            let mut state = shared.lock().unwrap();
-            state.status.health["dbwin"] = serde_json::json!(match result {
-                Ok(()) => "stopped".into(),
-                Err(e) => e.to_string(),
-            });
-            state.notify();
-            drop(state);
-            if !stopped() {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-        }
-    }));
     report(SERVICE_RUNNING, 0);
     while !stopped() {
         if history_worker.is_finished() {

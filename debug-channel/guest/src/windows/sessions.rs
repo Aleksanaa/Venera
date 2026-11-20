@@ -126,15 +126,7 @@ pub fn manage(state: Shared) {
                         && WaitForSingleObject(helper.process.0, 0) == WAIT_TIMEOUT;
                     if !alive {
                         TerminateProcess(helper.process.0, 0);
-                        let mut shared = state.lock().unwrap();
-                        shared.helpers.remove(id);
-                        if let Some(loss) =
-                            shared.status.health["session_helper_loss"].as_object_mut()
-                        {
-                            if loss.remove(&id.to_string()).is_some() {
-                                shared.notify();
-                            }
-                        }
+                        state.lock().unwrap().helpers.remove(id);
                     }
                     alive
                 });
