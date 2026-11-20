@@ -6,7 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { VENERA_DXVK = 7, VENERA_VKD3D, VENERA_MESA_OS, VENERA_MESA_LOG };
+enum { VENERA_DXVK = 7, VENERA_VKD3D, VENERA_MESA_OS, VENERA_MESA_LOG,
+       VENERA_VGPUSRV = 11, VENERA_VIOGPUAP = 12 };
 static INIT_ONCE venera_once = INIT_ONCE_STATIC_INIT;
 static REGHANDLE venera_provider;
 static LUID venera_instance;

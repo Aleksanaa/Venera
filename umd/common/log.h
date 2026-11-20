@@ -20,7 +20,7 @@ namespace venera::umd {
 
 enum class LogLevel { error, warn, info, debug };
 
-// Lines go to the active product ETW capture, with OutputDebugString as fallback, and also to the file named by
+// Lines go to the active product ETW capture and to the file named by
 // VENERA_LOG, from the environment or else from
 // HKLM\SOFTWARE\Venera (for processes that do not inherit the environment, such as DWM and browsers' GPU
 // processes). Each line names `component`, the UMD writing it.

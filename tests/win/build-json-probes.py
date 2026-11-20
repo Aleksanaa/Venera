@@ -38,9 +38,10 @@ for name in ("source-runtime-venera", "channel-stress-venera"):
     run([*cxx, "-I" + str(root / "umd/common"), sources / (name + ".cpp"),
          root / "umd/common/log.cpp", root / "umd/common/stacks.cpp", *link_flags,
          "-ladvapi32", "-o", out / (name + ".exe")])
-run([*cxx, "-DUNICODE", "-D_UNICODE", "-I" + str(root / "kmd/yttrium/viogpu/shared"),
+run([*cxx, "-DUNICODE", "-D_UNICODE", "-DVENERA_RESOLUTION_EVENT=VENERA_VGPUSRV",
+     "-I" + str(root / "kmd/yttrium/viogpu/shared"),
      sources / "source-runtime-resolution.cpp", root / "kmd/yttrium/viogpu/shared/log.cpp",
-     *link_flags, "-o", out / "source-runtime-resolution.exe"])
+     *link_flags, "-ladvapi32", "-o", out / "source-runtime-resolution.exe"])
 for name in ("source-runtime-dxvk", "channel-stress-dxvk"):
     run([*cxx, "-DNOMINMAX", "-D_WIN32_WINNT=0xa00", "-I" + str(dxvk / "source/src/util"),
          "-I" + str(dxvk / "source/include"), sources / (name + ".cpp"),

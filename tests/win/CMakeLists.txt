@@ -21,9 +21,9 @@ target_link_options(source-runtime-venera PRIVATE -static -static-libgcc -static
 add_executable(source-runtime-resolution source-runtime-resolution.cpp
   ../../kmd/yttrium/viogpu/shared/log.cpp)
 target_include_directories(source-runtime-resolution PRIVATE ../../kmd/yttrium/viogpu/shared)
-target_compile_definitions(source-runtime-resolution PRIVATE UNICODE _UNICODE)
+target_compile_definitions(source-runtime-resolution PRIVATE UNICODE _UNICODE VENERA_RESOLUTION_EVENT=VENERA_VGPUSRV)
 target_link_options(source-runtime-resolution PRIVATE -static -static-libgcc -static-libstdc++)
-target_link_libraries(source-runtime-resolution PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(source-runtime-resolution PRIVATE advapi32 nlohmann_json::nlohmann_json)
 target_link_libraries(vkprobe PRIVATE venera-vulkan-headers)
 target_link_options(vkprobe PRIVATE -static -static-libgcc -static-libstdc++)
 

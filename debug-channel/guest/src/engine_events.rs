@@ -6,6 +6,8 @@ pub use fragments::{GraphicsUpdate, MAX_GRAPHICS_BYTES};
 
 const CHUNK: usize = 60 * 1024;
 const MAX_TEXT: usize = 16 * 1024 * 1024;
+pub const VGPUSRV: u16 = 11;
+pub const VIOGPUAP: u16 = 12;
 
 type Key = (u64, u32, u64, u64); // boot, PID, producer instance, sequence
 #[derive(Default)]
@@ -79,6 +81,8 @@ impl Decoder {
             9 if channel == "default" => "mesa",
             10 if channel == "MESA-VIRTIO" => "venus",
             10 => "mesa",
+            VGPUSRV if channel == "default" => "vgpusrv",
+            VIOGPUAP if channel == "default" => "viogpuap",
             _ => return Err(invalid()),
         };
         let key = (boot, pid, instance, sequence);
@@ -202,6 +206,22 @@ mod tests {
             assert!(d.decode(&p, 1, id, 2, 4, 42, 43).is_err());
         }
     }
+    #[test]
+    fn resolution_descriptors_route_the_same_unicode_text_by_target() {
+        let body = "分辨率 2560×1440 — café 🖥\n";
+        let bytes = payload(5, 0, 1, b"unknown\0default\0", body.as_bytes());
+        let mut decoder = Decoder::default();
+        for (id, expected) in [(11, "vgpusrv"), (12, "viogpuap")] {
+            let event = decoder
+                .decode(&bytes, 1, id, 1, 4, 42, 43)
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.component, expected);
+            assert_eq!(event.level_name(), "unknown");
+            assert_eq!(event.message.as_ref(), body.as_bytes());
+        }
+    }
+
     #[test]
     fn interleaved_shader_messages_complete_under_their_own_instance() {
         let mut d = Decoder::default();

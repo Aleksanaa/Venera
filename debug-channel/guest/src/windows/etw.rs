@@ -1,5 +1,5 @@
 use super::*;
-use crate::engine_events::Decoder;
+use crate::engine_events::{Decoder, VGPUSRV, VIOGPUAP};
 pub(super) mod files;
 use windows_sys::{core::GUID, Win32::System::Diagnostics::Etw::*};
 pub(super) const PROVIDER: GUID = GUID::from_u128(0x13976d09_a327_438c_950b_7f03192815c7);
@@ -271,7 +271,7 @@ pub(super) unsafe fn decode_record_from(
         .then_some(record.EventHeader.ThreadId);
     let observed_filetime = clock::filetime();
     let context_key = process_start_key(record)?;
-    if modern && matches!(record.EventHeader.EventDescriptor.Id, 5..=10) {
+    if modern && matches!(record.EventHeader.EventDescriptor.Id, 5..=VIOGPUAP) {
         let descriptor = record.EventHeader.EventDescriptor;
         let pid = pid.ok_or_else(|| {
             io::Error::new(
@@ -315,7 +315,12 @@ pub(super) unsafe fn decode_record_from(
             observed_filetime,
             source_time: Some(clock::iso_filetime(decoded.source_time)),
             source: "etw".into(),
-            text: dbwin::decode_ansi(&decoded.message),
+            text: match decoded.event_id {
+                VGPUSRV | VIOGPUAP => std::str::from_utf8(&decoded.message)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+                    .into(),
+                _ => dbwin::decode_ansi(&decoded.message),
+            },
             raw_level: Some(decoded.level_name().into()),
             component: Some(decoded.component.into()),
             structured: Some(structured),
@@ -626,6 +631,42 @@ mod tests {
             event.ExtendedData = &mut extension;
         }
         decode_record(&event, 134393633875000000)?.ok_or(io::ErrorKind::InvalidData.into())
+    }
+
+    #[test]
+    fn resolution_user_records_preserve_unicode_in_capture() {
+        let text = "分辨率 2560×1440 — café 🖥\n";
+        let mut bytes = Vec::new();
+        for n in [134393633912317080u64, 134393633875000100, 1 << 63, 1] {
+            bytes.extend(n.to_le_bytes());
+        }
+        bytes.extend(0u32.to_le_bytes());
+        bytes.extend(1u32.to_le_bytes());
+        bytes.extend(b"unknown\0default\0");
+        bytes.extend(text.as_bytes());
+        for (id, component) in [(11, "vgpusrv"), (12, "viogpuap")] {
+            let mut record: EVENT_RECORD = unsafe { std::mem::zeroed() };
+            record.EventHeader.ProviderId = KERNEL_PROVIDER;
+            record.EventHeader.ProcessId = 42;
+            record.EventHeader.ThreadId = 77;
+            record.EventHeader.EventDescriptor = EVENT_DESCRIPTOR {
+                Id: id,
+                Version: 1,
+                Level: 4,
+                Keyword: 1,
+                ..Default::default()
+            };
+            record.UserData = bytes.as_ptr().cast_mut().cast();
+            record.UserDataLength = bytes.len() as u16;
+
+            let capture = unsafe { decode_record(&record, 134393633875000000) }
+                .unwrap()
+                .unwrap();
+            assert_eq!(capture.text, text);
+            assert_eq!(capture.component.as_deref(), Some(component));
+            assert_eq!(capture.raw_level.as_deref(), Some("unknown"));
+            assert_eq!(capture.structured.unwrap().event_id, id);
+        }
     }
 
     #[test]

@@ -2,6 +2,10 @@
 #include <string>
 #include "log.h"
 #include "strsafe.h"
+#include "../../../../patches/debug-output/engine_etw.h"
+
+static_assert(VENERA_RESOLUTION_EVENT == VENERA_VGPUSRV || VENERA_RESOLUTION_EVENT == VENERA_VIOGPUAP,
+              "Select the resolution event by build target");
 
 void ErrorHandler(const char *s, int err)
 {
@@ -43,7 +47,10 @@ void PrintMessage(LPCWSTR pFormat, ...)
     StringCbVPrintf(debugOutputBuffer, sizeof(debugOutputBuffer), pFormat, args);
     va_end(args);
 
-    OutputDebugString(debugOutputBuffer);
+    char utf8[3 * ARRAYSIZE(debugOutputBuffer)];
+    int bytes = WideCharToMultiByte(CP_UTF8, 0, debugOutputBuffer, -1, utf8, sizeof(utf8), NULL, NULL);
+    if (bytes > 0)
+        venera_engine_text(VENERA_RESOLUTION_EVENT, "unknown", "default", utf8, bytes - 1);
 
     FILE *pLog;
     if (fopen_s(&pLog, "vgpusvp.log", "a") == 0 && pLog)
