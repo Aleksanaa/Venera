@@ -1,6 +1,6 @@
-use super::{export, ExportRange, Store};
+use super::{ExportRange, Store, export};
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use venera_debug_protocol::v1::{HistoryPage, HistoryRecord};
 
 fn record(journal: &str, position: u64, text: &str) -> HistoryRecord {
@@ -41,6 +41,149 @@ fn projections(path: &std::path::Path) -> Vec<Value> {
         .map(|row| serde_json::from_str(&row.unwrap()).unwrap())
         .collect();
     rows
+}
+
+fn revision(
+    position: u64,
+    target: u64,
+    start: &str,
+    exe: &str,
+) -> venera_debug_protocol::v1::AttributionHistoryRecord {
+    serde_json::from_value(json!({
+        "cursor":{"journal_id":"j","position":position.to_string()},
+        "boot_id":"boot-1","recorded_at_ms":"1794355200000","startup":true,
+        "event":{"type":"attribution_revision","target":{"journal_id":"j","position":target.to_string()},
+                 "attribution":{"process":{"pid":42,"start_time_filetime":start,"exe_path":exe},"ancestors":[]}}
+    })).unwrap()
+}
+
+fn exported_messages(path: &std::path::Path) -> Vec<Value> {
+    let mut bytes = Vec::new();
+    export(path, &mut bytes, &ExportRange::default()).unwrap();
+    String::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["message"].clone())
+        .collect()
+}
+
+#[test]
+fn revisions_follow_a_recovered_target_and_replay_preserves_the_latest_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.db");
+    let store = Store::open(&path, 1048576).unwrap();
+    let mut future = super::compatibility_page(page("j", &[], &[(1, 3)], 4));
+    future.records.push(revision(4, 1, "200", "A.exe"));
+    assert_eq!(
+        store.append_attribution_page(&future).unwrap().position.0,
+        4
+    );
+    let before = exported_messages(&path);
+    let gap = before.iter().find(|row| row["type"] == "gap").unwrap();
+    assert_eq!(gap["first_position"], "1");
+    assert_eq!(gap["last_position"], "3");
+    let received_revision = before
+        .iter()
+        .find(|row| row["event"]["type"] == "attribution_revision")
+        .unwrap();
+    assert_eq!(received_revision["event"]["target"]["position"], "1");
+
+    let recovered = page("j", &[1], &[], 1);
+    assert_eq!(store.append_history_page(&recovered).unwrap().position.0, 4);
+    let rows = projections(&path);
+    assert_eq!(
+        rows.iter().find(|row| row["type"] == "log").unwrap()["process"]["exe_path"],
+        "A.exe"
+    );
+    assert_eq!(
+        rows.iter().find(|row| row["type"] == "gap").unwrap()["first_position"],
+        "2"
+    );
+    let mut older = super::compatibility_page(page("j", &[], &[], 3));
+    older.records.push(revision(3, 1, "500", "B.exe"));
+    assert_eq!(store.append_attribution_page(&older).unwrap().position.0, 4);
+    let raw = exported_messages(&path);
+    assert_eq!(
+        raw.iter()
+            .filter(|row| row["event"]["type"] == "attribution_revision")
+            .count(),
+        2
+    );
+    assert_eq!(
+        raw.iter()
+            .find(|row| row["event"]["type"] == "log")
+            .unwrap()["event"]["record"]["text"],
+        "captured"
+    );
+    assert_eq!(
+        store.append_attribution_page(&future).unwrap().position.0,
+        4
+    );
+    assert_eq!(exported_messages(&path), raw);
+    assert_eq!(
+        projections(&path)
+            .iter()
+            .find(|row| row["type"] == "log")
+            .unwrap()["process"]["exe_path"],
+        "A.exe"
+    );
+
+    let mut conflicting = older;
+    conflicting.records[0] = revision(3, 1, "999", "different.exe");
+    assert_eq!(
+        store
+            .append_attribution_page(&conflicting)
+            .unwrap_err()
+            .to_string(),
+        "history record conflicts with its stored identity"
+    );
+    assert_eq!(exported_messages(&path), raw);
+}
+
+#[test]
+fn revision_capacity_rolls_back_and_archive_eviction_preserves_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("history.db");
+    let store = Store::open(&path, 262144).unwrap();
+    let original = page("j", &[1], &[], 1);
+    assert_eq!(store.append_history_page(&original).unwrap().position.0, 1);
+    let original_export = exported_messages(&path);
+    let mut delta = super::compatibility_page(page("j", &[], &[], 2));
+    delta
+        .records
+        .push(revision(2, 1, "200", &"x".repeat(200000)));
+    assert!(
+        store
+            .append_attribution_page(&delta)
+            .unwrap_err()
+            .is::<super::HistoryCapacity>()
+    );
+    assert_eq!(store.history_cursor("j").unwrap().unwrap().position.0, 1);
+    assert_eq!(exported_messages(&path), original_export);
+    assert!(projections(&path)[0]["process"].is_null());
+
+    for n in 0..8 {
+        store
+            .append(&json!({"type":"status","counter":n,"text":"x".repeat(50000)}))
+            .unwrap();
+    }
+    let after_eviction = projections(&path);
+    assert_eq!(after_eviction.last().unwrap()["counter"], 7);
+    assert!(after_eviction.iter().all(|row| row["type"] == "status"));
+    delta.records[0] = revision(2, 1, "200", "A.exe");
+    assert_eq!(store.append_attribution_page(&delta).unwrap().position.0, 2);
+    assert_eq!(store.append_history_page(&original).unwrap().position.0, 2);
+    drop(store);
+
+    let store = Store::open(&path, 262144).unwrap();
+    assert_eq!(store.history_cursor("j").unwrap().unwrap().position.0, 2);
+    let raw = exported_messages(&path);
+    assert_eq!(raw.last().unwrap()["event"]["type"], "attribution_revision");
+    assert_eq!(raw.last().unwrap()["event"]["target"]["position"], "1");
+    assert!(
+        raw.iter()
+            .all(|row| row["event"]["type"] != "log" && row["type"] != "gap")
+    );
 }
 
 #[test]
@@ -218,9 +361,11 @@ fn store_history_uncovered_positions_and_overlap_leave_database_unchanged() {
     let store = Store::open(&path, 262144).unwrap();
     assert!(store.append_history_page(&page("a", &[2], &[], 2)).is_err());
     assert_eq!(store.history_cursor("a").unwrap(), None);
-    assert!(store
-        .append_history_page(&page("a", &[2], &[(1, 2)], 2))
-        .is_err());
+    assert!(
+        store
+            .append_history_page(&page("a", &[2], &[(1, 2)], 2))
+            .is_err()
+    );
     assert_eq!(
         store
             .append_history_page(&page("a", &[1, 2], &[], 2))
@@ -460,9 +605,10 @@ fn backfill_survives_display_eviction_by_another_writer() {
     store.append_history_page(&page("a", &[2], &[], 2)).unwrap();
     let rows = projections(&path);
     assert!(rows.iter().any(|v| v["text"] == "captured"));
-    assert!(rows
-        .iter()
-        .any(|v| v["first_position"] == "1" && v["last_position"] == "1"));
+    assert!(
+        rows.iter()
+            .any(|v| v["first_position"] == "1" && v["last_position"] == "1")
+    );
 }
 
 #[test]

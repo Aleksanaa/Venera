@@ -1,8 +1,8 @@
 use super::*;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use venera_debug_protocol::client::{Client, HistoryConsumer, Start};
 
@@ -51,7 +51,7 @@ impl Diagnostics {
             match self.sender.try_send(item) {
                 Ok(()) => return Ok(()),
                 Err(TrySendError::Disconnected(_)) => {
-                    return Err("Archive diagnostic writer stopped".into())
+                    return Err("Archive diagnostic writer stopped".into());
                 }
                 Err(TrySendError::Full(value)) => item = value,
             }
@@ -185,7 +185,7 @@ pub(super) fn run(
 }
 
 // Split at a coverage boundary so a missing interval stays intact.
-fn split_tail(page: &mut v1::HistoryPage) -> Option<v1::HistoryPage> {
+fn split_tail(page: &mut v1::AttributionHistoryPage) -> Option<v1::AttributionHistoryPage> {
     let mut ends: Vec<_> = page
         .records
         .iter()
@@ -197,7 +197,7 @@ fn split_tail(page: &mut v1::HistoryPage) -> Option<v1::HistoryPage> {
     }
     let mid = (ends.len() - 1) / 2;
     let cut = *ends.select_nth_unstable(mid).1;
-    Some(v1::HistoryPage {
+    Some(v1::AttributionHistoryPage {
         range: page.range.clone(),
         records: page
             .records
@@ -223,7 +223,7 @@ fn session(
     limit: &mut u32,
     diagnostics: &mut DiagnosticWriter,
 ) -> Result<()> {
-    let mut client = Client::default();
+    let mut client = Client::with_history_attribution();
     client.connect();
     let mut pending = None;
     let mut since = Instant::now();
@@ -242,10 +242,10 @@ fn session(
         if pending.is_none() && Instant::now() >= next_poll && client.require(next).is_ok() {
             if next == v1::Method::HistoryRead && !pages.is_empty() {
                 let mut page = pages.pop().unwrap();
-                match store.append_history_page(&page) {
+                match store.append_attribution_page(&page) {
                     Ok(_) => {
                         // The shared checkpoint can be ahead of this reader's prefix.
-                        consumer.page(&page).map_err(|e| e.message)?;
+                        consumer.attribution_page(&page).map_err(|e| e.message)?;
                         ack = Some(consumer.consumed().map_err(|e| e.message)?);
                         next = v1::Method::HistoryAck;
                     }
@@ -304,8 +304,13 @@ fn session(
                     next = v1::Method::HistoryRead;
                 }
                 v1::Method::HistoryRead => {
-                    let page: v1::HistoryPage = serde_json::from_value(value)?;
-                    consumer.page(&page).map_err(|e| e.message)?;
+                    let page = match client.history_encoding() {
+                        v1::HistoryEncoding::Attribution => serde_json::from_value(value)?,
+                        v1::HistoryEncoding::Compatibility => {
+                            store::compatibility_page(serde_json::from_value(value)?)
+                        }
+                    };
+                    consumer.attribution_page(&page).map_err(|e| e.message)?;
                     pages.push(page);
                 }
                 v1::Method::HistoryAck => {

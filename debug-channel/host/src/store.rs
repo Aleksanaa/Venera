@@ -1,8 +1,11 @@
-use rusqlite::{params, Connection, Error, ErrorCode, OptionalExtension};
+use rusqlite::{Connection, Error, ErrorCode, OptionalExtension, params};
 use serde_json::Value;
 use std::{collections::BTreeSet, io::Write, path::Path};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use venera_debug_protocol::v1::{DecimalU64, HistoryCursor, HistoryEvent, HistoryPage};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use venera_debug_protocol::v1::{
+    AttributionHistoryEvent as Event, AttributionHistoryPage, AttributionHistoryRecord, DecimalU64,
+    HistoryAttribution, HistoryCursor, HistoryEvent, HistoryPage,
+};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -111,7 +114,14 @@ impl Store {
     }
 
     fn migrate_history(tx: &Connection) -> Result<()> {
-        for column in ["journal_id", "position"] {
+        // The revision target marks archival metadata; the applied position on
+        // a log keeps its projection monotonic through delayed gap recovery.
+        for column in [
+            "journal_id",
+            "position",
+            "revision_target",
+            "attribution_position",
+        ] {
             let exists: bool = tx.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name=?1",
                 [column],
@@ -188,7 +198,13 @@ impl Store {
             .transpose()
     }
 
+    #[allow(dead_code)] // Used by the standalone archive probe.
     pub fn append_history_page(&self, page: &HistoryPage) -> Result<HistoryCursor> {
+        self.append_attribution_page(&compatibility_page(page.clone()))
+    }
+
+    pub fn append_attribution_page(&self, page: &AttributionHistoryPage) -> Result<HistoryCursor> {
+        page.validate_revisions().map_err(|error| error.message)?;
         validate_history_page(page)?;
         self.with_eviction(|tx, count| self.history_transaction(tx, page, count))
     }
@@ -225,7 +241,7 @@ impl Store {
     fn history_transaction(
         &self,
         tx: &Connection,
-        page: &HistoryPage,
+        page: &AttributionHistoryPage,
         evict_count: i64,
     ) -> Result<HistoryCursor> {
         let journal = &page.range.journal_id;
@@ -312,6 +328,32 @@ impl Store {
                 }
             }
         }
+        // A delayed reader may fill a gap after its revision arrived. Take the
+        // latest retained attribution from the same view used to recover the gap.
+        let mut snapshots = std::collections::BTreeMap::new();
+        for record in &page.records {
+            if recovered.contains(&record.cursor.position.0)
+                && matches!(record.event, Event::Log { .. })
+            {
+                let raw: Option<String> = tx
+                    .query_row(
+                        "SELECT raw_message FROM events WHERE journal_id=?1 AND revision_target=?2
+                     ORDER BY length(position) DESC, position DESC LIMIT 1",
+                        params![journal, record.cursor.position.to_string()],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(raw) = raw {
+                    let entry: AttributionHistoryRecord = serde_json::from_str(&raw)?;
+                    if let Event::AttributionRevision { attribution, .. } = entry.event {
+                        snapshots.insert(
+                            record.cursor.position.0,
+                            (entry.cursor.position, attribution),
+                        );
+                    }
+                }
+            }
+        }
         evict(tx, evict_count)?;
         for id in replaced {
             tx.execute("DELETE FROM events WHERE id=?1", [id])?;
@@ -321,21 +363,41 @@ impl Store {
             insert_missing(&tx, journal, &received, first, last)?;
         }
         let received = now();
-        for record in &page.records {
+        let mut entries: Vec<_> = page.records.iter().collect();
+        entries.sort_unstable_by_key(|record| record.cursor.position);
+        for record in entries {
             let position = record.cursor.position.to_string();
             // Already consumed entries stay consumed after their display rows expire.
             if record.cursor.position.0 <= current && !recovered.contains(&record.cursor.position.0)
             {
                 continue;
             }
-            let (mut projection, kind) = match &record.event {
-                HistoryEvent::Log { record } => (serde_json::to_value(record)?, "log"),
-                HistoryEvent::Gap { gap } => (serde_json::to_value(gap)?, "gap"),
+            let (mut projection, kind, revision_target) = match &record.event {
+                Event::Log { record } => (serde_json::to_value(record)?, "log", None),
+                Event::Gap { gap } => (
+                    serde_json::to_value(gap)?,
+                    "gap",
+                    gap.is_history_attribution_marker().then(String::new),
+                ),
+                Event::AttributionRevision {
+                    target,
+                    attribution,
+                } => {
+                    apply_attribution(tx, target, record.cursor.position, attribution)?;
+                    (
+                        serde_json::json!({}),
+                        "attribution_revision",
+                        Some(target.position.to_string()),
+                    )
+                }
             };
             projection["major"] = serde_json::json!(1);
             projection["type"] = serde_json::json!(kind);
-            tx.execute("INSERT OR IGNORE INTO events(received_at,message,raw_message,journal_id,position) VALUES(?1,?2,?3,?4,?5)",
-                params![received, serde_json::to_string(&projection)?, rows[&position], journal, position])?;
+            tx.execute("INSERT OR IGNORE INTO events(received_at,message,raw_message,journal_id,position,revision_target) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![received, serde_json::to_string(&projection)?, rows[&position], journal, position, revision_target])?;
+            if let Some((revision, attribution)) = snapshots.remove(&record.cursor.position.0) {
+                apply_attribution(tx, &record.cursor, revision, &attribution)?;
+            }
         }
         for missing in &page.missing {
             if missing.last.0 <= current {
@@ -350,6 +412,47 @@ impl Store {
             journal_id: journal.clone(),
             position: DecimalU64(next),
         })
+    }
+}
+
+fn apply_attribution(
+    db: &Connection,
+    target: &HistoryCursor,
+    revision: DecimalU64,
+    attribution: &HistoryAttribution,
+) -> Result<()> {
+    // Compare canonical decimal strings as unsigned positions, including values
+    // outside SQLite's signed integer range.
+    db.execute(
+        "UPDATE events SET message=json_set(message,'$.process',json(?1),'$.ancestors',json(?2)),
+            attribution_position=?3 WHERE journal_id=?4 AND position=?5 AND json_extract(message,'$.type')='log'
+         AND (attribution_position IS NULL OR length(attribution_position)<length(?3)
+              OR (length(attribution_position)=length(?3) AND attribution_position<?3))",
+        params![serde_json::to_string(&attribution.process)?, serde_json::to_string(&attribution.ancestors)?,
+            revision.to_string(), target.journal_id, target.position.to_string()],
+    )?;
+    Ok(())
+}
+
+pub(super) fn compatibility_page(page: HistoryPage) -> AttributionHistoryPage {
+    AttributionHistoryPage {
+        range: page.range,
+        records: page
+            .records
+            .into_iter()
+            .map(|entry| AttributionHistoryRecord {
+                cursor: entry.cursor,
+                boot_id: entry.boot_id,
+                recorded_at_ms: entry.recorded_at_ms,
+                startup: entry.startup,
+                event: match entry.event {
+                    HistoryEvent::Log { record } => Event::Log { record },
+                    HistoryEvent::Gap { gap } => Event::Gap { gap },
+                },
+            })
+            .collect(),
+        missing: page.missing,
+        next: page.next,
     }
 }
 
@@ -383,7 +486,7 @@ fn insert_missing(
     Ok(())
 }
 
-fn validate_history_page(page: &HistoryPage) -> Result<()> {
+fn validate_history_page(page: &AttributionHistoryPage) -> Result<()> {
     let journal = &page.range.journal_id;
     let high = page.range.high_water.0;
     if journal.is_empty()
@@ -516,8 +619,12 @@ mod tests {
     fn minimum_budget_creates_and_migrates_writable_archives() {
         let schemas = [
             None,
-            Some("CREATE TABLE events(id INTEGER PRIMARY KEY,received_at TEXT NOT NULL,message TEXT NOT NULL)"),
-            Some("CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,received_at TEXT NOT NULL,message TEXT NOT NULL,raw_message TEXT)"),
+            Some(
+                "CREATE TABLE events(id INTEGER PRIMARY KEY,received_at TEXT NOT NULL,message TEXT NOT NULL)",
+            ),
+            Some(
+                "CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,received_at TEXT NOT NULL,message TEXT NOT NULL,raw_message TEXT)",
+            ),
         ];
         for legacy in schemas {
             let dir = tempfile::tempdir().unwrap();

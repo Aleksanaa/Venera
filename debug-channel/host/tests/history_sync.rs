@@ -1,5 +1,5 @@
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs::OpenOptions,
     io::{BufRead, BufReader, Read, Write},
@@ -24,6 +24,10 @@ impl Service {
     }
 
     fn with_budget(dir: &Path, budget: u64) -> Self {
+        Self::launch(dir, budget, None)
+    }
+
+    fn launch(dir: &Path, budget: u64, web: Option<std::net::SocketAddr>) -> Self {
         let log = dir.join("service.log");
         let output = OpenOptions::new()
             .create(true)
@@ -34,6 +38,10 @@ impl Service {
             .args(["--ignored", "--exact", "injected_service", "--nocapture"])
             .env("VENERA_HISTORY_TEST_DIR", dir)
             .env("VENERA_HISTORY_TEST_BUDGET", budget.to_string())
+            .env(
+                "VENERA_HISTORY_TEST_WEB",
+                web.map(|addr| addr.to_string()).unwrap_or_default(),
+            )
             .stdout(Stdio::from(output.try_clone().unwrap()))
             .stderr(Stdio::from(output))
             .spawn()
@@ -71,10 +79,27 @@ impl Guest {
         oldest: u64,
         high_water: u64,
     ) -> Self {
-        Self::accept_with_status_burst(listener,journal,oldest,high_water,1)
+        Self::accept_with_status_burst(listener, journal, oldest, high_water, 1)
     }
 
-    fn accept_with_status_burst(listener:&UnixListener,journal:&'static str,oldest:u64,high_water:u64,burst:usize)->Self {
+    fn accept_with_status_burst(
+        listener: &UnixListener,
+        journal: &'static str,
+        oldest: u64,
+        high_water: u64,
+        burst: usize,
+    ) -> Self {
+        Self::negotiate(listener, journal, oldest, high_water, burst, false)
+    }
+
+    fn negotiate(
+        listener: &UnixListener,
+        journal: &'static str,
+        oldest: u64,
+        high_water: u64,
+        burst: usize,
+        attribution: bool,
+    ) -> Self {
         listener.set_nonblocking(true).unwrap();
         let deadline = Instant::now() + TIMEOUT;
         let writer = loop {
@@ -100,14 +125,15 @@ impl Guest {
         loop {
             let mut line = String::new();
             if guest.reader.read_line(&mut line).unwrap() == 0 {
-                return Self::accept_with_status_burst(listener, journal, oldest, high_water,burst);
+                return Self::negotiate(listener, journal, oldest, high_water, burst, attribution);
             }
             if line.trim().is_empty() {
                 continue;
             }
             let request: Value = serde_json::from_str(&line).unwrap();
             match request["method"].as_str().unwrap() {
-                "endpoint.info" => guest.reply(&request, json!({"role":"guest","software_version":"history-fixture","protocol_version":"1.0.0"})),
+                "endpoint.info" => guest.reply(&request, json!({"role":"guest","software_version":"history-fixture","protocol_version":"1.0.0",
+                    "capabilities": if attribution { vec!["history.attribution"] } else { vec![] }})),
                 "rpc.discover" => guest.reply(&request, discovery()),
                 "history.range" => { guest.queued = Some(request); return guest; }
                 "status.get" => {
@@ -123,7 +149,7 @@ impl Guest {
                             guest.reply(&request, status.clone());
                         }
                     });
-                    return Self::accept_with_status_burst(listener, journal, oldest, high_water,burst);
+                    return Self::negotiate(listener, journal, oldest, high_water, burst, attribution);
                 }
                 method => panic!("unexpected initial method {method}"),
             }
@@ -488,7 +514,7 @@ fn archive_write_lock_preserves_control_responses_and_flushes_diagnostics() {
     let dir = TempDir::new().unwrap();
     let listener = UnixListener::bind(dir.path().join("guest.sock")).unwrap();
     let mut service = Service::start(dir.path());
-    let mut guest = Guest::accept_with_status_burst(&listener, "journal-a", 1, 1,60);
+    let mut guest = Guest::accept_with_status_burst(&listener, "journal-a", 1, 1, 60);
     let read = first_read(&mut guest);
     let db = Connection::open(dir.path().join("history.db")).unwrap();
     db.busy_timeout(Duration::from_secs(2)).unwrap();
@@ -826,6 +852,187 @@ fn journal_replacement_keeps_independent_positions() {
 }
 
 #[test]
+#[cfg(feature = "web")]
+fn negotiated_attribution_survives_independent_archive_progress() {
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+
+    fn get(addr: SocketAddr, path: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        write!(stream, "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        (
+            headers.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            body.into(),
+        )
+    }
+
+    fn attach(listener: &UnixListener, high: u64, after: &str) -> (Guest, Value) {
+        let mut guest = Guest::negotiate(listener, "reused-pid", 1, high, 0, true);
+        let range = guest.until("history.range");
+        guest.send(
+            json!({"jsonrpc":"2.0","id":"guest-endpoint","method":"endpoint.info","params":{}}),
+        );
+        let mut line = String::new();
+        guest.reader.read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(response["id"], "guest-endpoint");
+        assert_eq!(
+            response["result"]["capabilities"],
+            json!(["history.attribution"])
+        );
+        guest.reply(&range, guest.range());
+        let read = guest.until("history.read");
+        assert_eq!(
+            read["params"]["after"],
+            json!({"journal_id":"reused-pid","position":after})
+        );
+        (guest, read)
+    }
+
+    let warm = TempDir::new().unwrap();
+    let cold = TempDir::new().unwrap();
+    let warm_listener = UnixListener::bind(warm.path().join("guest.sock")).unwrap();
+    let cold_listener = UnixListener::bind(cold.path().join("guest.sock")).unwrap();
+    let mut a_log = record("reused-pid", 1, "before PID reuse");
+    a_log["event"]["record"]["process"] = json!({"pid":42});
+    a_log["event"]["record"]["source_time"] = json!("2026-11-10T08:00:00.1234567Z");
+    let mut b_log = record("reused-pid", 2, "after PID reuse");
+    b_log["event"]["record"]["process"] = json!({"pid":42,"start_time_filetime":"500"});
+    b_log["event"]["record"]["ancestors"] = json!([{"pid":11,"start_time_filetime":"110"}]);
+    let mut revision = record("reused-pid", 3, "");
+    revision["event"] = json!({"type":"attribution_revision","target":a_log["cursor"],
+        "attribution":{"process":{"pid":42,"start_time_filetime":"200","exe_path":"A.exe"},
+                       "ancestors":[{"pid":10,"start_time_filetime":"100"}]}});
+
+    let addr = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let original_id = {
+        let _service = Service::launch(warm.path(), 1048576, Some(addr));
+        let (mut guest, read) = attach(&warm_listener, 1, "0");
+        guest.page(&read, json!([a_log]), json!([]), 1);
+        guest.ack("1"); // Interrupt after the local commit, before the ACK reply.
+        let (_, rows) = get(addr, "/api/events?component=dxvk");
+        let row: Value = serde_json::from_str::<Value>(&rows).unwrap()["events"][0].clone();
+        assert_eq!(row["message"]["process"]["pid"], 42);
+        assert!(row["message"]["process"]["start_time_filetime"].is_null());
+        row["id"].as_str().unwrap().to_owned()
+    };
+    {
+        let _service = Service::start(cold.path());
+        let (mut guest, read) = attach(&cold_listener, 3, "0");
+        guest.page(&read, json!([a_log, b_log, revision]), json!([]), 3);
+        guest.ack("3");
+        assert_eq!(texts(cold.path()), ["before PID reuse", "after PID reuse"]);
+    }
+    let _service = Service::launch(warm.path(), 1048576, Some(addr));
+    let (mut guest, read) = attach(&warm_listener, 4, "1");
+    guest.page(
+        &read,
+        json!([b_log, revision]),
+        json!([{"first":"4","last":"4","reason":"retention_expired"}]),
+        4,
+    );
+    let ack = guest.ack("4");
+    guest.reply(&ack, ack["params"].clone());
+    // A retransmitted response is ignored by the real sync connection.
+    guest.page(
+        &read,
+        json!([b_log, revision]),
+        json!([{"first":"4","last":"4","reason":"retention_expired"}]),
+        4,
+    );
+
+    let rows = |path: &str| {
+        let (status, body) = get(addr, path);
+        assert_eq!(status, 200);
+        serde_json::from_str::<Value>(&body).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let all = rows("/api/events");
+    assert_eq!(
+        all.iter()
+            .filter_map(|row| row["message"]["text"].as_str())
+            .collect::<Vec<_>>(),
+        ["before PID reuse", "after PID reuse"]
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|row| row["message"]["type"] == "gap")
+            .map(|row| row["message"]["first_position"].clone())
+            .collect::<Vec<_>>(),
+        [json!("4")]
+    );
+    assert!(
+        all.iter()
+            .all(|row| row["message"]["type"] != "attribution_revision")
+    );
+    let a = &all.iter().find(|row| row["id"] == original_id).unwrap();
+    assert_eq!(a["message"]["process"]["start_time_filetime"], "200");
+    assert_eq!(a["message"]["ancestors"][0]["start_time_filetime"], "100");
+    assert_eq!(get(addr, &format!("/api/events/{original_id}")).0, 200);
+    for (query, expected) in [
+        ("pid=42&start_time_filetime=200", vec!["before PID reuse"]),
+        ("pid=42&start_time_filetime=500", vec!["after PID reuse"]),
+        (
+            "pid=10&start_time_filetime=100&include_descendants=true",
+            vec!["before PID reuse"],
+        ),
+        (
+            "pid=11&start_time_filetime=110&include_descendants=true",
+            vec!["after PID reuse"],
+        ),
+        ("pid=10&start_time_filetime=100", vec![]),
+    ] {
+        let hits = rows(&format!("/api/events?{query}"));
+        assert_eq!(
+            hits.iter()
+                .map(|row| row["message"]["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    let messages = |body: &str| {
+        body.lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["message"].clone())
+            .collect::<Vec<_>>()
+    };
+    let (status, body) = get(
+        addr,
+        "/api/export?pid=10&start_time_filetime=100&include_descendants=true",
+    );
+    assert_eq!(status, 200);
+    let raw = messages(&body);
+    assert_eq!(raw.len(), 1);
+    assert_eq!(raw[0]["event"]["record"]["process"]["pid"], 42);
+    assert!(raw[0]["event"]["record"]["process"]["start_time_filetime"].is_null());
+    assert_eq!(
+        raw[0]["event"]["record"]["source_time"],
+        "2026-11-10T08:00:00.1234567Z"
+    );
+    assert_eq!(raw[0]["event"]["record"]["text"], "before PID reuse");
+    let (_, body) = get(addr, "/api/export");
+    let revisions: Vec<_> = messages(&body)
+        .into_iter()
+        .filter(|row| row["event"]["type"] == "attribution_revision")
+        .collect();
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0]["cursor"]["position"], "3");
+    assert_eq!(revisions[0]["event"]["target"]["position"], "1");
+    assert_eq!(
+        revisions[0]["event"]["attribution"]["process"]["start_time_filetime"],
+        "200"
+    );
+}
+
+#[test]
 #[ignore]
 fn injected_service() {
     struct UnixConnector(PathBuf);
@@ -855,6 +1062,9 @@ fn injected_service() {
         }
     }
     let dir = PathBuf::from(std::env::var_os("VENERA_HISTORY_TEST_DIR").unwrap());
+    let web = std::env::var("VENERA_HISTORY_TEST_WEB")
+        .ok()
+        .and_then(|addr| addr.parse().ok());
     if let Err(error) = venera_debug_host::serve(
         UnixConnector(dir.join("guest.sock")),
         dir.join("history.db"),
@@ -864,8 +1074,8 @@ fn injected_service() {
             .unwrap(),
         dir.join("control.sock"),
         Some(dir),
-        "127.0.0.1:8787".parse().unwrap(),
-        true,
+        web.unwrap_or_else(|| "127.0.0.1:8787".parse().unwrap()),
+        web.is_none(),
     ) {
         eprintln!("{error}");
         std::process::exit(1);

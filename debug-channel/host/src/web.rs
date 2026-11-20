@@ -1,18 +1,19 @@
-use crate::store::{export_message, has_raw, ExportRange, Result};
+use crate::store::{ExportRange, Result, export_message, has_raw};
 use axum::{
+    Json, Router,
     body::{Body, Bytes},
-    extract::{rejection::QueryRejection, Path, Query, State},
-    http::{header, StatusCode},
+    extract::{Path, Query, State, rejection::QueryRejection},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
 };
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{path::PathBuf, time::Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use tower_http::services::{ServeDir, ServeFile};
+use venera_debug_protocol::{Filter, LogRecord, Target, matches_filter, v1::DecimalU64};
 
 #[derive(Debug)]
 struct ApiError(StatusCode, String);
@@ -33,6 +34,11 @@ struct Filters {
     component: Option<String>,
     level: Option<String>,
     program: Option<String>,
+    pid: Option<String>,
+    start_time_filetime: Option<String>,
+    boot_time_filetime: Option<String>,
+    start_key: Option<String>,
+    include_descendants: Option<String>,
     q: Option<String>,
     from: Option<String>,
     until: Option<String>,
@@ -41,7 +47,53 @@ impl Filters {
     fn range(&self) -> std::result::Result<ExportRange, ApiError> {
         ExportRange::parse(self.from.as_deref(), self.until.as_deref()).map_err(bad)
     }
-    fn matches(&self, message: &Value) -> bool {
+    fn instance(&self) -> std::result::Result<Option<Filter>, ApiError> {
+        match (&self.pid, &self.start_time_filetime) {
+            (Some(pid), Some(start)) => {
+                let canonical = |value: &str| {
+                    value
+                        .parse::<DecimalU64>()
+                        .map(|n| n.to_string())
+                        .map_err(bad)
+                };
+                let include_descendants = self
+                    .include_descendants
+                    .as_deref()
+                    .map(str::parse::<bool>)
+                    .transpose()
+                    .map_err(bad)?
+                    .unwrap_or(false);
+                if self.start_key.is_some() && self.boot_time_filetime.is_none() {
+                    return Err(bad("Process start key requires boot_time_filetime"));
+                }
+                Ok(Some(Filter {
+                    targets: vec![Target::ProcessInstance {
+                        pid: pid.parse().map_err(bad)?,
+                        start_time_filetime: canonical(start)?,
+                        boot_time_filetime: self
+                            .boot_time_filetime
+                            .as_deref()
+                            .map(canonical)
+                            .transpose()?,
+                        start_key: self.start_key.as_deref().map(canonical).transpose()?,
+                        include_descendants,
+                    }],
+                    ..Filter::default()
+                }))
+            }
+            (None, None)
+                if self.boot_time_filetime.is_none()
+                    && self.start_key.is_none()
+                    && self.include_descendants.is_none() =>
+            {
+                Ok(None)
+            }
+            _ => Err(bad(
+                "Process instance filters require pid and start_time_filetime",
+            )),
+        }
+    }
+    fn matches(&self, message: &Value, instance: Option<&Filter>) -> bool {
         let text = |key: &str| message.get(key).and_then(Value::as_str).unwrap_or("");
         let contains = |haystack: &str, needle: &str| {
             haystack
@@ -62,6 +114,11 @@ impl Filters {
                         .is_some_and(|pid| pid.to_string() == *v)
             })
             && self.q.as_ref().is_none_or(|v| contains(text("text"), v))
+            && instance.is_none_or(|filter| {
+                message["type"] == "log"
+                    && LogRecord::deserialize(message)
+                        .is_ok_and(|record| matches_filter(filter, &record, &record.ancestors))
+            })
     }
 }
 #[derive(Deserialize)]
@@ -82,6 +139,19 @@ fn open(path: &std::path::Path) -> Result<Connection> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     db.busy_timeout(Duration::from_secs(2))?;
     Ok(db)
+}
+
+fn visible(db: &Connection) -> Result<&'static str> {
+    let has_control = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('events') WHERE name='revision_target')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(if has_control {
+        "revision_target IS NULL"
+    } else {
+        "1"
+    })
 }
 fn event(id: i64, received: String, message: String, raw: Option<String>) -> Result<Value> {
     let value: Value = serde_json::from_str(&message)?;
@@ -106,22 +176,20 @@ async fn events(
     let before = query.before.as_deref().map(id).transpose()?;
     let after = query.after.as_deref().map(id).transpose()?;
     let range = query.filters.range()?;
+    let instance = query.filters.instance()?;
     tokio::task::spawn_blocking(move || -> std::result::Result<Json<Value>, ApiError> {
         let db = open(&path).map_err(internal)?;
-        let has_raw = has_raw(&db).map_err(internal)?;
-        let (oldest, latest): (Option<i64>, Option<i64>) = db.query_row("SELECT MIN(id),MAX(id) FROM events", [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(internal)?;
-        let sql = if after.is_some() {
-            if has_raw { "SELECT id,received_at,message,raw_message FROM events WHERE id>?1 AND id<=?2 ORDER BY id" } else { "SELECT id,received_at,message,NULL FROM events WHERE id>?1 AND id<=?2 ORDER BY id" }
-        } else {
-            if has_raw { "SELECT id,received_at,message,raw_message FROM events WHERE (?1 IS NULL OR id<?1) AND id<=?2 ORDER BY id DESC" } else { "SELECT id,received_at,message,NULL FROM events WHERE (?1 IS NULL OR id<?1) AND id<=?2 ORDER BY id DESC" }
-        };
-        let mut statement = db.prepare(sql).map_err(internal)?;
+        let raw = if has_raw(&db).map_err(internal)? { "raw_message" } else { "NULL" };
+        let visible = visible(&db).map_err(internal)?;
+        let (oldest, latest): (Option<i64>, Option<i64>) = db.query_row(&format!("SELECT MIN(id),MAX(id) FROM events WHERE {visible}"), [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(internal)?;
+        let (condition, order) = if after.is_some() { ("id>?1", "ASC") } else { ("(?1 IS NULL OR id<?1)", "DESC") };
+        let mut statement = db.prepare(&format!("SELECT id,received_at,message,{raw} FROM events WHERE {visible} AND {condition} AND id<=?2 ORDER BY id {order}")).map_err(internal)?;
         let cursor = after.or(before);
         let mut rows = statement.query(params![cursor, latest.unwrap_or(0)]).map_err(internal)?;
         let mut events = Vec::new();
         while let Some(row) = rows.next().map_err(internal)? {
             let value = event(row.get(0).map_err(internal)?, row.get(1).map_err(internal)?, row.get(2).map_err(internal)?, row.get(3).map_err(internal)?).map_err(internal)?;
-            if range.contains(value["received_at"].as_str().unwrap()).map_err(internal)? && query.filters.matches(&value["message"]) {
+            if range.contains(value["received_at"].as_str().unwrap()).map_err(internal)? && query.filters.matches(&value["message"], instance.as_ref()) {
                 events.push(value);
                 if events.len() == limit { break; }
             }
@@ -137,14 +205,15 @@ async fn detail(
     let id = id(&value)?;
     tokio::task::spawn_blocking(move || {
         let db = open(&path).map_err(internal)?;
-        let has_raw = has_raw(&db).map_err(internal)?;
+        let raw = if has_raw(&db).map_err(internal)? {
+            "raw_message"
+        } else {
+            "NULL"
+        };
+        let visible = visible(&db).map_err(internal)?;
         let row: Option<(String, String, Option<String>)> = db
             .query_row(
-                if has_raw {
-                    "SELECT received_at,message,raw_message FROM events WHERE id=?1"
-                } else {
-                    "SELECT received_at,message,NULL FROM events WHERE id=?1"
-                },
+                &format!("SELECT received_at,message,{raw} FROM events WHERE id=?1 AND {visible}"),
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -166,6 +235,7 @@ async fn export(
 ) -> std::result::Result<Response, ApiError> {
     let Query(filters) = query.map_err(bad)?;
     let range = filters.range()?;
+    let instance = filters.instance()?;
     let (db, upper) = tokio::task::spawn_blocking(move || {
         let db = open(&path).map_err(internal)?;
         let upper: i64 = db
@@ -191,7 +261,7 @@ async fn export(
                 };
                 last = id;
                 let message: Value = serde_json::from_str(&projection)?;
-                if !range.contains(&received)? || !filters.matches(&message) {
+                if !range.contains(&received)? || !filters.matches(&message, instance.as_ref()) {
                     continue;
                 }
                 let raw = export_message(raw.as_deref().unwrap_or(&projection))?;
