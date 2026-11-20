@@ -8,7 +8,7 @@ license.workspace = true
 libc = "0.2.191"
 serde = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "signal", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "signal", "macros", "time", "process", "io-util"] }
 tokio-stream = { version = "0.1", optional = true }
 tower-http = { version = "0.6", features = ["fs"], optional = true }
 venera-debug-protocol.workspace = true

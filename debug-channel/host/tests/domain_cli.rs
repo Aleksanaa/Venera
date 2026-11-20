@@ -107,6 +107,28 @@ fn wait_history_error(dir: &Path, expected: &str) {
 }
 
 #[test]
+fn domain_service_recovers_after_a_cid_lookup_times_out() {
+    let dir = fixture();
+    let script = dir.path().join("virsh");
+    let contents = fs::read_to_string(&script).unwrap().replace(
+        "cat cid",
+        "if [ -f stall ]; then exec sleep 30; else cat cid; fi",
+    );
+    fs::write(script, contents).unwrap();
+    fs::write(dir.path().join("stall"), "").unwrap();
+    let _service = Service(
+        cli(dir.path())
+            .args(["serve", "73", "--no-web"])
+            .spawn()
+            .unwrap(),
+    );
+    wait_history_error(dir.path(), "virsh dumpxml timed out");
+    fs::write(dir.path().join("cid"), "").unwrap();
+    fs::remove_file(dir.path().join("stall")).unwrap();
+    wait_history_error(dir.path(), &format!("no live vsock CID for {UUID}"));
+}
+
+#[test]
 fn numeric_guest_keeps_its_archive_and_identity_across_renames() {
     let dir = fixture();
     fs::write(dir.path().join("cid"), "").unwrap();
@@ -123,16 +145,20 @@ fn numeric_guest_keeps_its_archive_and_identity_across_renames() {
         .arg(database)
         .output()
         .unwrap();
-    assert!(String::from_utf8(export.stdout)
-        .unwrap()
-        .contains("host.started"));
+    assert!(
+        String::from_utf8(export.stdout)
+            .unwrap()
+            .contains("host.started")
+    );
     let conflict = cli(dir.path())
         .args(["serve", "73", "--no-web"])
         .output()
         .unwrap();
-    assert!(String::from_utf8(conflict.stderr)
-        .unwrap()
-        .contains("is in use"));
+    assert!(
+        String::from_utf8(conflict.stderr)
+            .unwrap()
+            .contains("is in use")
+    );
     fs::write(
         dir.path().join("domains"),
         format!("{UUID} renamed\n{OTHER} 73\n"),
@@ -153,8 +179,10 @@ fn direct_connection_requires_a_database_and_exclusive_address() {
     ] {
         let result = Command::new(BIN).args(args).output().unwrap();
         assert_eq!(result.status.code(), Some(2));
-        assert!(String::from_utf8(result.stderr)
-            .unwrap()
-            .contains(diagnostic));
+        assert!(
+            String::from_utf8(result.stderr)
+                .unwrap()
+                .contains(diagnostic)
+        );
     }
 }
