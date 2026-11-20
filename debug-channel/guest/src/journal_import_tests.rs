@@ -356,7 +356,7 @@ fn terminal_diagnostic_recovers_once_after_metadata_write_failure() {
     drop(journal);
     fs::remove_dir(dir.0.join("metadata.pending")).unwrap();
     let mut journal = dir.open(RetentionPolicy::default());
-    assert_eq!(journal.import_receipt(&input).unwrap().complete, true);
+    assert!(!journal.import_receipt(&input).unwrap().complete);
     journal
         .complete_import(
             &input,
@@ -600,6 +600,9 @@ fn complete_tail_recovers_import_progress_before_retrying_legacy_records() {
     let mut journal = dir.open(RetentionPolicy::default());
     journal.discover_imports(vec![source("sealed-1")]).unwrap();
     let metadata = fs::read(dir.0.join("metadata.json")).unwrap();
+    let mut legacy: Value = serde_json::from_slice(&metadata).unwrap();
+    legacy.as_object_mut().unwrap().remove("segments");
+    let metadata = serde_json::to_vec(&legacy).unwrap();
     assert_eq!(
         journal
             .import_batch(batch("sealed-1", 7, false, vec![imported(2), imported(5)]))
@@ -800,7 +803,7 @@ fn receipt_capacity_preserves_pending_sources_and_reuses_retired_slots() {
 }
 
 #[test]
-fn persistence_failure_returns_error_and_recovery_deduplicates_the_written_tail() {
+fn failed_import_reopens_previous_receipt_and_retries_in_full() {
     let dir = Directory::new();
     let mut journal = dir.open(RetentionPolicy::default());
     journal.discover_imports(vec![source("sealed")]).unwrap();
@@ -814,7 +817,7 @@ fn persistence_failure_returns_error_and_recovery_deduplicates_the_written_tail(
     let mut journal = dir.open(RetentionPolicy::default());
     assert_eq!(
         journal.import_receipt(&source("sealed")).unwrap().through,
-        2
+        0
     );
     assert_eq!(
         journal.import_receipt(&source("sealed")).unwrap().complete,

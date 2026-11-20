@@ -1,11 +1,10 @@
 //! Durable history in bounded, sequential JSONL segments.
 //!
-//! The service owner serializes access. Successful appends sync the entry, then
-//! replace and sync metadata before returning its cursor. Pruning syncs removals;
-//! metadata preserves the high water after the final entry expires. Every public
-//! mutation completes its persistence work; `close` consumes the validated state.
-//! After a mutation encounters an I/O error, reopen to recover the durable state.
+//! The service owner serializes access. Metadata publishes the active segment paths,
+//! extents, receipts and high water together. Tail preparation writes past a committed
+//! extent; compaction writes a sibling. Recovery reclaims the unpublished versions.
 
+use crate::ancestry::{Checkpoint, CheckpointRow};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,8 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use venera_debug_protocol::v1::{
-    DecimalU64, HistoryAck, HistoryCursor, HistoryEvent, HistoryMissing, HistoryPage, HistoryRange,
-    HistoryRead, HistoryRecord,
+    AttributionHistoryPage, DecimalU64, HistoryAck, HistoryCursor, HistoryEncoding, HistoryEvent,
+    HistoryMissing, HistoryPage, HistoryRange, HistoryRead, HistoryRecord,
 };
 
 const MAX_ENTRY_BYTES: u64 = venera_debug_protocol::DEFAULT_MAX_LINE_BYTES as u64;
@@ -23,10 +22,21 @@ const MIN_BUDGET: u64 = 1024;
 const SEGMENT_BYTES: u64 = 64 * 1024;
 const SEGMENT_RECORDS: usize = 256;
 const MAX_BATCH_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_IMPORT_SOURCE_ID_BYTES: usize = 1024;
+const MAX_HISTORY_PAGE_BYTES: usize = MAX_ENTRY_BYTES as usize - 256;
+// A source ID can require six JSON bytes per input byte. The remaining
+// allowance covers the provenance keys, numeric fields and line terminator.
+const MAX_STORED_LINE_BYTES: usize =
+    MAX_ENTRY_BYTES as usize + 6 * MAX_IMPORT_SOURCE_ID_BYTES + 256;
 const MAX_IMPORTS: usize = 128;
 
+#[path = "journal_attribution.rs"]
+mod attribution;
+#[path = "journal_process.rs"]
+mod process_storage;
 #[path = "journal_space.rs"]
 mod space;
+use process_storage::{ProcessCache, Routes};
 
 /// Identity assigned to an immutable capture artifact, with its system-header boot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +50,6 @@ pub struct ImportReceipt {
     pub source: ImportSource,
     pub through: u64,
     pub complete: bool,
-    #[serde(default)]
-    pub process_context_lost: u64,
 }
 
 pub struct ImportEntry {
@@ -74,6 +82,8 @@ struct StoredRecord {
     record: HistoryRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provenance: Option<Provenance>,
+    #[serde(default)]
+    revision: Option<attribution::Revision>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -117,12 +127,12 @@ pub struct JournalInput {
     pub event: HistoryEvent,
 }
 
-struct BatchEncoding(Vec<u8>);
+struct BatchEncoding(Vec<u8>, usize);
 
 impl Write for BatchEncoding {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > MAX_BATCH_BYTES - self.0.len() {
-            return Err(request_error("journal batch exceeds 1048576 encoded bytes"));
+        if bytes.len() > self.1 - self.0.len() {
+            return Err(request_error("journal batch exceeds encoded byte capacity"));
         }
         self.0.extend_from_slice(bytes);
         Ok(bytes.len())
@@ -139,9 +149,12 @@ struct Entry {
     bytes: u64,
     time: u64,
     identity: Option<EventIdentity>,
+    attribution_time: Option<u64>,
+    revision_target: Option<u64>,
 }
 
 struct Segment {
+    alternate: bool,
     charge: u64,
     entries: Vec<Entry>,
     boot: String,
@@ -176,16 +189,37 @@ impl Default for RetentionPolicy {
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Metadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Segment start => (published EOF, alternate compaction slot). Absence denotes legacy recovery.
+    segments: Option<BTreeMap<u64, (u64, bool)>>,
     journal_id: String,
     high_water: u64,
     recent_boots: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     imports: Vec<ImportReceipt>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    processes: BTreeMap<String, crate::ancestry::Checkpoint>,
+    graphics_fragments: BTreeMap<u64, (u64, bool)>,
+    #[serde(default, skip_serializing)]
+    processes: BTreeMap<String, Checkpoint>, // legacy inline checkpoints
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    process_segments: BTreeMap<String, ProcessSegments>,
 }
 
+// PID bucket => files in order, each with its published length and slot.
+type ProcessSegments = BTreeMap<u32, Vec<(u64, bool)>>;
+
 impl Metadata {
+    fn pending_process_source(&self, boot: &str) -> bool {
+        boot != "0"
+            && self.imports.iter().any(|receipt| {
+                !receipt.complete && receipt.source.boot_filetime.to_string() == boot
+            })
+    }
+
+    fn keeps_process_boot(&self, boot: &str) -> bool {
+        self.recent_boots.iter().any(|item| item == boot) || self.pending_process_source(boot)
+    }
+
     fn observe_boot(&mut self, boot: &str, retain: usize) {
         self.recent_boots.retain(|item| item != boot);
         self.recent_boots.push(boot.to_owned());
@@ -200,24 +234,31 @@ impl Metadata {
         }
         let discard = self.recent_boots.len().saturating_sub(retain);
         self.recent_boots.drain(..discard);
-        self.processes
-            .retain(|boot, _| self.recent_boots.contains(boot));
     }
 }
 
 pub struct Journal {
     root: PathBuf,
+    retired: Vec<(PathBuf, u64)>,
     metadata: Metadata,
+    process_cache: std::cell::RefCell<ProcessCache>,
+    process_routes: BTreeMap<u64, Routes>,
+    process_runtime_boots: BTreeMap<String, usize>,
+    next_process_prune_ms: u64,
+    process_prune_cursor: Option<(String, u32)>,
     policy: RetentionPolicy,
     healthy: bool,
     segments: BTreeMap<u64, Segment>,
     expiry: BTreeSet<(u64, u64)>,
     startup_segments: BTreeMap<String, BTreeSet<u64>>,
     disk_bytes: u64,
+    published_bytes: u64,
+    graphics_prepare: u64,
     unit: u64,
     metadata_size: u64,
     boots_dirty: bool,
     identities: BTreeMap<EventIdentity, usize>,
+    revisions: BTreeMap<u64, BTreeSet<u64>>,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -226,6 +267,22 @@ fn invalid(message: &str) -> io::Error {
 
 fn request_error(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+pub(crate) fn single_record_page_fits(record: &HistoryRecord, budget: usize) -> io::Result<bool> {
+    let journal_id = &record.cursor.journal_id;
+    let envelope = HistoryPage {
+        range: HistoryRange {
+            journal_id: journal_id.clone(),
+            // The range can advance to this record while it is still retained.
+            oldest: record.cursor.position,
+            high_water: DecimalU64(u64::MAX),
+        },
+        records: Vec::new(),
+        missing: Vec::new(),
+        next: record.cursor.clone(),
+    };
+    Ok(serde_json::to_vec(&envelope)?.len() + serde_json::to_vec(record)?.len() <= budget)
 }
 
 impl Journal {
@@ -237,11 +294,13 @@ impl Journal {
     ) -> io::Result<()> {
         self.check()?;
         let mut metadata = self.metadata.clone();
-        metadata.observe_boot(&boot.to_string(), self.policy.startup_boots);
-        if !metadata.recent_boots.contains(&boot.to_string()) {
+        let boot_id = boot.to_string();
+        metadata.observe_boot(&boot_id, self.policy.startup_boots);
+        if !metadata.recent_boots.contains(&boot_id) {
             return Ok(());
         }
-        let checkpoint = metadata.processes.entry(boot.to_string()).or_default();
+        let previous = self.process_update_view(boot, &[], true)?;
+        let mut checkpoint = previous.clone();
         match resumed_at {
             Some(at) if at >= boot => checkpoint.processes.resume(at),
             Some(_) => return Err(request_error("invalid capture resume time")),
@@ -250,20 +309,16 @@ impl Journal {
                 u64::MAX,
             ),
         }
-        if metadata != self.metadata {
-            self.commit_metadata(metadata)?;
-        }
-        Ok(())
+        self.commit_processes(metadata, Some((boot_id, checkpoint, Some(previous))))
     }
 
     pub fn process_checkpoint(&self, boot: u64) -> io::Result<crate::ancestry::Checkpoint> {
         self.check()?;
-        Ok(self
-            .metadata
-            .processes
-            .get(&boot.to_string())
-            .cloned()
-            .unwrap_or_default())
+        let buckets = self.metadata.process_segments.get(&boot.to_string());
+        self.load_process_buckets(
+            boot,
+            buckets.into_iter().flat_map(|parts| parts.keys().copied()),
+        )
     }
 
     pub fn checkpoint_processes(
@@ -271,22 +326,22 @@ impl Journal {
         source: &ImportSource,
         changes: Vec<crate::ancestry::Lifecycle>,
         through_filetime: u64,
-        now_ms: u64,
+        _now_ms: u64,
     ) -> io::Result<u64> {
         self.import_receipt(source)?;
         let boot = source.boot_filetime.to_string();
-        if !self.metadata.recent_boots.contains(&boot) {
+        if !self.metadata.keeps_process_boot(&boot) && !self.process_runtime_boot(&boot) {
             return Ok(0);
         }
         if changes.len() > 128 {
             return Err(request_error("process batch exceeds capacity"));
         }
-        let mut metadata = self.metadata.clone();
-        let checkpoint = metadata.processes.entry(boot).or_default();
+        let previous = self.process_update_view(source.boot_filetime, &changes, false)?;
+        let mut checkpoint = previous.clone();
         let previous_through = checkpoint.through_filetime.max(source.boot_filetime);
         checkpoint.through_filetime = checkpoint.through_filetime.max(through_filetime);
         let processes = &mut checkpoint.processes;
-        let mut retired = 0;
+        processes.advance_source(&source.id, through_filetime);
         for change in changes {
             match &change {
                 crate::ancestry::Lifecycle::Start { identity, .. } => {
@@ -297,6 +352,10 @@ impl Journal {
                             .as_ref()
                             .and_then(|v| v.parse::<u64>().ok())
                             .is_none_or(|start| start < source.boot_filetime)
+                        || identity
+                            .start_key
+                            .as_ref()
+                            .is_some_and(|key| key.parse::<u64>().is_err())
                         || identity
                             .exe_path
                             .as_ref()
@@ -325,49 +384,21 @@ impl Journal {
             if matches!(change, crate::ancestry::Lifecycle::Discontinuity) {
                 processes.interrupt(previous_through, through_filetime.max(previous_through));
             } else if !processes.apply(change) {
-                retired += 1;
+                return Err(request_error("invalid process lifecycle change"));
             }
         }
-        let boundary = now_ms
-            .saturating_sub(self.policy.runtime_ms)
-            .saturating_mul(10_000)
-            .saturating_add(116_444_736_000_000_000);
-        // Captured startup ancestry remains available with the retained boot history.
-        for (boot, processes) in &mut metadata.processes {
-            let boot = boot.parse::<u64>().unwrap_or(0);
-            processes
-                .processes
-                .retire_history(boot.saturating_add(120 * 10_000_000), boundary);
-        }
-        let limit = (MAX_ENTRY_BYTES / 2).min(self.policy.max_bytes / 4);
-        while serde_json::to_vec(&metadata.processes)?.len() as u64 > limit {
-            let Some((_, checkpoint)) = metadata
-                .processes
-                .iter_mut()
-                .find(|(_, checkpoint)| checkpoint.processes.has_history())
-            else {
-                break;
-            };
-            if checkpoint.processes.evict_oldest() {
-                retired += 1;
-            } else {
-                return Err(request_error(
-                    "process interruption history exceeds capacity",
-                ));
-            }
-        }
-        if retired != 0 {
-            let receipt = metadata
-                .imports
-                .iter_mut()
-                .find(|receipt| receipt.source == *source)
-                .unwrap();
-            receipt.process_context_lost = receipt.process_context_lost.saturating_add(retired);
-        }
-        if metadata != self.metadata {
-            self.commit_metadata(metadata)?;
-        }
-        Ok(retired)
+        self.commit_processes(
+            self.metadata.clone(),
+            Some((
+                boot.clone(),
+                checkpoint,
+                self.metadata
+                    .process_segments
+                    .contains_key(&boot)
+                    .then_some(previous),
+            )),
+        )?;
+        self.revise_attribution(source.boot_filetime, 0)
     }
     pub fn open(
         root: impl AsRef<Path>,
@@ -408,22 +439,33 @@ impl Journal {
             serde_json::from_reader(file)?
         } else {
             Metadata {
+                segments: None,
                 journal_id: initial_journal_id.into(),
                 high_water: 0,
                 recent_boots: Vec::new(),
                 imports: Vec::new(),
+                graphics_fragments: BTreeMap::new(),
                 processes: BTreeMap::new(),
+                process_segments: BTreeMap::new(),
             }
         };
         let mut journal = Self {
             root,
+            retired: Vec::new(),
             metadata,
+            process_cache: Default::default(),
+            process_routes: BTreeMap::new(),
+            process_runtime_boots: BTreeMap::new(),
+            next_process_prune_ms: 0,
+            process_prune_cursor: None,
             policy,
             healthy: true,
             segments: BTreeMap::new(),
             expiry: BTreeSet::new(),
             startup_segments: BTreeMap::new(),
             disk_bytes: 0,
+            published_bytes: 0,
+            graphics_prepare: 0,
             unit,
             metadata_size: if existing {
                 space::charge(unit, &File::open(&metadata_path)?)?
@@ -432,6 +474,7 @@ impl Journal {
             },
             boots_dirty: true,
             identities: BTreeMap::new(),
+            revisions: BTreeMap::new(),
         };
         if journal.metadata.journal_id.is_empty() || journal.metadata.high_water == u64::MAX {
             return Err(invalid("invalid journal metadata"));
@@ -442,13 +485,41 @@ impl Journal {
         let mut source_ids = BTreeSet::new();
         for receipt in &journal.metadata.imports {
             if receipt.source.id.is_empty()
-                || receipt.source.id.len() > 1024
+                || receipt.source.id.len() > MAX_IMPORT_SOURCE_ID_BYTES
                 || !source_ids.insert(&receipt.source.id)
             {
                 return Err(invalid("invalid journal import receipt"));
             }
         }
-        let segments = journal.segment_files()?;
+        let mut segments = journal.segment_files()?;
+        if let Some(active) = &journal.metadata.segments {
+            // Only published extents participate in recovery. A prepared tail can
+            // share its committed prefix with the preceding generation.
+            for (&key, &(len, alt)) in active {
+                let path = journal.data_path(key, alt);
+                let actual = fs::metadata(&path)?.len();
+                if len == 0 || actual < len {
+                    return Err(invalid("committed segment is incomplete"));
+                }
+                if actual > len {
+                    let file = OpenOptions::new().write(true).open(&path)?;
+                    file.set_len(len)?;
+                    file.sync_all()?;
+                }
+            }
+            for (key, path) in &segments {
+                if active
+                    .get(key)
+                    .is_none_or(|&(_, alt)| journal.data_path(*key, alt) != *path)
+                {
+                    fs::remove_file(path)?;
+                }
+            }
+            segments = active
+                .iter()
+                .map(|(&key, &(_, alt))| (key, journal.data_path(key, alt)))
+                .collect();
+        }
         if !existing && !segments.is_empty() {
             return Err(invalid("journal segments require metadata"));
         }
@@ -458,6 +529,8 @@ impl Journal {
             Err(error) if error.kind() == io::ErrorKind::NotFound => (),
             Err(error) => return Err(error),
         }
+        journal.recover_processes()?;
+        journal.recover_graphics()?;
         let committed = journal.metadata.high_water;
         let original_metadata = journal.metadata.clone();
         let final_segment = segments.last().map(|(position, _)| *position);
@@ -465,6 +538,7 @@ impl Journal {
         for (key, path) in segments {
             let mut reader = BufReader::new(File::open(&path)?);
             let mut segment = Segment {
+                alternate: path.extension().is_some_and(|ext| ext == "compact"),
                 charge: 0,
                 entries: Vec::new(),
                 boot: String::new(),
@@ -475,16 +549,16 @@ impl Journal {
                 let mut bytes = Vec::new();
                 let count = reader
                     .by_ref()
-                    .take(MAX_ENTRY_BYTES + 1)
+                    .take(MAX_STORED_LINE_BYTES as u64 + 1)
                     .read_until(b'\n', &mut bytes)?;
                 if count == 0 {
                     break;
                 }
-                if count as u64 > MAX_ENTRY_BYTES {
-                    return Err(invalid("journal entry exceeds frame capacity"));
+                if count > MAX_STORED_LINE_BYTES {
+                    return Err(invalid("journal entry exceeds stored line capacity"));
                 }
                 if !bytes.ends_with(b"\n") {
-                    if Some(key) != final_segment {
+                    if journal.metadata.segments.is_some() || Some(key) != final_segment {
                         return Err(invalid("interrupted entry precedes the final segment"));
                     }
                     let file = OpenOptions::new().write(true).open(&path)?;
@@ -496,6 +570,9 @@ impl Journal {
                 let record = stored.record;
                 let position = record.cursor.position.0;
                 journal.decode_entry(position, &bytes)?;
+                if let Some(revision) = &stored.revision {
+                    revision.validate(&record)?;
+                }
                 if position < key || position <= previous_position || position == u64::MAX {
                     return Err(invalid("recovered entries are out of sequence"));
                 }
@@ -516,17 +593,26 @@ impl Journal {
                     bytes: count as u64,
                     time: record.recorded_at_ms.0,
                     identity: event_identity(&record.event),
+                    attribution_time: attribution::source_time(&record, stored.provenance.as_ref()),
+                    revision_target: stored.revision.as_ref().map(|r| r.target.position.0),
                 });
                 segment.bytes += count as u64;
                 previous_position = position;
                 if position > journal.metadata.high_water {
-                    if position != journal.metadata.high_water + 1 {
+                    if journal.metadata.segments.is_some()
+                        || position != journal.metadata.high_water + 1
+                    {
                         return Err(invalid("recovered entries are out of sequence"));
                     }
                     journal.metadata.high_water = position;
                     journal.observe_boot(&record.boot_id);
                 }
                 if let Some(provenance) = stored.provenance {
+                    if provenance.source.id.is_empty()
+                        || provenance.source.id.len() > MAX_IMPORT_SOURCE_ID_BYTES
+                    {
+                        return Err(invalid("invalid recovered capture source identity"));
+                    }
                     if !provenance.complete
                         && (provenance.ordinal == 0
                             || provenance.source.boot_filetime.to_string() != record.boot_id
@@ -567,7 +653,7 @@ impl Journal {
                 journal.insert_segment(key, segment);
             }
         }
-        // A compaction becomes visible through replacement of its original segment.
+        // Reclaim a legacy compaction scratch file.
         match fs::remove_file(journal.root.join("segment.pending")) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::NotFound => (),
@@ -580,26 +666,44 @@ impl Journal {
             let entry = entry?;
             if entry.file_type()?.is_file()
                 && entry.file_name() != "metadata.json"
-                && entry.path().extension().is_none_or(|ext| ext != "jsonl")
+                && entry
+                    .path()
+                    .extension()
+                    .is_none_or(|ext| ext != "jsonl" && ext != "compact")
             {
                 journal.disk_bytes = journal
                     .disk_bytes
                     .saturating_add(space::charge(unit, &File::open(entry.path())?)?);
             }
         }
+        journal.published_bytes = journal.disk_bytes;
         let discard = journal
             .metadata
             .recent_boots
             .len()
             .saturating_sub(journal.policy.startup_boots);
         journal.metadata.recent_boots.drain(..discard);
-        if !existing || journal.metadata != original_metadata {
-            let reserve = journal.metadata_reserve(journal.metadata_bytes()?.len() as u64)?;
-            journal.make_room(reserve, committed)?;
+        journal.prune_inner(None)?;
+        if !journal.metadata.processes.is_empty() {
+            let mut metadata = journal.metadata.clone();
+            let mut legacy = std::mem::take(&mut metadata.processes);
+            legacy.retain(|boot, _| {
+                metadata.keeps_process_boot(boot) || journal.process_runtime_boot(boot)
+            });
+            journal.commit_processes(
+                metadata,
+                legacy
+                    .into_iter()
+                    .map(|(boot, checkpoint)| (boot, checkpoint, None)),
+            )?;
+        } else if journal.metadata.segments.is_none()
+            || journal.metadata != original_metadata
+            || !journal.retired.is_empty()
+        {
             journal.persist_metadata()?;
         }
-        journal.prune_inner(None)?;
         journal.sync_directory()?;
+        journal.resume_attribution()?;
         Ok(journal)
     }
 
@@ -612,7 +716,15 @@ impl Journal {
     }
 
     fn segment_path(&self, position: u64) -> PathBuf {
-        self.root.join(format!("{position:020}.jsonl"))
+        self.data_path(
+            position,
+            self.segments.get(&position).is_some_and(|s| s.alternate),
+        )
+    }
+
+    fn data_path(&self, position: u64, alternate: bool) -> PathBuf {
+        let ext = if alternate { "compact" } else { "jsonl" };
+        self.root.join(format!("{position:020}.{ext}"))
     }
 
     fn segment_files(&self) -> io::Result<Vec<(u64, PathBuf)>> {
@@ -621,11 +733,14 @@ impl Journal {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if let Some(stem) = name.strip_suffix(".jsonl") {
+            if let Some(stem) = name
+                .strip_suffix(".jsonl")
+                .or_else(|| name.strip_suffix(".compact"))
+            {
                 let position = stem
                     .parse::<u64>()
                     .map_err(|_| invalid("invalid segment name"))?;
-                if position == 0 || name != format!("{position:020}.jsonl") {
+                if position == 0 || stem != format!("{position:020}") {
                     return Err(invalid("invalid segment position"));
                 }
                 segments.push((position, entry.path()));
@@ -676,7 +791,7 @@ impl Journal {
         }
         let mut metadata = self.metadata.clone();
         for source in &sources {
-            if source.id.is_empty() || source.id.len() > 1024 {
+            if source.id.is_empty() || source.id.len() > MAX_IMPORT_SOURCE_ID_BYTES {
                 return Err(request_error("invalid capture source identity"));
             }
             if let Some(receipt) = metadata
@@ -695,7 +810,6 @@ impl Journal {
                     source: source.clone(),
                     through: 0,
                     complete: false,
-                    process_context_lost: 0,
                 });
             }
             if source.boot_filetime != 0 {
@@ -741,16 +855,38 @@ impl Journal {
         boot_filetime: u64,
         now_ms: u64,
     ) -> io::Result<ImportReceipt> {
+        self.complete_graphics_import(source, diagnostic, boot_filetime, now_ms, None)
+    }
+
+    pub fn complete_graphics_import(
+        &mut self,
+        source: &ImportSource,
+        diagnostic: Option<(String, Option<u64>)>,
+        boot_filetime: u64,
+        now_ms: u64,
+        graphics: Option<crate::engine_events::GraphicsUpdate>,
+    ) -> io::Result<ImportReceipt> {
         let previous = self.import_receipt(source)?;
         if previous.complete {
             return Ok(previous);
         }
+        if graphics
+            .as_ref()
+            .is_some_and(|g| g.boot == 0 || g.boot != source.boot_filetime)
+        {
+            return Err(request_error(
+                "graphics checkpoint boot differs from capture source",
+            ));
+        }
+        let mut completed = previous.clone();
+        completed.complete = true;
+        let mut inputs = Vec::new();
         if let Some((reason, count)) = diagnostic {
             let source_filetime = now_ms
                 .checked_mul(10_000)
                 .and_then(|time| time.checked_add(116_444_736_000_000_000))
                 .ok_or_else(|| request_error("invalid diagnostic time"))?;
-            self.append_stored(vec![(
+            inputs.push((
                 JournalInput {
                     boot_id: boot_filetime.to_string(),
                     recorded_at_ms: now_ms,
@@ -772,18 +908,10 @@ impl Journal {
                     source_filetime,
                     complete: true,
                 }),
-            )])?;
+            ));
         }
-        let mut metadata = self.metadata.clone();
-        let receipt = metadata
-            .imports
-            .iter_mut()
-            .find(|receipt| receipt.source == *source)
-            .unwrap();
-        receipt.complete = true;
-        let result = receipt.clone();
-        self.commit_metadata(metadata)?;
-        Ok(result)
+        self.append_stored(inputs, Some(&completed), graphics)?;
+        Ok(completed)
     }
 
     /// The caller supplies file identities from a complete directory scan, including active outputs.
@@ -889,17 +1017,12 @@ impl Journal {
             ));
         }
         // All input validation precedes the first durable mutation.
-        self.append_stored(inputs)?;
-        let mut metadata = self.metadata.clone();
-        let receipt = metadata
-            .imports
-            .iter_mut()
-            .find(|receipt| receipt.source == batch.source)
-            .unwrap();
-        receipt.through = batch.through;
-        receipt.complete = batch.complete;
-        let receipt = receipt.clone();
-        self.commit_metadata(metadata)?;
+        let receipt = ImportReceipt {
+            source: batch.source,
+            through: batch.through,
+            complete: batch.complete,
+        };
+        self.append_stored(inputs, Some(&receipt), None)?;
         Ok(receipt)
     }
 
@@ -910,17 +1033,199 @@ impl Journal {
         }
         let mut metadata = self.metadata.clone();
         metadata.imports.retain(|receipt| receipt.source != *source);
-        self.commit_metadata(metadata)
+        let boot = source.boot_filetime.to_string();
+        let mut updates = None;
+        if metadata.keeps_process_boot(&boot) || self.process_runtime_boot(&boot) {
+            if self.metadata.process_segments.contains_key(&boot) {
+                let previous = self.load_process_bucket(source.boot_filetime, 0)?;
+                let mut checkpoint = (*previous).clone();
+                checkpoint.processes.forget_source(&source.id);
+                updates = Some((boot, checkpoint, Some((*previous).clone())));
+            }
+        }
+        self.commit_processes(metadata, updates)
     }
 
     fn commit_metadata(&mut self, metadata: Metadata) -> io::Result<()> {
+        self.commit_processes(metadata, None)
+    }
+
+    fn retire_process_history(&self, boot: &str, checkpoint: &mut Checkpoint, now_ms: u64) {
+        if self.metadata.pending_process_source(boot) || self.process_runtime_boot(boot) {
+            return;
+        }
+        let boundary = now_ms
+            .saturating_sub(self.policy.runtime_ms)
+            .saturating_mul(10_000)
+            .saturating_add(116_444_736_000_000_000);
+        let startup = boot
+            .parse::<u64>()
+            .unwrap_or(0)
+            .saturating_add(120 * 10_000_000);
+        checkpoint.processes.retire_history(startup, boundary);
+    }
+
+    fn process_path(&self, boot: &str, bucket: u32, part: usize, alternate: bool) -> PathBuf {
+        self.root.join(format!(
+            "process-{boot}-{bucket}-{part}-{}.proc",
+            u8::from(alternate)
+        ))
+    }
+
+    fn recover_processes(&mut self) -> io::Result<()> {
+        let mut active = BTreeSet::new();
+        for (boot, buckets) in &self.metadata.process_segments {
+            let boot_time: u64 = boot
+                .parse()
+                .map_err(|_| invalid("invalid process segment boot"))?;
+            if boot_time.to_string() != *boot || self.metadata.processes.contains_key(boot) {
+                return Err(invalid("ambiguous process checkpoint"));
+            }
+            if !buckets.contains_key(&0) {
+                return Err(invalid("missing process checkpoint progress"));
+            }
+            for (&bucket, parts) in buckets {
+                if parts.is_empty() {
+                    return Err(invalid("empty process bucket"));
+                }
+                for (part, &(length, alternate)) in parts.iter().enumerate() {
+                    let path = self.process_path(boot, bucket, part, alternate);
+                    if length == 0
+                        || length > MAX_ENTRY_BYTES
+                        || fs::metadata(&path)?.len() != length
+                    {
+                        return Err(invalid("committed process extent differs from file"));
+                    }
+                    active.insert(path);
+                }
+            }
+        }
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_file()
+                && entry.file_name().to_string_lossy().starts_with("process-")
+                && path.extension().is_some_and(|ext| ext == "proc")
+                && !active.contains(&path)
+            {
+                fs::remove_file(path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_processes(
+        &mut self,
+        mut metadata: Metadata,
+        updates: impl IntoIterator<Item = (String, Checkpoint, Option<Checkpoint>)>,
+    ) -> io::Result<()> {
         self.check()?;
+        let mut prepared = Vec::new();
+        let mut retired = Vec::new();
+        let mut warm = Vec::new();
+        for (boot, checkpoint, previous) in updates {
+            let boot_time: u64 = boot
+                .parse()
+                .map_err(|_| invalid("invalid process checkpoint boot"))?;
+            if boot_time.to_string() != boot {
+                return Err(invalid("noncanonical process checkpoint boot"));
+            }
+            let buckets = metadata.process_segments.entry(boot.clone()).or_default();
+            for (bucket, rows) in checkpoint.changed_buckets(previous.as_ref()) {
+                let old = buckets.remove(&bucket).unwrap_or_default();
+                let mut files = Vec::new();
+                let mut bytes = Vec::new();
+                for row in rows {
+                    let line = serde_json::to_vec(&row)?;
+                    if bytes.len() + line.len() + 1 > SEGMENT_BYTES as usize && !bytes.is_empty() {
+                        files.push(std::mem::take(&mut bytes));
+                    }
+                    bytes.extend_from_slice(&line);
+                    bytes.push(b'\n');
+                }
+                if !bytes.is_empty() {
+                    files.push(bytes);
+                }
+                let mut parts = Vec::new();
+                for (part, bytes) in files.into_iter().enumerate() {
+                    let length = bytes.len() as u64;
+                    if length > MAX_ENTRY_BYTES {
+                        return Err(request_error("process checkpoint row exceeds capacity"));
+                    }
+                    let mut alternate = false;
+                    if let Some(&(old_length, old_slot)) = old.get(part) {
+                        let path = self.process_path(&boot, bucket, part, old_slot);
+                        if old_length == length && fs::read(&path)? == bytes {
+                            parts.push((length, old_slot));
+                            continue;
+                        }
+                        retired.push((path.clone(), space::charge(self.unit, &File::open(path)?)?));
+                        alternate = !old_slot;
+                    }
+                    prepared.push((self.process_path(&boot, bucket, part, alternate), bytes));
+                    parts.push((length, alternate));
+                }
+                for (part, &(_, alt)) in old.iter().enumerate().skip(parts.len()) {
+                    let path = self.process_path(&boot, bucket, part, alt);
+                    retired.push((path.clone(), space::charge(self.unit, &File::open(path)?)?));
+                }
+                warm.push((
+                    boot_time,
+                    bucket,
+                    parts.iter().map(|part| part.0).sum(),
+                    checkpoint.bucket(bucket),
+                ));
+                if !parts.is_empty() {
+                    buckets.insert(bucket, parts);
+                }
+            }
+            if buckets.is_empty() {
+                metadata.process_segments.remove(&boot);
+            }
+        }
+        metadata.segments = Some(
+            self.segments
+                .iter()
+                .map(|(&key, s)| (key, (s.bytes, s.alternate)))
+                .collect(),
+        );
+        if metadata == self.metadata
+            && prepared.is_empty()
+            && retired.is_empty()
+            && self.retired.is_empty()
+        {
+            return Ok(());
+        }
         let reserve = self.metadata_reserve(serde_json::to_vec(&metadata)?.len() as u64)?;
+        if !prepared.is_empty() {
+            let payload = prepared
+                .iter()
+                .map(|(_, bytes)| space::rounded(self.unit, bytes.len() as u64))
+                .sum::<u64>();
+            self.require_space(reserve.saturating_add(payload))?;
+        }
         self.boots_dirty |= self.metadata.recent_boots != metadata.recent_boots;
         self.metadata = metadata;
         let result = (|| {
-            self.make_room(reserve, self.metadata.high_water)?;
-            self.persist_metadata()
+            for (path, bytes) in prepared {
+                self.stage_file(&path, &bytes)?;
+            }
+            self.retired.extend(retired);
+            self.persist_metadata()?;
+            for (boot, bucket, size, page) in warm {
+                if !self
+                    .metadata
+                    .process_segments
+                    .contains_key(&boot.to_string())
+                {
+                    continue;
+                }
+                if let Some(routes) = self.process_routes.get_mut(&boot) {
+                    routes.set(bucket, &page);
+                }
+                self.warm_process_bucket(boot, bucket, size, page);
+            }
+            Ok(())
         })();
         if result.is_err() {
             self.healthy = false;
@@ -945,13 +1250,37 @@ impl Journal {
     }
 
     fn persist_metadata(&mut self) -> io::Result<()> {
+        let expired: Vec<_> = self
+            .metadata
+            .process_segments
+            .keys()
+            .filter(|boot| {
+                !self.metadata.keeps_process_boot(boot) && !self.process_runtime_boot(boot)
+            })
+            .cloned()
+            .collect();
+        for boot in expired {
+            for (bucket, parts) in self.metadata.process_segments.remove(&boot).unwrap() {
+                for (part, &(_, alt)) in parts.iter().enumerate() {
+                    let path = self.process_path(&boot, bucket, part, alt);
+                    self.retired
+                        .push((path.clone(), space::charge(self.unit, &File::open(path)?)?));
+                }
+            }
+            if let Ok(boot) = boot.parse() {
+                self.process_routes.remove(&boot);
+                self.process_cache.get_mut().forget_boot(boot);
+            }
+        }
+        self.metadata.segments = Some(
+            self.segments
+                .iter()
+                .map(|(&key, s)| (key, (s.bytes, s.alternate)))
+                .collect(),
+        );
         let bytes = self.metadata_bytes()?;
         let reserve = self.metadata_reserve(bytes.len() as u64)?;
-        if self.disk_bytes.saturating_add(reserve) > self.policy.max_bytes {
-            return Err(request_error(
-                "journal capacity is too small for metadata replacement",
-            ));
-        }
+        self.require_space(reserve)?;
         let pending = self.root.join("metadata.pending");
         let mut file = OpenOptions::new()
             .read(true)
@@ -966,11 +1295,20 @@ impl Journal {
         drop(file);
         #[cfg(test)]
         tests::shared_budget::observe(&pending, &self.root.join("metadata.json"));
+        #[cfg(test)]
+        tests::interrupt("publish")?;
         replace_metadata(&pending, &self.root.join("metadata.json"))?;
         self.sync_directory()?;
         self.disk_bytes = self.disk_bytes - self.metadata_size + charge;
         self.metadata_size = charge;
-        Ok(())
+        for (path, charge) in self.retired.drain(..) {
+            #[cfg(test)]
+            tests::interrupt("cleanup")?;
+            fs::remove_file(path)?;
+            self.disk_bytes -= charge;
+        }
+        self.published_bytes = self.disk_bytes;
+        self.sync_directory()
     }
 
     fn sync_directory(&self) -> io::Result<()> {
@@ -1000,17 +1338,42 @@ impl Journal {
 
     /// Commits a capture batch and returns its durable records in input order.
     pub fn append_batch(&mut self, entries: Vec<JournalInput>) -> io::Result<Vec<HistoryRecord>> {
-        self.append_stored(entries.into_iter().map(|entry| (entry, None)).collect())
+        self.append_stored(
+            entries.into_iter().map(|entry| (entry, None)).collect(),
+            None,
+            None,
+        )
     }
 
     fn append_stored(
         &mut self,
         entries: Vec<(JournalInput, Option<Provenance>)>,
+        receipt: Option<&ImportReceipt>,
+        graphics: Option<crate::engine_events::GraphicsUpdate>,
+    ) -> io::Result<Vec<HistoryRecord>> {
+        let after = self.metadata.high_water;
+        let records = self.append_stored_inner(entries, receipt, graphics, None)?;
+        // The capture queue can publish a log just after its evidence checkpoint.
+        let boots: BTreeSet<u64> = records
+            .iter()
+            .filter(|record| matches!(record.event, HistoryEvent::Log { .. }))
+            .filter_map(|record| record.boot_id.parse().ok())
+            .collect();
+        for boot in boots {
+            self.revise_attribution(boot, after)?;
+        }
+        Ok(records)
+    }
+
+    fn append_stored_inner(
+        &mut self,
+        entries: Vec<(JournalInput, Option<Provenance>)>,
+        receipt: Option<&ImportReceipt>,
+        graphics: Option<crate::engine_events::GraphicsUpdate>,
+        revision: Option<&attribution::Revision>,
     ) -> io::Result<Vec<HistoryRecord>> {
         self.check()?;
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
+
         if entries.len() > 256 {
             return Err(request_error("journal batch exceeds 256 records"));
         }
@@ -1021,8 +1384,21 @@ impl Journal {
             .ok_or_else(|| request_error("journal positions exhausted"))?;
         let mut records = Vec::with_capacity(entries.len());
         let mut offsets = Vec::with_capacity(entries.len());
-        let mut encoded = BatchEncoding(Vec::with_capacity(MAX_BATCH_BYTES));
+        let mut attribution_times = Vec::with_capacity(entries.len());
+        let batch_limit = if entries.len() == 1 && entries[0].1.is_some() {
+            MAX_STORED_LINE_BYTES
+        } else {
+            MAX_BATCH_BYTES
+        };
+        let mut encoded = BatchEncoding(Vec::with_capacity(batch_limit), batch_limit);
         let mut metadata = self.metadata.clone();
+        if let Some(receipt) = receipt {
+            *metadata
+                .imports
+                .iter_mut()
+                .find(|r| r.source == receipt.source)
+                .ok_or_else(|| invalid("capture source missing"))? = receipt.clone();
+        }
         let mut now = 0;
         let mut identities = BTreeSet::new();
         for (mut input, provenance) in entries {
@@ -1054,6 +1430,13 @@ impl Journal {
                 startup: input.startup,
                 event: input.event,
             };
+            if !single_record_page_fits(&record, MAX_HISTORY_PAGE_BYTES)? {
+                return Err(request_error("journal entry exceeds history page capacity"));
+            }
+            if let Some(revision) = revision {
+                revision.validate(&record)?;
+            }
+            attribution_times.push(attribution::source_time(&record, provenance.as_ref()));
             let offset = encoded.0.len();
             #[derive(Serialize)]
             struct Stored<'a> {
@@ -1061,43 +1444,35 @@ impl Journal {
                 record: &'a HistoryRecord,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 provenance: Option<Provenance>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                revision: Option<&'a attribution::Revision>,
             }
             serde_json::to_writer(
                 &mut encoded,
                 &Stored {
                     record: &record,
                     provenance,
+                    revision,
                 },
             )
             .map_err(|error| request_error(&error.to_string()))?;
             encoded.write_all(b"\n")?;
             let length = encoded.0.len() - offset;
-            // Retained records share their page envelope with advancing range cursors.
-            let page = HistoryPage {
-                range: HistoryRange {
-                    journal_id: metadata.journal_id.clone(),
-                    oldest: DecimalU64(u64::MAX),
-                    high_water: DecimalU64(u64::MAX - 1),
-                },
-                records: Vec::new(),
-                missing: Vec::new(),
-                next: HistoryCursor {
-                    journal_id: metadata.journal_id.clone(),
-                    position: DecimalU64(u64::MAX - 1),
-                },
-            };
-            if length as u64 > MAX_ENTRY_BYTES
-                || serde_json::to_vec(&page)?.len() + length - 1 > MAX_ENTRY_BYTES as usize - 256
-            {
-                return Err(request_error("journal entry exceeds history page capacity"));
-            }
             metadata.observe_boot(&record.boot_id, self.policy.startup_boots);
             metadata.high_water = position;
             now = now.max(input.recorded_at_ms);
             offsets.push((offset, length));
             records.push(record);
         }
+        if let Some(update) = graphics {
+            debug_assert!(records.len() <= 1);
+            self.publish_graphics(metadata, update, records.first(), &encoded.0)?;
+            return Ok(records);
+        }
         if records.is_empty() {
+            if self.metadata != metadata {
+                self.commit_metadata(metadata)?;
+            }
             return Ok(records);
         }
         if records.len() > 1
@@ -1142,6 +1517,8 @@ impl Journal {
             }
             (groups, charge)
         };
+        // Leave room for the next bounded prepare, including allocation padding.
+        let runway = (self.policy.max_bytes / 4).min(self.prepare_limit());
         let fresh = plan(None);
         if fresh.1 + self.metadata_size > self.policy.max_bytes {
             return Err(request_error("journal batch exceeds available capacity"));
@@ -1152,20 +1529,38 @@ impl Journal {
         let result = (|| {
             self.prune_inner(Some(now))?;
             let tail = self.segments.last_key_value().filter(|(_, s)| {
-                s.boot == records[0].boot_id
+                revision.is_some() == s.entries[0].revision_target.is_some()
+                    && s.boot == records[0].boot_id
                     && s.startup == records[0].startup
                     && s.entries.len() < SEGMENT_RECORDS
                     && s.bytes + offsets[0].1 as u64 <= limit
             });
             let (groups, victims, tail) = if let Some((&key, segment)) = tail {
                 let (groups, reserve) = plan(Some(segment));
-                match self.evictions(reserve, committed) {
+                match self.evictions(
+                    reserve + runway.saturating_sub(self.metadata_size),
+                    committed,
+                ) {
                     Ok(victims) if !victims.contains(&key) => (groups, victims, Some(key)),
                     // Repack the whole batch before retiring its planned append target.
-                    _ => (fresh.0, self.evictions(fresh.1, committed)?, None),
+                    _ => (
+                        fresh.0,
+                        self.evictions(
+                            fresh.1 + runway.saturating_sub(self.metadata_size),
+                            committed,
+                        )?,
+                        None,
+                    ),
                 }
             } else {
-                (fresh.0, self.evictions(fresh.1, committed)?, None)
+                (
+                    fresh.0,
+                    self.evictions(
+                        fresh.1 + runway.saturating_sub(self.metadata_size),
+                        committed,
+                    )?,
+                    None,
+                )
             };
             for key in victims {
                 self.remove_segment(key)?;
@@ -1174,12 +1569,19 @@ impl Journal {
                 let record = &records[first];
                 let position = record.cursor.position.0;
                 let key = tail.filter(|_| first == 0).unwrap_or(position);
+                let base = self.segments.get(&key);
+                let new_charge = space::rounded(unit, base.map_or(0, |s| s.bytes) + size);
+                self.require_space(new_charge.saturating_sub(base.map_or(0, |s| s.charge)))?;
+                #[cfg(test)]
+                tests::interrupt("create")?;
+                let path = self.segment_path(key);
                 let mut file = OpenOptions::new()
                     .read(true)
                     .write(true)
                     .create_new(key == position)
-                    .open(self.segment_path(key))?;
+                    .open(&path)?;
                 let mut segment = self.take_segment(key).unwrap_or(Segment {
+                    alternate: false,
                     charge: 0,
                     entries: Vec::new(),
                     boot: record.boot_id.clone(),
@@ -1189,19 +1591,32 @@ impl Journal {
                 file.seek(SeekFrom::End(0))?;
                 space::prepare(&file, self.unit, segment.bytes + size)?;
                 let offset = offsets[first].0;
+                #[cfg(test)]
+                if let Err(e) = tests::interrupt("write") {
+                    file.write_all(&encoded.0[offset..offset + size as usize / 2])?;
+                    return Err(e);
+                }
                 file.write_all(&encoded.0[offset..offset + size as usize])?;
+                #[cfg(test)]
+                tests::interrupt("sync")?;
                 file.sync_all()?;
                 self.sync_directory()?;
+                #[cfg(test)]
+                tests::shared_budget::observe(&path, &self.root.join("metadata.json"));
                 self.disk_bytes -= segment.charge;
                 segment.charge = space::charge(self.unit, &file)?;
                 self.disk_bytes += segment.charge;
-                for (record, &(_, length)) in records[first..end].iter().zip(&offsets[first..end]) {
+                for i in first..end {
+                    let record = &records[i];
+                    let length = offsets[i].1;
                     segment.entries.push(Entry {
                         position: record.cursor.position.0,
                         offset: segment.bytes,
                         bytes: length as u64,
                         time: record.recorded_at_ms.0,
                         identity: event_identity(&record.event),
+                        attribution_time: attribution_times[i],
+                        revision_target: revision.map(|r| r.target.position.0),
                     });
                     segment.bytes += length as u64;
                 }
@@ -1248,6 +1663,19 @@ impl Journal {
     }
 
     pub fn read(&self, request: HistoryRead, byte_budget: usize) -> io::Result<HistoryPage> {
+        Ok(serde_json::from_value(self.read_encoded(
+            request,
+            byte_budget,
+            HistoryEncoding::Compatibility,
+        )?)?)
+    }
+
+    pub fn read_encoded(
+        &self,
+        request: HistoryRead,
+        byte_budget: usize,
+        encoding: HistoryEncoding,
+    ) -> io::Result<serde_json::Value> {
         self.check()?;
         if !(1..=256).contains(&request.limit) {
             return Err(request_error("history limit must be between 1 and 256"));
@@ -1262,8 +1690,8 @@ impl Journal {
         if through < after || through > self.metadata.high_water {
             return Err(request_error("invalid history range"));
         }
-        let budget = byte_budget.min(MAX_ENTRY_BYTES as usize - 256);
-        let mut page = HistoryPage {
+        let budget = byte_budget.min(MAX_HISTORY_PAGE_BYTES);
+        let mut page = AttributionHistoryPage {
             range: self.range()?,
             records: Vec::new(),
             missing: Vec::new(),
@@ -1272,7 +1700,8 @@ impl Journal {
                 position: DecimalU64(after),
             },
         };
-        if serde_json::to_vec(&page)?.len() > budget {
+        let mut encoded = self.encode_history_page(page.clone(), encoding)?;
+        if serde_json::to_vec(&encoded)?.len() > budget {
             return Err(request_error("history byte budget is too small for a page"));
         }
         'segments: for (&key, segment) in &self.segments {
@@ -1287,41 +1716,44 @@ impl Journal {
                 if position > page.next.position.0 + 1 {
                     let mut candidate = page.clone();
                     Self::push_missing(&mut candidate, position - 1);
-                    if !Self::fits(&candidate, budget)? {
-                        return self.finish_page(page, after);
+                    let value = self.encode_history_page(candidate.clone(), encoding)?;
+                    if serde_json::to_vec(&value)?.len() > budget {
+                        return Self::finish_page(encoded, page.next.position.0, after);
                     }
                     page = candidate;
+                    encoded = value;
                 }
                 if page.records.len() == request.limit as usize {
-                    return Ok(page);
+                    return Ok(encoded);
                 }
-                // Inspect length before allocating a record, then decode at most one frame.
-                if entry.bytes as usize > budget {
-                    return self.finish_page(page, after);
-                }
-                let record = self.decode_entry(position, &self.entry_bytes(key, entry)?)?;
+                // Stored lines are bounded and include provenance. Only the decoded
+                // record contributes to the response page.
+                let record = self.attribution_entry(key, entry)?;
                 let mut candidate = page.clone();
                 candidate.records.push(record);
                 candidate.next.position = DecimalU64(position);
-                if !Self::fits(&candidate, budget)? {
-                    return self.finish_page(page, after);
+                let value = self.encode_history_page(candidate.clone(), encoding)?;
+                if serde_json::to_vec(&value)?.len() > budget {
+                    return Self::finish_page(encoded, page.next.position.0, after);
                 }
                 page = candidate;
+                encoded = value;
             }
         }
         if page.next.position.0 < through {
             let mut candidate = page.clone();
             Self::push_missing(&mut candidate, through);
-            if Self::fits(&candidate, budget)? {
-                page = candidate;
+            let value = self.encode_history_page(candidate, encoding)?;
+            if serde_json::to_vec(&value)?.len() <= budget {
+                encoded = value;
             } else {
-                return self.finish_page(page, after);
+                return Self::finish_page(encoded, page.next.position.0, after);
             }
         }
-        Ok(page)
+        Ok(encoded)
     }
 
-    fn push_missing(page: &mut HistoryPage, last: u64) {
+    fn push_missing(page: &mut AttributionHistoryPage, last: u64) {
         page.missing.push(HistoryMissing {
             first: DecimalU64(page.next.position.0 + 1),
             last: DecimalU64(last),
@@ -1330,12 +1762,12 @@ impl Journal {
         page.next.position = DecimalU64(last);
     }
 
-    fn fits(page: &HistoryPage, budget: usize) -> io::Result<bool> {
-        Ok(serde_json::to_vec(page)?.len() <= budget)
-    }
-
-    fn finish_page(&self, page: HistoryPage, after: u64) -> io::Result<HistoryPage> {
-        if page.next.position.0 == after {
+    fn finish_page(
+        page: serde_json::Value,
+        next: u64,
+        after: u64,
+    ) -> io::Result<serde_json::Value> {
+        if next == after {
             Err(request_error(
                 "history byte budget is too small for the next entry",
             ))
@@ -1346,15 +1778,60 @@ impl Journal {
 
     pub fn prune(&mut self, now_ms: u64) -> io::Result<()> {
         self.check()?;
-        let result = self.prune_inner(Some(now_ms));
+        let result = self.prune_inner(Some(now_ms)).and_then(|_| {
+            if self.retired.is_empty() {
+                Ok(())
+            } else {
+                self.persist_metadata()
+            }
+        });
         if result.is_err() {
             self.healthy = false;
         }
-        result
+        result?;
+        if now_ms >= self.next_process_prune_ms {
+            self.next_process_prune_ms = now_ms.saturating_add(60_000);
+            let buckets: Vec<_> = self
+                .metadata
+                .process_segments
+                .iter()
+                .filter(|(boot, _)| {
+                    !self.metadata.pending_process_source(boot) && !self.process_runtime_boot(boot)
+                })
+                .flat_map(|(boot, parts)| parts.keys().map(move |&bucket| (boot.clone(), bucket)))
+                .filter(|key| {
+                    self.process_prune_cursor
+                        .as_ref()
+                        .is_none_or(|cursor| key > cursor)
+                })
+                .take(8)
+                .collect();
+            self.process_prune_cursor = buckets.last().cloned();
+            for (boot, bucket) in buckets {
+                self.reclaim_process_bucket(
+                    boot.parse().map_err(|_| invalid("invalid process boot"))?,
+                    bucket,
+                    now_ms,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn insert_segment(&mut self, key: u64, segment: Segment) {
+        if !segment.startup {
+            *self
+                .process_runtime_boots
+                .entry(segment.boot.clone())
+                .or_default() += 1;
+        }
         for entry in &segment.entries {
+            if let Some(target) = entry.revision_target {
+                self.revisions
+                    .entry(target)
+                    .or_default()
+                    .insert(entry.position);
+            }
             if let Some(identity) = &entry.identity {
                 *self.identities.entry(identity.clone()).or_default() += 1;
             }
@@ -1374,7 +1851,21 @@ impl Journal {
 
     fn take_segment(&mut self, key: u64) -> Option<Segment> {
         let segment = self.segments.remove(&key)?;
+        if !segment.startup {
+            let count = self.process_runtime_boots.get_mut(&segment.boot).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                self.process_runtime_boots.remove(&segment.boot);
+            }
+        }
         for entry in &segment.entries {
+            if let Some(target) = entry.revision_target {
+                let positions = self.revisions.get_mut(&target).unwrap();
+                positions.remove(&entry.position);
+                if positions.is_empty() {
+                    self.revisions.remove(&target);
+                }
+            }
             if let Some(identity) = &entry.identity {
                 let count = self.identities.get_mut(identity).unwrap();
                 *count -= 1;
@@ -1397,12 +1888,49 @@ impl Journal {
     }
 
     fn remove_segment(&mut self, key: u64) -> io::Result<()> {
-        fs::remove_file(self.segment_path(key))?;
+        let path = self.segment_path(key);
         let segment = self
             .take_segment(key)
             .ok_or_else(|| invalid("segment index missing"))?;
-        self.disk_bytes -= segment.charge;
-        self.sync_directory()
+        self.retired.push((path, segment.charge));
+        Ok(())
+    }
+
+    // Payload and manifest are bounded separately; cluster slack also applies to
+    // batches in which every input starts a segment. Compactions use this same reserve.
+    fn prepare_limit(&self) -> u64 {
+        MAX_STORED_LINE_BYTES as u64 + MAX_ENTRY_BYTES + 257 * self.unit
+    }
+    fn require_space(&self, extra: u64) -> io::Result<()> {
+        if self.disk_bytes.saturating_add(extra)
+            > self.policy.max_bytes.min(
+                self.published_bytes
+                    .saturating_add(self.prepare_limit())
+                    .saturating_add(self.graphics_prepare),
+            )
+        {
+            return Err(request_error("journal staging capacity exhausted"));
+        }
+        Ok(())
+    }
+
+    /// Prepare an immutable file beside the published generation. Its charge
+    /// remains live until a manifest excludes it and reclamation succeeds.
+    fn stage_file(&mut self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        let len = bytes.len() as u64;
+        self.require_space(space::rounded(self.unit, len))?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        space::prepare(&file, self.unit, len)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        self.sync_directory()?;
+        let charge = space::charge(self.unit, &file)?;
+        self.disk_bytes += charge;
+        Ok(charge)
     }
 
     fn make_room(&mut self, reserve: u64, committed: u64) -> io::Result<()> {
@@ -1415,6 +1943,7 @@ impl Journal {
     fn evictions(&self, reserve: u64, committed: u64) -> io::Result<Vec<u64>> {
         let mut need = self
             .disk_bytes
+            .saturating_sub(self.retired.iter().map(|(_, charge)| charge).sum())
             .saturating_add(reserve)
             .saturating_sub(self.policy.max_bytes);
         let mut victims = Vec::new();
@@ -1433,11 +1962,36 @@ impl Journal {
             .iter()
             .filter(|(_, s)| s.startup && retained(&s.boot))
             .map(|(&key, _)| key);
-        for key in expired.chain(runtime).chain(startup) {
+        let order = expired.chain(runtime).chain(startup);
+        // The latest revision is the position-bearing snapshot for a retained target.
+        // Reclaim superseded revisions first, then reclaim snapshots with their targets.
+        let mut selected = BTreeSet::new();
+        let mut snapshots = Vec::new();
+        for key in order {
             let s = &self.segments[&key];
             if s.entries.last().unwrap().position <= committed {
+                if self
+                    .snapshot_targets(s)
+                    .any(|target| target != key && !selected.contains(&target))
+                {
+                    snapshots.push(key);
+                    continue;
+                }
                 victims.push(key);
+                selected.insert(key);
                 need = need.saturating_sub(s.charge);
+                if need == 0 {
+                    return Ok(victims);
+                }
+            }
+        }
+        for key in snapshots {
+            if self
+                .snapshot_targets(&self.segments[&key])
+                .all(|target| selected.contains(&target))
+            {
+                victims.push(key);
+                need = need.saturating_sub(self.segments[&key].charge);
                 if need == 0 {
                     return Ok(victims);
                 }
@@ -1478,6 +2032,7 @@ impl Journal {
                 }
                 let mut bytes = Vec::new();
                 let mut replacement = Segment {
+                    alternate: !segment.alternate,
                     charge: 0,
                     entries: Vec::new(),
                     boot: segment.boot.clone(),
@@ -1492,36 +2047,18 @@ impl Journal {
                         bytes: entry.bytes,
                         time: entry.time,
                         identity: entry.identity.clone(),
+                        attribution_time: entry.attribution_time,
+                        revision_target: entry.revision_target,
                     });
                     replacement.bytes += entry.bytes;
                     bytes.extend_from_slice(&data);
                 }
                 // Reserve compaction alongside the original before writing its replacement.
-                self.make_room(
-                    space::rounded(self.unit, replacement.bytes),
-                    self.metadata.high_water,
-                )?;
-                if !self.segments.contains_key(&key) {
-                    continue;
-                }
-                let pending = self.root.join("segment.pending");
-                let mut file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(&pending)?;
-                space::prepare(&file, self.unit, replacement.bytes)?;
-                file.write_all(&bytes)?;
-                file.sync_all()?;
-                replacement.charge = space::charge(self.unit, &file)?;
-                drop(file);
+                let pending = self.data_path(key, replacement.alternate);
+                replacement.charge = self.stage_file(&pending, &bytes)?;
                 #[cfg(test)]
                 tests::shared_budget::observe(&pending, &self.segment_path(key));
-                replace_metadata(&pending, &self.segment_path(key))?;
-                self.sync_directory()?;
-                let original = self.take_segment(key).unwrap();
-                self.disk_bytes = self.disk_bytes - original.charge + replacement.charge;
+                self.remove_segment(key)?;
                 self.insert_segment(key, replacement);
             }
         }
@@ -1544,6 +2081,9 @@ impl Journal {
         self.check()
     }
 }
+
+#[path = "journal_graphics.rs"]
+mod graphics;
 
 #[cfg(not(windows))]
 fn replace_metadata(from: &Path, to: &Path) -> io::Result<()> {
@@ -1585,6 +2125,11 @@ mod tests {
         include!("journal_import_tests.rs");
     }
 
+    mod graphics_import {
+        use super::*;
+        include!("journal_graphics_tests.rs");
+    }
+
     pub(super) mod shared_budget {
         use super::*;
         include!("journal_shared_budget_tests.rs");
@@ -1593,6 +2138,106 @@ mod tests {
     mod processes {
         use super::*;
         include!("journal_process_tests.rs");
+    }
+
+    mod revisions {
+        use super::*;
+        include!("journal_attribution_tests.rs");
+    }
+
+    thread_local! { static INTERRUPT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+    pub(super) fn interrupt(at: &'static str) -> io::Result<()> {
+        if INTERRUPT.get() == Some(at) {
+            INTERRUPT.set(None);
+            return Err(io::Error::other(at));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_record_reopens_all_fifty_rows_and_their_cursor() {
+        let dir = Directory::new();
+        let policy = RetentionPolicy {
+            max_bytes: 24 * 1024,
+            ..Default::default()
+        };
+        let mut j = dir.open_logical(policy.clone());
+        let old = j
+            .append_batch(
+                (0..50)
+                    .map(|n| input("a", n, false, &format!("row {n}")))
+                    .collect(),
+            )
+            .unwrap();
+        let error = j
+            .append("a", 51, true, event(&"x".repeat(32 * 1024)))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        j.close().unwrap();
+        let mut j = dir.open_logical(policy);
+        let page = read(&j, 0, None, 100, 32768).unwrap();
+        assert_eq!(page.records, old);
+        assert_eq!(page.next.position.0, 50);
+        assert_eq!(
+            j.append("a", 52, false, event("next"))
+                .unwrap()
+                .cursor
+                .position
+                .0,
+            51
+        );
+    }
+
+    #[test]
+    fn interrupted_batch_reopens_one_complete_generation() {
+        for at in ["create", "write", "sync", "publish", "cleanup"] {
+            let dir = Directory::new();
+            let policy = RetentionPolicy {
+                startup_boots: 1,
+                max_bytes: 24 * 1024,
+                ..Default::default()
+            };
+            let mut j = dir.open_logical(policy.clone());
+            let old = j
+                .append_batch(
+                    (0..50)
+                        .map(|n| input("a", n, true, &format!("row {n}")))
+                        .collect(),
+                )
+                .unwrap();
+            INTERRUPT.set(Some(at));
+            let error = j
+                .append_batch(vec![
+                    input("b", 51, true, "next boot"),
+                    input("b", 52, false, "runtime"),
+                ])
+                .unwrap_err();
+            assert_eq!(error.to_string(), at);
+            drop(j);
+            let mut j = dir.open_logical(policy);
+            let page = read(&j, 0, None, 100, 32768).unwrap();
+            if at == "cleanup" {
+                assert_eq!(page.range.high_water.0, 52);
+                assert_eq!(
+                    page.records
+                        .iter()
+                        .map(|r| (r.cursor.position.0, r.event.clone()))
+                        .collect::<Vec<_>>(),
+                    [(51, event("next boot")), (52, event("runtime"))]
+                );
+            } else {
+                assert_eq!(page.range.high_water.0, 50);
+                assert_eq!(page.records, old);
+            }
+            assert_eq!(
+                j.append("b", 53, false, event("resumed"))
+                    .unwrap()
+                    .cursor
+                    .position
+                    .0,
+                if at == "cleanup" { 53 } else { 51 }
+            );
+        }
     }
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -1819,7 +2464,7 @@ mod tests {
         let policy = RetentionPolicy {
             startup_boots: 3,
             runtime_ms: 5,
-            max_bytes: 1200,
+            max_bytes: 1650,
         };
         let mut journal = directory.open_logical(policy);
         journal
@@ -1845,7 +2490,7 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().metadata().unwrap().len())
             .sum();
-        assert!(total <= 1200, "actual journal bytes: {total}");
+        assert!(total <= 1650, "actual journal bytes: {total}");
         assert_eq!(
             summary(read(&journal, 0, None, 256, 8192).unwrap()),
             json!({
@@ -1946,7 +2591,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_write_failure_requires_recovery_and_preserves_the_synced_entry() {
+    fn metadata_write_failure_restores_the_committed_cursor() {
         let directory = Directory::new();
         let mut journal = directory.open(RetentionPolicy::default());
         fs::create_dir(directory.0.join("metadata.pending")).unwrap();
@@ -1975,7 +2620,7 @@ mod tests {
                     .unwrap()
             ),
             json!({
-                "oldest":1,"high":1,"positions":[1],"missing":[],"next":1
+                "oldest":1,"high":0,"positions":[],"missing":[],"next":0
             })
         );
         assert_eq!(
@@ -1985,7 +2630,7 @@ mod tests {
                 .cursor
                 .position
                 .0,
-            2
+            1
         );
     }
 
@@ -2076,7 +2721,7 @@ mod tests {
         j.close().unwrap();
         let policy = RetentionPolicy {
             startup_boots: 1,
-            max_bytes: 4 * space::unit(&dir.0).unwrap(),
+            max_bytes: 5 * space::unit(&dir.0).unwrap(),
             ..Default::default()
         };
         let j = dir.open(policy);
@@ -2108,11 +2753,11 @@ mod tests {
     }
 
     #[test]
-    fn retention_batch_repacks_after_selecting_runtime_tail_for_eviction() {
+    fn retention_full_staging_area_restores_runtime_tail() {
         let dir = Directory::new();
         let unit = space::unit(&dir.0).unwrap();
         let policy = RetentionPolicy {
-            max_bytes: unit * 5,
+            max_bytes: unit * 6,
             ..Default::default()
         };
         let text = "x".repeat(unit as usize / 2 - 250);
@@ -2120,12 +2765,12 @@ mod tests {
         j.append("a", 0, true, event("boot")).unwrap();
         j.append("a", 1, false, event(&text)).unwrap();
         j.append_batch((2..6).map(|t| input("a", t, false, &text)).collect())
-            .unwrap();
-        j.close().unwrap();
+            .unwrap_err();
+        drop(j);
         let j = dir.open(policy);
         assert_eq!(
             summary(read(&j, 0, None, 10, 65536).unwrap()),
-            json!({"oldest":1,"high":6,"positions":[1,3,4,5,6],"missing":[{"first":"2","last":"2","reason":"retention_expired"}],"next":6})
+            json!({"oldest":1,"high":2,"positions":[1,2],"missing":[],"next":2})
         );
     }
 
@@ -2163,7 +2808,7 @@ mod tests {
         let dir = Directory::new();
         let unit = space::unit(&dir.0).unwrap();
         let policy = RetentionPolicy {
-            max_bytes: 5 * unit,
+            max_bytes: 6 * unit,
             ..Default::default()
         };
         let mut j = dir.open(policy.clone());
@@ -2206,7 +2851,7 @@ mod tests {
             .sum();
         assert!(bytes >= 1024);
         let mut journal = directory.open_logical(RetentionPolicy {
-            max_bytes: bytes,
+            max_bytes: bytes + 256,
             ..policy
         });
         journal.prune(20).unwrap();
@@ -2267,14 +2912,14 @@ mod tests {
         let mut journal = directory.open(policy.clone());
         journal.append("a", 0, false, event("old")).unwrap();
         journal.append("a", 10, false, event("young")).unwrap();
-        fs::create_dir(directory.0.join("segment.pending")).unwrap();
+        fs::create_dir(directory.0.join("00000000000000000001.compact")).unwrap();
         assert!(journal.prune(11).is_err());
         assert_eq!(
             journal.range().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
         drop(journal);
-        fs::remove_dir(directory.0.join("segment.pending")).unwrap();
+        fs::remove_dir(directory.0.join("00000000000000000001.compact")).unwrap();
         let mut journal = directory.open(policy);
         assert_eq!(
             summary(read(&journal, 0, None, 256, 4096).unwrap()),
@@ -2628,7 +3273,7 @@ mod tests {
     fn batch_capacity_is_reserved_for_every_returned_record() {
         let directory = Directory::new();
         let policy = RetentionPolicy {
-            max_bytes: 1200,
+            max_bytes: 1600,
             ..RetentionPolicy::default()
         };
         let mut journal = directory.open_logical(policy.clone());
@@ -2657,7 +3302,7 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().metadata().unwrap().len())
             .sum();
-        assert!(total <= 1200, "journal bytes: {total}");
+        assert!(total <= 1600, "journal bytes: {total}");
         drop(journal);
         let journal = directory.open_logical(policy);
         assert_eq!(
@@ -2719,7 +3364,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_segment_creation_failure_recovers_the_written_prefix() {
+    fn batch_segment_creation_failure_restores_previous_generation() {
         let directory = Directory::new();
         let mut journal = directory.open(RetentionPolicy::default());
         let obstruction = directory.0.join("00000000000000000002.jsonl");
@@ -2747,7 +3392,7 @@ mod tests {
         let mut journal = directory.open(RetentionPolicy::default());
         assert_eq!(
             summary(read(&journal, 0, None, 256, 4096).unwrap()),
-            json!({"oldest":1,"high":1,"positions":[1],"missing":[],"next":1})
+            json!({"oldest":1,"high":0,"positions":[],"missing":[],"next":0})
         );
         assert_eq!(
             journal
@@ -2759,12 +3404,12 @@ mod tests {
                 .iter()
                 .map(|record| record.cursor.position.0)
                 .collect::<Vec<_>>(),
-            vec![2, 3]
+            vec![1, 2]
         );
     }
 
     #[test]
-    fn batch_metadata_failure_recovers_the_complete_written_batch() {
+    fn batch_metadata_failure_restores_previous_generation() {
         let directory = Directory::new();
         let mut journal = directory.open(RetentionPolicy::default());
         fs::create_dir(directory.0.join("metadata.pending")).unwrap();
@@ -2783,7 +3428,7 @@ mod tests {
         let mut journal = directory.open(RetentionPolicy::default());
         assert_eq!(
             summary(read(&journal, 0, None, 256, 4096).unwrap()),
-            json!({"oldest":1,"high":2,"positions":[1,2],"missing":[],"next":2})
+            json!({"oldest":1,"high":0,"positions":[],"missing":[],"next":0})
         );
         assert_eq!(
             journal
@@ -2792,7 +3437,7 @@ mod tests {
                 .cursor
                 .position
                 .0,
-            3
+            1
         );
     }
 
@@ -2904,7 +3549,6 @@ mod tests {
         }
         journal.close().unwrap();
         let original = fs::read(directory.0.join("metadata.json")).unwrap();
-        assert_eq!(original.len(), 1259);
         let failed = Journal::open(
             &directory.0,
             "ignored",
@@ -2944,55 +3588,26 @@ mod tests {
         .unwrap();
         let policy = RetentionPolicy {
             startup_boots: 1,
-            runtime_ms: 10,
-            // Both committed and contracted metadata coexist at replacement.
-            max_bytes: 1259 + 453,
+            max_bytes: 1712,
+            ..Default::default()
         };
-        let mut journal =
-            Journal::open_with_unit(&directory.0, "ignored", policy.clone(), 1).unwrap();
+        assert!(Journal::open_with_unit(&directory.0, "ignored", policy, 1).is_err());
+        let journal = directory.open(RetentionPolicy::default());
+        assert_eq!(
+            journal
+                .read(
+                    HistoryRead {
+                        after: None,
+                        through: None,
+                        limit: 10
+                    },
+                    8192
+                )
+                .unwrap()
+                .records
+                .len(),
+            3
+        );
         assert_eq!(journal.range().unwrap().journal_id, "j");
-        assert_eq!(
-            summary(
-                journal
-                    .read(
-                        HistoryRead {
-                            after: None,
-                            through: None,
-                            limit: 256
-                        },
-                        4096
-                    )
-                    .unwrap()
-            ),
-            json!({"oldest":4,"high":3,"positions":[],"missing":[{"first":"1","last":"3","reason":"retention_expired"}],"next":3})
-        );
-        let total: u64 = fs::read_dir(&directory.0)
-            .unwrap()
-            .map(|entry| entry.unwrap().metadata().unwrap().len())
-            .sum();
-        assert_eq!(total, 453);
-        let record = journal.append("d", 1, true, event("next")).unwrap();
-        assert_eq!(
-            (record.cursor.journal_id.as_str(), record.cursor.position.0),
-            ("j", 4)
-        );
-        journal.close().unwrap();
-        let journal = Journal::open_with_unit(&directory.0, "ignored", policy, 1).unwrap();
-        assert_eq!(journal.range().unwrap().journal_id, "j");
-        assert_eq!(
-            summary(
-                journal
-                    .read(
-                        HistoryRead {
-                            after: None,
-                            through: None,
-                            limit: 256
-                        },
-                        4096
-                    )
-                    .unwrap()
-            ),
-            json!({"oldest":4,"high":4,"positions":[4],"missing":[{"first":"1","last":"3","reason":"retention_expired"}],"next":4})
-        );
     }
 }

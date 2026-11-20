@@ -7,6 +7,20 @@ pub const CAPTURE_RESERVATION: u64 =
     (2 * (3 + LIVE_FILES_PER_SOURCE as u64) * TRACE_MEGABYTES as u64 + 2 * 4 + 1) * 1024 * 1024;
 pub const JOURNAL_BYTES: u64 = TOTAL_BYTES - CAPTURE_RESERVATION;
 
+pub fn capture_loss(
+    events: u32,
+    buffers: u32,
+    invalid: u64,
+    capacity: bool,
+    recovered: bool,
+) -> Option<(String, Option<u64>)> {
+    if events == 0 && buffers == 0 && invalid == 0 && !capacity && !recovered {
+        return None;
+    }
+    let count = (buffers == 0 && !capacity && !recovered).then_some(u64::from(events) + invalid);
+    Some((format!("capture_loss events={events} buffers={buffers} invalid={invalid} capacity={capacity} recovered_export={recovered}"), count))
+}
+
 pub fn validate(files: &[(String, u64)]) -> std::io::Result<()> {
     let mut counts = [0usize; 5];
     let mut bytes = 0u64;
@@ -63,6 +77,27 @@ pub fn validate(files: &[(String, u64)]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sealed_source_loss_counts_follow_trace_evidence() {
+        assert_eq!(capture_loss(0, 0, 0, false, false), None);
+        assert_eq!(
+            capture_loss(28, 0, 2, false, false),
+            Some((
+                "capture_loss events=28 buffers=0 invalid=2 capacity=false recovered_export=false"
+                    .into(),
+                Some(30)
+            ))
+        );
+        for (buffers, capacity, recovered) in
+            [(1, false, false), (0, true, false), (0, false, true)]
+        {
+            assert_eq!(
+                capture_loss(0, buffers, 0, capacity, recovered).unwrap().1,
+                None
+            );
+        }
+    }
+
     #[test]
     fn physical_capture_slots_fit_beside_journal_replacements() {
         let mut files = Vec::new();

@@ -44,6 +44,10 @@ fn discovery() -> RpcResult<Discovery> {
         .map_err(|_| RpcError::new(-32603, "Guest discovery document is unavailable"))
 }
 
+fn endpoint_info() -> EndpointInfo {
+    EndpointInfo::new(EndpointRole::Guest, env!("CARGO_PKG_VERSION")).with_history_attribution()
+}
+
 fn result(envelope: &Envelope) -> RpcResult<Value> {
     let bytes = wire::encode(envelope).map_err(|error| RpcError::new(-32603, error.to_string()))?;
     match serde_json::from_slice::<RpcResponse>(&bytes)
@@ -135,8 +139,17 @@ impl Connection {
     pub fn receive_with(
         &mut self,
         bytes: &[u8],
-        mut control: impl FnMut(Message) -> Option<Envelope>,
+        control: impl FnMut(Message) -> Option<Envelope>,
         mut history: impl FnMut(Incoming, bool) -> RpcResult<Value>,
+    ) -> Received {
+        self.receive_negotiated(bytes, control, |request, local, _| history(request, local))
+    }
+
+    pub fn receive_negotiated(
+        &mut self,
+        bytes: &[u8],
+        mut control: impl FnMut(Message) -> Option<Envelope>,
+        mut history: impl FnMut(Incoming, bool, HistoryEncoding) -> RpcResult<Value>,
     ) -> Received {
         let mut received = Received::default();
         for frame in self.framer.push(bytes) {
@@ -177,10 +190,7 @@ impl Connection {
                 };
                 let correlation = request.correlation;
                 let value = match request.incoming {
-                    Incoming::EndpointInfo { .. } => Ok(json!(EndpointInfo::new(
-                        EndpointRole::Guest,
-                        env!("CARGO_PKG_VERSION"),
-                    ))),
+                    Incoming::EndpointInfo { .. } => Ok(json!(endpoint_info())),
                     Incoming::Discover { .. } => discovery().and_then(|doc| {
                         serde_json::to_value(doc).map_err(|e| RpcError::new(-32603, e.to_string()))
                     }),
@@ -211,7 +221,7 @@ impl Connection {
                                 | Incoming::HistoryAck { .. }
                                 | Incoming::ForwardingSet { .. }
                         ) {
-                            history(incoming, self.local_admin.is_some())
+                            history(incoming, self.local_admin.is_some(), HistoryEncoding::negotiate(&endpoint_info(), &self.peer))
                         } else if self.reports.len() >= CAPACITY {
                             Err(RpcError::new(
                                 -32000,
@@ -598,7 +608,8 @@ mod tests {
         assert_eq!(
             output,
             vec![json!({"jsonrpc":"2.0","id":17,"result":{
-                "role":"guest","software_version":env!("CARGO_PKG_VERSION"),"protocol_version":"1.0.0"
+                "role":"guest","software_version":env!("CARGO_PKG_VERSION"),"protocol_version":"1.0.0",
+                "capabilities":["history.attribution"]
             }})]
         );
         let output = receive(

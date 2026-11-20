@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use venera_debug_protocol::ProcessIdentity;
 
-const PROCESS_BUDGET: usize = 65536;
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
-struct Instance {
+pub(crate) struct Instance {
     identity: ProcessIdentity,
     parent: Option<ProcessIdentity>,
     session: Option<u32>,
@@ -39,6 +38,10 @@ enum StoredProcesses {
         instances: Vec<Instance>,
         interruptions: Vec<Interruption>,
         retired_before: u64,
+        #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+        pending_context: BTreeSet<(u32, u64, u64)>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        source_through: BTreeMap<String, u64>,
     },
     Legacy(Vec<Instance>),
 }
@@ -47,17 +50,21 @@ enum StoredProcesses {
 pub struct Processes {
     instances: BTreeMap<(u32, u64, Option<u64>), Instance>,
     interruptions: Vec<Interruption>,
+    // Persisted lower bound for history whose evidence was discarded.
     retired_before: u64,
+    pending_context: BTreeSet<(u32, u64, u64)>,
+    source_through: BTreeMap<String, u64>,
+    has_parent_links: bool,
 }
 
 impl From<Processes> for StoredProcesses {
     fn from(value: Processes) -> Self {
-        let mut entries: Vec<_> = value.instances.into_iter().collect();
-        entries.sort_by_key(|(key, _)| *key);
         Self::Current {
-            instances: entries.into_iter().map(|(_, entry)| entry).collect(),
+            instances: value.instances.into_values().collect(),
             interruptions: value.interruptions,
             retired_before: value.retired_before,
+            pending_context: value.pending_context,
+            source_through: value.source_through,
         }
     }
 }
@@ -65,45 +72,300 @@ impl From<Processes> for StoredProcesses {
 impl TryFrom<StoredProcesses> for Processes {
     type Error = &'static str;
     fn try_from(value: StoredProcesses) -> Result<Self, Self::Error> {
-        let (entries, interruptions, retired_before) = match value {
+        let (entries, interruptions, retired_before, pending_context, source_through) = match value
+        {
             StoredProcesses::Current {
                 instances,
                 interruptions,
                 retired_before,
-            } => (instances, interruptions, retired_before),
-            StoredProcesses::Legacy(entries) => (entries, Vec::new(), 0),
+                pending_context,
+                source_through,
+            } => (
+                instances,
+                interruptions,
+                retired_before,
+                pending_context,
+                source_through,
+            ),
+            StoredProcesses::Legacy(entries) => {
+                (entries, Vec::new(), 0, BTreeSet::new(), BTreeMap::new())
+            }
         };
-        if interruptions.len() > 16 || interruptions.iter().any(|gap| gap.through < gap.from) {
+        if interruptions.iter().any(|gap| gap.through < gap.from) {
             return Err("invalid process interruption intervals");
-        }
-        if entries.len() > PROCESS_BUDGET {
-            return Err("process checkpoint exceeds capacity");
         }
         let mut result = Self {
             interruptions,
             retired_before,
+            pending_context,
+            source_through,
             ..Self::default()
         };
         for entry in entries {
-            let start = entry
-                .identity
-                .start_time_filetime
-                .as_ref()
-                .and_then(|value| value.parse::<u64>().ok())
-                .ok_or("process checkpoint has invalid creation time")?;
-            let pid = entry.identity.pid;
-            let key = entry
-                .identity
-                .start_key
-                .as_ref()
-                .map(|value| value.parse::<u64>())
-                .transpose()
-                .map_err(|_| "invalid process start key")?;
-            if result.instances.insert((pid, start, key), entry).is_some() {
-                return Err("duplicate process checkpoint identity");
-            }
+            result.restore_instance(entry)?;
         }
         Ok(result)
+    }
+}
+
+impl Processes {
+    fn restore_instance(&mut self, entry: Instance) -> Result<(), &'static str> {
+        let start = entry
+            .identity
+            .start_time_filetime
+            .as_ref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or("process checkpoint has invalid creation time")?;
+        let pid = entry.identity.pid;
+        let key = entry
+            .identity
+            .start_key
+            .as_ref()
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|_| "invalid process start key")?;
+        self.has_parent_links |= entry.parent.is_some() || entry.parent_hint.is_some();
+        if self.instances.insert((pid, start, key), entry).is_some() {
+            return Err("duplicate process checkpoint identity");
+        }
+        Ok(())
+    }
+}
+
+// Stable PID buckets let checkpoint publication replace only changed files. An
+// oversized bucket is split at row boundaries by the journal.
+const PIDS_PER_BUCKET: u32 = 256;
+
+pub(crate) fn process_bucket(pid: u32) -> u32 {
+    pid / PIDS_PER_BUCKET
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CheckpointRow<T = Instance> {
+    Progress(u64, u64), // captured through, retired before
+    Source(String, u64),
+    Gap(u64, u64), // absolute lower bound, duration
+    Instance(T),
+    Context(u32, u64, u64), // PID, observed time, key
+}
+
+type Bucket<'a> = (Vec<&'a Instance>, Vec<(u32, u64, u64)>);
+
+impl Checkpoint {
+    pub(crate) fn merge_bucket(&mut self, other: &Self, bucket: u32) {
+        self.processes
+            .instances
+            .extend(other.processes.instances.clone());
+        self.processes
+            .pending_context
+            .extend(other.processes.pending_context.iter().copied());
+        self.processes.has_parent_links |= other.processes.has_parent_links;
+        if bucket == 0 {
+            self.through_filetime = other.through_filetime;
+            self.processes.retired_before = other.processes.retired_before;
+            self.processes
+                .interruptions
+                .clone_from(&other.processes.interruptions);
+            self.processes
+                .source_through
+                .clone_from(&other.processes.source_through);
+        }
+    }
+
+    pub(crate) fn bucket(&self, bucket: u32) -> Self {
+        let start = bucket * PIDS_PER_BUCKET;
+        let end = start.saturating_add(PIDS_PER_BUCKET - 1);
+        let mut checkpoint = Self::default();
+        checkpoint.processes.instances.extend(
+            self.processes
+                .instances
+                .range((start, 0, None)..=(end, u64::MAX, Some(u64::MAX)))
+                .map(|(key, value)| (*key, value.clone())),
+        );
+        checkpoint.processes.pending_context.extend(
+            self.processes
+                .pending_context
+                .range((start, 0, 0)..=(end, u64::MAX, u64::MAX))
+                .copied(),
+        );
+        checkpoint.processes.has_parent_links = checkpoint
+            .processes
+            .instances
+            .values()
+            .any(|entry| entry.parent.is_some() || entry.parent_hint.is_some());
+        if bucket == 0 {
+            checkpoint.through_filetime = self.through_filetime;
+            checkpoint.processes.retired_before = self.processes.retired_before;
+            checkpoint
+                .processes
+                .interruptions
+                .clone_from(&self.processes.interruptions);
+            checkpoint
+                .processes
+                .source_through
+                .clone_from(&self.processes.source_through);
+        }
+        checkpoint
+    }
+
+    pub(crate) fn parent_buckets(&self, bucket: u32) -> BTreeSet<u32> {
+        self.processes
+            .instances
+            .values()
+            .flat_map(|entry| {
+                [
+                    entry.parent.as_ref().map(|parent| parent.pid),
+                    entry.parent_hint.map(|hint| hint.0),
+                ]
+            })
+            .flatten()
+            .map(process_bucket)
+            .filter(|&parent| parent != bucket)
+            .collect()
+    }
+
+    pub(crate) fn has_process_links(&self) -> bool {
+        self.processes.has_parent_links
+    }
+
+    pub(crate) fn has_keyed_parent_hints(&self) -> bool {
+        self.processes
+            .instances
+            .values()
+            .any(|entry| entry.parent_hint.is_some_and(|(_, key)| key.is_some()))
+    }
+
+    pub(crate) fn changed_buckets<'a>(
+        &'a self,
+        previous: Option<&'a Self>,
+    ) -> impl Iterator<Item = (u32, Vec<CheckpointRow<&'a Instance>>)> + 'a {
+        let mut buckets = self.processes.buckets();
+        let mut old = previous.map(|v| v.processes.buckets()).unwrap_or_default();
+        let mut changed = BTreeSet::from([0]);
+        changed.extend(buckets.keys().copied());
+        changed.extend(old.keys().copied());
+        let header_changed = previous.is_none_or(|v| {
+            v.through_filetime != self.through_filetime
+                || v.processes.retired_before != self.processes.retired_before
+                || v.processes.interruptions != self.processes.interruptions
+                || v.processes.source_through != self.processes.source_through
+        });
+        changed.into_iter().filter_map(move |bucket| {
+            let next = buckets.remove(&bucket).unwrap_or_default();
+            if next == old.remove(&bucket).unwrap_or_default() && (bucket != 0 || !header_changed) {
+                return None;
+            }
+            let mut rows = Vec::new();
+            if bucket == 0 {
+                rows.push(CheckpointRow::Progress(
+                    self.through_filetime,
+                    self.processes.retired_before,
+                ));
+                rows.extend(
+                    self.processes
+                        .source_through
+                        .iter()
+                        .map(|(id, at)| CheckpointRow::Source(id.clone(), *at)),
+                );
+                rows.extend(
+                    self.processes
+                        .interruptions
+                        .iter()
+                        .map(|gap| CheckpointRow::Gap(gap.from, gap.through - gap.from)),
+                );
+            }
+            rows.extend(next.0.into_iter().map(CheckpointRow::Instance));
+            rows.extend(
+                next.1
+                    .into_iter()
+                    .map(|(pid, time, key)| CheckpointRow::Context(pid, time, key)),
+            );
+            Some((bucket, rows))
+        })
+    }
+
+    pub(crate) fn restore_row(
+        &mut self,
+        boot: u64,
+        bucket: u32,
+        row: CheckpointRow,
+    ) -> Result<(), &'static str> {
+        match row {
+            CheckpointRow::Progress(through, retired) if bucket == 0 => {
+                self.through_filetime = through;
+                self.processes.retired_before = retired;
+            }
+            CheckpointRow::Gap(from, duration) if bucket == 0 => {
+                let through = from
+                    .checked_add(duration)
+                    .ok_or("invalid interruption length")?;
+                self.processes
+                    .interruptions
+                    .push(Interruption { from, through });
+            }
+            CheckpointRow::Source(id, through)
+                if bucket == 0
+                    && !id.is_empty()
+                    && id.len() <= 1024
+                    && through <= self.through_filetime =>
+            {
+                if self.processes.source_through.insert(id, through).is_some() {
+                    return Err("duplicate process source progress");
+                }
+            }
+            CheckpointRow::Instance(entry)
+                if entry.identity.pid / PIDS_PER_BUCKET == bucket
+                    && entry
+                        .identity
+                        .boot_time_filetime
+                        .as_ref()
+                        .is_none_or(|v| v.parse() == Ok(boot)) =>
+            {
+                self.processes.restore_instance(entry)?;
+            }
+            CheckpointRow::Context(pid, time, key) if pid / PIDS_PER_BUCKET == bucket => {
+                self.processes.pending_context.insert((pid, time, key));
+            }
+            _ => return Err("process checkpoint row differs from its segment"),
+        }
+        Ok(())
+    }
+}
+
+impl Processes {
+    pub(crate) fn advance_source(&mut self, id: &str, through: u64) {
+        if through != 0 && self.source_through.get(id).is_none_or(|&at| at < through) {
+            self.source_through.insert(id.to_owned(), through);
+        }
+    }
+
+    pub(crate) fn forget_source(&mut self, id: &str) {
+        self.source_through.remove(id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_through(&self, id: &str) -> Option<u64> {
+        self.source_through.get(id).copied()
+    }
+
+    fn buckets(&self) -> BTreeMap<u32, Bucket<'_>> {
+        let mut buckets: BTreeMap<u32, Bucket<'_>> = BTreeMap::new();
+        for (&(pid, _, _), entry) in &self.instances {
+            buckets
+                .entry(pid / PIDS_PER_BUCKET)
+                .or_default()
+                .0
+                .push(entry);
+        }
+        for &(pid, time, key) in &self.pending_context {
+            buckets
+                .entry(pid / PIDS_PER_BUCKET)
+                .or_default()
+                .1
+                .push((pid, time, key));
+        }
+        buckets
     }
 }
 
@@ -139,6 +401,13 @@ pub struct Checkpoint {
     pub through_filetime: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum Attribution {
+    Ready,
+    Pending,
+    Missing(u32),
+}
+
 impl Checkpoint {
     pub fn attribute_record(
         &self,
@@ -146,22 +415,24 @@ impl Checkpoint {
         boot: u64,
         time: u64,
         wait: bool,
-    ) -> bool {
+    ) -> Attribution {
         record.ancestors.clear();
         if record.component == "kernel" || record.source == "wpp_recorder" {
             record.process = None;
-            return true;
+            return Attribution::Ready;
         }
         if let Some(observed) = &record.process {
             if wait && time > self.through_filetime {
-                return false;
+                return Attribution::Pending;
             }
             if let Some((identity, ancestors)) = self.processes.attribute(observed, boot, time) {
                 record.process = Some(identity);
                 record.ancestors = ancestors;
+            } else {
+                return Attribution::Missing(observed.pid);
             }
         }
-        true
+        Attribution::Ready
     }
 }
 
@@ -182,10 +453,6 @@ impl Processes {
             } else {
                 merged.push(gap);
             }
-        }
-        while merged.len() > 16 {
-            let oldest = merged.remove(0);
-            self.retired_before = self.retired_before.max(oldest.through);
         }
         self.interruptions = merged;
         self.resolve_parents();
@@ -208,9 +475,68 @@ impl Processes {
                 .any(|gap| start < gap.through && at >= gap.from)
     }
 
-    pub fn has_history(&self) -> bool {
-        !self.instances.is_empty() || !self.interruptions.is_empty()
+    pub(crate) fn attributed_instance(
+        &self,
+        intervals: &Self,
+        observed: &ProcessIdentity,
+        boot: u64,
+        at: u64,
+    ) -> Option<(ProcessIdentity, ProcessIdentity)> {
+        if observed
+            .boot_time_filetime
+            .as_deref()
+            .is_some_and(|value| value != boot.to_string())
+        {
+            return None;
+        }
+        let key = observed
+            .start_key
+            .as_ref()
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .ok()?;
+        let (_, entry) = self.observed_entry_with(intervals, observed.pid, at, key)?;
+        let mut identity = entry.identity.clone();
+        if identity.boot_time_filetime.as_deref() != Some(&boot.to_string())
+            || observed
+                .start_time_filetime
+                .as_ref()
+                .is_some_and(|start| Some(start) != identity.start_time_filetime.as_ref())
+        {
+            return None;
+        }
+        if let Some(key) = &observed.start_key {
+            if identity
+                .start_key
+                .as_ref()
+                .is_some_and(|known| known != key)
+            {
+                return None;
+            }
+            identity.start_key = Some(key.clone());
+        }
+        Some((identity, entry.identity.clone()))
     }
+
+    pub(crate) fn parent_step(
+        &self,
+        intervals: &Self,
+        identity: &ProcessIdentity,
+    ) -> Option<(ProcessIdentity, bool)> {
+        let key = self.exact_key(identity)?;
+        let entry = self.instances.get(&key)?;
+        let parent = entry.parent.as_ref()?;
+        let birth = parent.start_time_filetime.as_ref()?.parse::<u64>().ok()?;
+        if birth > key.1
+            || parent.pid == key.0
+            || (entry.parent_hint.and_then(|(_, key)| key).is_none()
+                && !intervals.valid_interval(birth, key.1))
+        {
+            return None;
+        }
+        Some((parent.clone(), entry.parent_frozen))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.instances.is_empty()
     }
@@ -278,12 +604,8 @@ impl Processes {
                 applied
             }
             Lifecycle::Context { pid, key, time } => {
-                if let Some((index, _)) = self.observed_entry(pid, time, Some(key)) {
-                    let index = *index;
-                    let mut entry = self.instances.remove(&index).unwrap();
-                    self.enrich_parent_references(&entry.identity, key);
-                    entry.identity.start_key = Some(key.to_string());
-                    self.instances.insert((pid, index.1, Some(key)), entry);
+                if !self.apply_context(pid, key, time) {
+                    self.pending_context.insert((pid, time, key));
                 }
                 true
             }
@@ -296,6 +618,20 @@ impl Processes {
                 true
             }
         }
+    }
+
+    fn apply_context(&mut self, pid: u32, key: u64, time: u64) -> bool {
+        let Some((index, _)) = self.observed_entry(pid, time, Some(key)) else {
+            return false;
+        };
+        let index = *index;
+        if index.2.is_none() {
+            let mut entry = self.instances.remove(&index).unwrap();
+            self.enrich_parent_references(&entry.identity, key);
+            entry.identity.start_key = Some(key.to_string());
+            self.instances.insert((pid, index.1, Some(key)), entry);
+        }
+        true
     }
 
     pub fn evict_oldest(&mut self) -> bool {
@@ -375,9 +711,6 @@ impl Processes {
             entry.identity.start_key.clone_from(&identity.start_key);
             self.instances.insert(key, entry);
         }
-        if self.instances.len() >= PROCESS_BUDGET && !self.instances.contains_key(&key) {
-            return false;
-        }
         let pid = identity.pid;
         let previous = self
             .instances
@@ -401,13 +734,10 @@ impl Processes {
             .next()
             .map(|(key, _)| key.1);
         if let Some(key) = parent_key {
-            self.apply(Lifecycle::Context {
-                pid: parent,
-                key,
-                time: start,
-            });
+            self.apply_context(parent, key, start);
         }
         let parent_hint = (parent != 0 && parent != pid).then_some((parent, parent_key));
+        self.has_parent_links |= parent_hint.is_some();
         let parent = self
             .observed_entry(parent, start, parent_key)
             .map(|(_, entry)| entry.identity.clone())
@@ -453,6 +783,16 @@ impl Processes {
                 parent_hint,
                 parent_frozen: false,
             });
+        let pending: Vec<_> = self
+            .pending_context
+            .range((pid, start, 0)..=(pid, u64::MAX, u64::MAX))
+            .copied()
+            .collect();
+        for (pid, time, key) in pending {
+            if self.apply_context(pid, key, time) {
+                self.pending_context.remove(&(pid, time, key));
+            }
+        }
         self.resolve_parents();
         true
     }
@@ -482,31 +822,30 @@ impl Processes {
                 .insert((pid, start, key.or(index.2)), instance);
             return true;
         }
-        if self.instances.len() < PROCESS_BUDGET {
-            self.instances.insert(
-                (pid, start, key),
-                Instance {
-                    identity: ProcessIdentity {
-                        pid,
-                        start_time_filetime: Some(start.to_string()),
-                        start_key: key.map(|key| key.to_string()),
-                        ..Default::default()
-                    },
-                    parent: None,
-                    parent_hint: None,
-                    session: None,
-                    ended: Some(ended),
-                    started: false,
-                    parent_frozen: false,
+        self.instances.insert(
+            (pid, start, key),
+            Instance {
+                identity: ProcessIdentity {
+                    pid,
+                    start_time_filetime: Some(start.to_string()),
+                    start_key: key.map(|key| key.to_string()),
+                    ..Default::default()
                 },
-            );
-            true
-        } else {
-            false
-        }
+                parent: None,
+                parent_hint: None,
+                session: None,
+                ended: Some(ended),
+                started: false,
+                parent_frozen: false,
+            },
+        );
+        true
     }
 
     fn enrich_parent_references(&mut self, identity: &ProcessIdentity, key: u64) {
+        if !self.has_parent_links {
+            return;
+        }
         for entry in self.instances.values_mut() {
             if entry.parent_frozen {
                 continue;
@@ -524,6 +863,9 @@ impl Processes {
     }
 
     fn resolve_parents(&mut self) {
+        if !self.has_parent_links {
+            return;
+        }
         let invalid: Vec<_> = self
             .instances
             .iter()
@@ -553,7 +895,7 @@ impl Processes {
             })
             .collect();
         for (pid, key, time) in hints {
-            self.apply(Lifecycle::Context { pid, key, time });
+            self.apply_context(pid, key, time);
         }
         let resolved: Vec<_> = self
             .instances
@@ -619,13 +961,23 @@ impl Processes {
         at: u64,
         key: Option<u64>,
     ) -> Option<(&(u32, u64, Option<u64>), &Instance)> {
+        self.observed_entry_with(self, pid, at, key)
+    }
+
+    fn observed_entry_with(
+        &self,
+        intervals: &Self,
+        pid: u32,
+        at: u64,
+        key: Option<u64>,
+    ) -> Option<(&(u32, u64, Option<u64>), &Instance)> {
         let range = || {
             self.instances
                 .range((pid, 0, None)..=(pid, at, Some(u64::MAX)))
         };
         let valid = |index: &(u32, u64, Option<u64>), entry: &Instance| {
             entry.started
-                && self.valid_interval(index.1, at)
+                && intervals.valid_interval(index.1, at)
                 && entry.ended.is_none_or(|end| at < end)
         };
         if let Some(key) = key {
@@ -659,25 +1011,15 @@ impl Processes {
         identity: &ProcessIdentity,
         filter_started: u64,
     ) -> Vec<ProcessIdentity> {
-        let Some(start) = identity
-            .start_time_filetime
-            .as_ref()
-            .and_then(|s| s.parse::<u64>().ok())
-        else {
+        let Some(mut current) = self.exact_key(identity) else {
             return Vec::new();
         };
-        if start < filter_started {
+        if current.1 < filter_started {
             return Vec::new();
         }
         let mut result = Vec::new();
-        let mut current = identity.clone();
-        for _ in 0..128 {
-            let Some(entry) = self
-                .exact_key(&current)
-                .and_then(|key| self.instances.get(&key))
-            else {
-                break;
-            };
+        let mut visited = BTreeSet::from([current]);
+        while let Some(entry) = self.instances.get(&current) {
             let Some(parent) = &entry.parent else {
                 break;
             };
@@ -685,37 +1027,25 @@ impl Processes {
                 .start_time_filetime
                 .as_ref()
                 .and_then(|s| s.parse::<u64>().ok())
-                .filter(|birth| {
-                    parent.pid != current.pid
-                        && *birth
-                            <= current
-                                .start_time_filetime
-                                .as_ref()
-                                .unwrap()
-                                .parse::<u64>()
-                                .unwrap()
-                })
+                .filter(|birth| parent.pid != current.0 && *birth <= current.1)
             else {
                 break;
             };
             if entry.parent_hint.and_then(|(_, key)| key).is_none()
-                && !self.valid_interval(
-                    birth,
-                    current
-                        .start_time_filetime
-                        .as_ref()
-                        .unwrap()
-                        .parse()
-                        .unwrap(),
-                )
+                && !self.valid_interval(birth, current.1)
             {
                 break;
             }
-            current = parent.clone();
-            result.push(current.clone());
+            let next = self.exact_key(parent);
+            if next.is_some_and(|key| !visited.insert(key)) {
+                break;
+            }
+            result.push(parent.clone());
             if entry.parent_frozen {
                 break;
             }
+            let Some(next) = next else { break };
+            current = next;
         }
         result
     }
@@ -724,6 +1054,8 @@ impl Processes {
     }
 
     pub fn retire_history(&mut self, startup_before: u64, boundary: u64) {
+        self.pending_context
+            .retain(|&(_, time, _)| time < startup_before || time >= boundary);
         let retained = |entry: &Instance| {
             entry.ended.is_none_or(|end| end >= boundary)
                 || entry

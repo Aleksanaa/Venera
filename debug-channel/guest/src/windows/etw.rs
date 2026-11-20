@@ -298,7 +298,7 @@ pub(super) unsafe fn decode_record_from(
             observed_filetime,
             source_time: Some(clock::iso_filetime(decoded.source_time)),
             source: "etw".into(),
-            text: dbwin::decode_ansi(decoded.message),
+            text: dbwin::decode_ansi(&decoded.message),
             raw_level: Some(decoded.level_name().into()),
             component: Some(decoded.component.into()),
             structured: Some(structured),
@@ -739,12 +739,15 @@ mod tests {
             .unwrap();
             let class = crate::collector::classify_capture(&capture).unwrap();
             let mut record = state.capture_record(capture, Some(class)).unwrap();
-            assert!(journal.process_checkpoint(boot).unwrap().attribute_record(
-                &mut record,
-                boot,
-                time,
-                true
-            ));
+            assert_eq!(
+                journal.process_checkpoint(boot).unwrap().attribute_record(
+                    &mut record,
+                    boot,
+                    time,
+                    true
+                ),
+                crate::ancestry::Attribution::Ready
+            );
             entries.push(ImportEntry {
                 ordinal: entries.len() as u64 + 1,
                 source_filetime: time,

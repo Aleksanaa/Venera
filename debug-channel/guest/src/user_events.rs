@@ -8,7 +8,9 @@ pub struct UserEvent<'a> {
     pub created: u64,
     pub sequence: u64,
     pub component: &'static str,
-    pub message: &'a [u8],
+    pub message: std::borrow::Cow<'a, [u8]>,
+    pub instance: u64,
+    pub engine: Option<(String, String)>,
 }
 
 pub fn decode(bytes: &[u8], event_id: u16, version: u8, level: u8) -> io::Result<UserEvent<'_>> {
@@ -49,12 +51,17 @@ pub fn decode(bytes: &[u8], event_id: u16, version: u8, level: u8) -> io::Result
         created,
         sequence,
         component,
-        message: &message[..message.len() - 1],
+        message: (&message[..message.len() - 1]).into(),
+        instance: created,
+        engine: None,
     })
 }
 
 impl UserEvent<'_> {
-    pub fn level_name(&self) -> &'static str {
+    pub fn level_name(&self) -> &str {
+        if let Some((level, _)) = &self.engine {
+            return level;
+        }
         match self.level {
             2 => "error",
             3 => "warning",
@@ -65,12 +72,12 @@ impl UserEvent<'_> {
     }
 
     pub fn structured(&self, boot: u64, pid: u32) -> StructuredEvent {
-        StructuredEvent {
+        let mut event = StructuredEvent {
             provider: crate::kernel_events::PROVIDER.into(),
             event_id: self.event_id,
             version: 1,
             boot_time_filetime: DecimalU64(boot),
-            producer_instance: DecimalU64(self.created),
+            producer_instance: DecimalU64(self.instance),
             producer_sequence: DecimalU64(self.sequence),
             source_time_filetime: DecimalU64(self.source_time),
             fields: BTreeMap::from([
@@ -85,7 +92,16 @@ impl UserEvent<'_> {
                     EventValue::Uint64(DecimalU64(self.created)),
                 ),
             ]),
+        };
+        if let Some((level, channel)) = &self.engine {
+            event
+                .fields
+                .insert("raw_level".into(), EventValue::AnsiString(level.clone()));
+            event
+                .fields
+                .insert("channel".into(), EventValue::AnsiString(channel.clone()));
         }
+        event
     }
 }
 
@@ -103,7 +119,7 @@ mod tests {
         for (level, name) in [(2, "error"), (3, "warning"), (4, "info"), (5, "debug")] {
             let event = decode(bytes, 5, 1, level).unwrap();
             assert_eq!(event.level_name(), name);
-            assert_eq!(event.message, b"same message");
+            assert_eq!(event.message.as_ref(), b"same message");
             assert_eq!(
                 (event.source_time, event.created, event.sequence),
                 (3, 1, 2)

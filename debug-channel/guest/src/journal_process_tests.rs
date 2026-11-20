@@ -5,6 +5,84 @@ const BOOT: u64 = 134_393_633_875_000_000;
 const NOW: u64 = 1_794_889_800_000;
 
 #[test]
+fn fourth_boot_preserves_runtime_process_evidence_for_late_sources() {
+    let dir = Directory::new();
+    let policy = RetentionPolicy::default();
+    let mut journal = dir.open(policy.clone());
+    let first = source();
+    journal.discover_imports(vec![first.clone()]).unwrap();
+    journal
+        .checkpoint_processes(&first, vec![start(10, 100, Some(11), 0)], BOOT + 200, NOW)
+        .unwrap();
+    journal
+        .append(
+            &BOOT.to_string(),
+            NOW,
+            false,
+            HistoryEvent::Log {
+                record: record(10, None),
+            },
+        )
+        .unwrap();
+    journal.complete_import(&first, None, BOOT, NOW).unwrap();
+    journal.forget_import(&first).unwrap();
+    for delta in 1..=3 {
+        journal
+            .discover_imports(vec![ImportSource {
+                id: format!("boot-{delta}"),
+                boot_filetime: BOOT + delta * 10_000,
+            }])
+            .unwrap();
+    }
+    drop(journal);
+    let mut journal = dir.open(policy.clone());
+    let late = ImportSource {
+        id: "late".into(),
+        ..first
+    };
+    journal.discover_imports(vec![late.clone()]).unwrap();
+    journal
+        .checkpoint_processes(&late, vec![start(10, 300, Some(22), 0)], BOOT + 500, NOW)
+        .unwrap();
+    drop(journal);
+    let journal = dir.open(policy);
+    for (time, expected) in [
+        (150, identity(10, 100, Some(11))),
+        (350, identity(10, 300, Some(22))),
+    ] {
+        let mut row = record(10, None);
+        assert_eq!(
+            journal
+                .attribute_process_record(&mut row, BOOT, BOOT + time, true)
+                .unwrap(),
+            crate::ancestry::Attribution::Ready
+        );
+        assert_eq!(row.process, Some(expected));
+    }
+    let mut journal = journal;
+    journal.complete_import(&late, None, BOOT, NOW).unwrap();
+    journal.forget_import(&late).unwrap();
+    let mut row = record(10, None);
+    assert_eq!(
+        journal
+            .attribute_process_record(&mut row, BOOT, BOOT + 150, true)
+            .unwrap(),
+        crate::ancestry::Attribution::Ready
+    );
+    journal
+        .prune(NOW + RetentionPolicy::default().runtime_ms + 1)
+        .unwrap();
+    drop(journal);
+    let journal = dir.open(RetentionPolicy::default());
+    assert_eq!(
+        journal
+            .attribute_process_record(&mut row, BOOT, BOOT + 150, true)
+            .unwrap(),
+        crate::ancestry::Attribution::Pending
+    );
+}
+
+#[test]
 fn late_gap_filters_inferred_parent_before_and_after_retirement() {
     for retire in [false, true] {
         for gap_before_retirement in [false, true] {
@@ -41,7 +119,10 @@ fn late_gap_filters_inferred_parent_before_and_after_retirement() {
             let journal = dir.open(RetentionPolicy::default());
             let checkpoint = journal.process_checkpoint(BOOT).unwrap();
             let mut child = record(20, Some(22));
-            assert!(checkpoint.attribute_record(&mut child, BOOT, BOOT + 40, true));
+            assert_eq!(
+                checkpoint.attribute_record(&mut child, BOOT, BOOT + 40, true),
+                crate::ancestry::Attribution::Ready
+            );
             assert_eq!(child.process, Some(identity(20, 30, Some(22))));
             assert_eq!(
                 child.ancestors,
@@ -636,7 +717,10 @@ fn offline_parent_child_and_pid_reuse_survive_checkpoint_and_import_restarts() {
     let mut journal = dir.open(RetentionPolicy::default());
     let checkpoint = journal.process_checkpoint(BOOT).unwrap();
     let mut child = record(20, Some(22));
-    assert!(checkpoint.attribute_record(&mut child, BOOT, BOOT + 350, true));
+    assert_eq!(
+        checkpoint.attribute_record(&mut child, BOOT, BOOT + 350, true),
+        crate::ancestry::Attribution::Ready
+    );
     assert_eq!(child.process, Some(identity(20, 200, Some(22))));
     assert_eq!(child.ancestors, [identity(10, 100, Some(11))]);
     let filter = venera_debug_protocol::Filter {
@@ -794,15 +878,24 @@ fn source_creation_time_supports_older_events_and_kernel_context_stays_unattribu
         .unwrap();
     let checkpoint = journal.process_checkpoint(BOOT).unwrap();
     let mut old = record(20, None);
-    assert!(checkpoint.attribute_record(&mut old, BOOT, BOOT + 300, true));
+    assert_eq!(
+        checkpoint.attribute_record(&mut old, BOOT, BOOT + 300, true),
+        crate::ancestry::Attribution::Ready
+    );
     assert_eq!(old.process, Some(identity(20, 200, None)));
     let mut pending = record(20, None);
-    assert!(!checkpoint.attribute_record(&mut pending, BOOT, BOOT + 700, true));
+    assert_eq!(
+        checkpoint.attribute_record(&mut pending, BOOT, BOOT + 700, true),
+        crate::ancestry::Attribution::Pending
+    );
     for transport in ["etw", "wpp_recorder"] {
         let mut kernel = record(20, None);
         kernel.component = "kernel".into();
         kernel.source = transport.into();
-        assert!(checkpoint.attribute_record(&mut kernel, BOOT, BOOT + 300, true));
+        assert_eq!(
+            checkpoint.attribute_record(&mut kernel, BOOT, BOOT + 300, true),
+            crate::ancestry::Attribution::Ready
+        );
         assert_eq!(kernel.process, None);
         assert!(kernel.ancestors.is_empty());
     }
@@ -838,6 +931,14 @@ fn checkpoint_replacement_failure_preserves_previous_context_and_source_progress
         journal.process_checkpoint(BOOT).unwrap().through_filetime,
         BOOT + 200
     );
+    assert_eq!(
+        journal
+            .process_checkpoint(BOOT)
+            .unwrap()
+            .processes
+            .source_through(&source().id),
+        Some(BOOT + 200)
+    );
     journal
         .checkpoint_processes(
             &source(),
@@ -855,6 +956,40 @@ fn checkpoint_replacement_failure_preserves_previous_context_and_source_progress
 }
 
 #[test]
+fn replayed_lifecycles_preserve_the_observed_process_interval() {
+    let dir = Directory::new();
+    let mut journal = dir.open(RetentionPolicy::default());
+    journal.discover_imports(vec![source()]).unwrap();
+    let ended = Lifecycle::End {
+        pid: 20,
+        start: BOOT + 100,
+        end: BOOT + 200,
+        key: Some(22),
+    };
+    let checkpoint = |journal: &mut Journal, changes| {
+        assert_eq!(
+            journal
+                .checkpoint_processes(&source(), changes, BOOT + 300, NOW)
+                .unwrap(),
+            0
+        );
+        journal.process_checkpoint(BOOT).unwrap()
+    };
+    let placeholder = checkpoint(&mut journal, vec![ended.clone(), ended.clone()]);
+    assert_eq!(
+        placeholder.attribute_record(&mut record(20, Some(22)), BOOT, BOOT + 150, true),
+        crate::ancestry::Attribution::Missing(20)
+    );
+    let birth = start(20, 100, Some(22), 0);
+    let merged = checkpoint(&mut journal, vec![birth.clone(), birth, ended]);
+    assert_eq!(
+        merged.processes.observed(20, BOOT + 150).unwrap().0,
+        identity(20, 100, Some(22))
+    );
+    assert_eq!(merged.processes.observed(20, BOOT + 250), None);
+}
+
+#[test]
 fn process_checkpoints_share_the_physical_journal_budget() {
     let dir = Directory::new();
     let policy = RetentionPolicy {
@@ -863,38 +998,217 @@ fn process_checkpoints_share_the_physical_journal_budget() {
     };
     let mut journal = dir.open(policy.clone());
     journal.discover_imports(vec![source()]).unwrap();
-    let retired = journal
+    journal
+        .checkpoint_processes(&source(), vec![start(1, 1, Some(1), 0)], BOOT + 10, NOW)
+        .unwrap();
+    let row = journal
+        .append(&BOOT.to_string(), NOW, true, event("retained row"))
+        .unwrap();
+    let before = journal.disk_bytes;
+    let error = journal
         .checkpoint_processes(
             &source(),
-            (1..=128)
+            (2..=128)
                 .map(|pid| start(pid, pid as u64, Some(pid as u64), 0))
                 .collect(),
             BOOT + 500,
             NOW,
         )
-        .unwrap();
-    assert!(retired > 0);
-    assert_eq!(
-        journal
-            .import_receipt(&source())
-            .unwrap()
-            .process_context_lost,
-        retired
-    );
-    assert!(journal.measure_disk_bytes().unwrap() <= 16 * 1024);
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(journal.disk_bytes, before);
     drop(journal);
     let journal = dir.open(policy);
+    assert_eq!(read(&journal, 0, None, 10, 4096).unwrap().records, [row]);
+    let checkpoint = journal.process_checkpoint(BOOT).unwrap();
     assert_eq!(
-        journal
-            .process_checkpoint(BOOT)
-            .unwrap()
-            .processes
-            .observed(128, BOOT + 200)
-            .unwrap()
-            .0,
-        identity(128, 128, Some(128))
+        checkpoint.processes.observed(1, BOOT + 5).unwrap().0,
+        identity(1, 1, Some(1))
     );
-    assert!(journal.measure_disk_bytes().unwrap() <= 16 * 1024);
+    assert_eq!(checkpoint.through_filetime, BOOT + 10);
+    assert_eq!(checkpoint.processes.observed(128, BOOT + 200), None);
+    assert!(journal.disk_bytes <= 16 * 1024);
+}
+
+#[test]
+fn segmented_checkpoint_reopens_beyond_old_table_and_byte_limits() {
+    let dir = Directory::new();
+    let policy = RetentionPolicy::default();
+    let mut journal = dir.open(policy.clone());
+    journal.discover_imports(vec![source()]).unwrap();
+    journal
+        .checkpoint_processes(
+            &source(),
+            vec![start(10, 100, Some(11), 0)],
+            BOOT + 200,
+            NOW,
+        )
+        .unwrap();
+    for base in (1_000..66_536).step_by(128) {
+        journal
+            .checkpoint_processes(
+                &source(),
+                (base..base + 128)
+                    .map(|pid| start(pid, 100, Some(pid.into()), 0))
+                    .collect(),
+                BOOT + 200,
+                NOW,
+            )
+            .unwrap();
+    }
+    assert!(journal.disk_bytes > 512 * 1024);
+    drop(journal);
+    let mut journal = dir.open(policy.clone());
+    journal
+        .checkpoint_processes(
+            &source(),
+            vec![
+                start(10, 300, Some(22), 0),
+                start(20, 200, Some(33), 10),
+                start(30, 400, Some(44), 10),
+            ],
+            BOOT + 500,
+            NOW,
+        )
+        .unwrap();
+    drop(journal);
+    let journal = dir.open(policy);
+    let checkpoint = journal.process_checkpoint(BOOT).unwrap();
+    assert_eq!(checkpoint.through_filetime, BOOT + 500);
+    let filter = |key: u64| venera_debug_protocol::Filter {
+        targets: vec![venera_debug_protocol::Target::ProcessInstance {
+            pid: 10,
+            start_time_filetime: (BOOT + if key == 11 { 100 } else { 300 }).to_string(),
+            include_descendants: true,
+            boot_time_filetime: Some(BOOT.to_string()),
+            start_key: Some(key.to_string()),
+        }],
+        ..Default::default()
+    };
+    for (pid, time, expected, ancestor, belongs_to) in [
+        (10, 150, identity(10, 100, Some(11)), None, Some(11)),
+        (10, 350, identity(10, 300, Some(22)), None, Some(22)),
+        (
+            20,
+            450,
+            identity(20, 200, Some(33)),
+            Some(identity(10, 100, Some(11))),
+            Some(11),
+        ),
+        (
+            30,
+            450,
+            identity(30, 400, Some(44)),
+            Some(identity(10, 300, Some(22))),
+            Some(22),
+        ),
+        (66_535, 150, identity(66_535, 100, Some(66_535)), None, None),
+    ] {
+        let mut event = record(pid, None);
+        assert_eq!(
+            checkpoint.attribute_record(&mut event, BOOT, BOOT + time, true),
+            crate::ancestry::Attribution::Ready
+        );
+        assert_eq!(event.process, Some(expected));
+        assert_eq!(event.ancestors, ancestor.into_iter().collect::<Vec<_>>());
+        for key in [11, 22] {
+            assert_eq!(
+                venera_debug_protocol::matches_filter(&filter(key), &event, &event.ancestors),
+                belongs_to == Some(key)
+            );
+        }
+    }
+}
+
+#[test]
+fn pending_context_reopens_before_its_start() {
+    let dir = Directory::new();
+    let policy = RetentionPolicy::default();
+    let mut journal = dir.open(policy.clone());
+    journal.discover_imports(vec![source()]).unwrap();
+    journal
+        .checkpoint_processes(
+            &source(),
+            vec![Lifecycle::Context {
+                pid: 10,
+                time: BOOT + 150,
+                key: 11,
+            }],
+            BOOT + 200,
+            NOW,
+        )
+        .unwrap();
+    drop(journal);
+    let mut journal = dir.open(policy.clone());
+    journal
+        .checkpoint_processes(
+            &source(),
+            vec![start(10, 100, None, 0), start(10, 300, Some(22), 0)],
+            BOOT + 400,
+            NOW,
+        )
+        .unwrap();
+    drop(journal);
+    let journal = dir.open(policy);
+    let checkpoint = journal.process_checkpoint(BOOT).unwrap();
+    assert_eq!(
+        checkpoint.processes.observed(10, BOOT + 150).unwrap().0,
+        identity(10, 100, Some(11))
+    );
+    assert_eq!(
+        checkpoint.processes.observed(10, BOOT + 350).unwrap().0,
+        identity(10, 300, Some(22))
+    );
+}
+
+#[test]
+fn process_files_and_source_progress_reopen_at_the_published_generation() {
+    for (failure, expected_through, expected_key) in
+        [("publish", BOOT + 200, 11), ("cleanup", BOOT + 400, 22)]
+    {
+        let dir = Directory::new();
+        let policy = RetentionPolicy::default();
+        let mut journal = dir.open(policy.clone());
+        journal.discover_imports(vec![source()]).unwrap();
+        journal
+            .checkpoint_processes(
+                &source(),
+                vec![start(10, 100, Some(11), 0)],
+                BOOT + 200,
+                NOW,
+            )
+            .unwrap();
+        INTERRUPT.set(Some(failure));
+        assert!(journal
+            .checkpoint_processes(
+                &source(),
+                vec![start(10, 300, Some(22), 0)],
+                BOOT + 400,
+                NOW
+            )
+            .is_err());
+        drop(journal);
+        let journal = dir.open(policy);
+        let checkpoint = journal.process_checkpoint(BOOT).unwrap();
+        assert_eq!(checkpoint.through_filetime, expected_through);
+        assert_eq!(
+            checkpoint.processes.source_through(&source().id),
+            Some(expected_through)
+        );
+        let mut event = record(10, None);
+        assert_eq!(
+            checkpoint.attribute_record(&mut event, BOOT, BOOT + 350, false),
+            crate::ancestry::Attribution::Ready
+        );
+        assert_eq!(
+            event.process,
+            Some(identity(
+                10,
+                if expected_key == 11 { 100 } else { 300 },
+                Some(expected_key)
+            ))
+        );
+    }
 }
 
 #[test]

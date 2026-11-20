@@ -315,13 +315,14 @@ fn import_file(
         );
     }
     let receipt = history.import_receipt(source.clone())?;
-    let checkpoint = history.process_checkpoint(source.boot_filetime)?;
     if !receipt.complete {
         let mut pending = Vec::new();
         let mut bytes = 0;
         let mut last = receipt.through;
         let mut invalid_events = 0u64;
-        let summary = files::read(path, &mut |event, boot, ordinal| {
+        let mut missing_process = None;
+        use windows_sys::Win32::System::Diagnostics::Etw::EVENT_RECORD;
+        let mut visit = |event: &EVENT_RECORD, boot, ordinal| {
             if stopped() {
                 return Err(io::ErrorKind::Interrupted.into());
             }
@@ -350,16 +351,20 @@ fn import_file(
                         e.source_time_filetime.0
                     });
                 if let Some(class) = crate::collector::classify_capture(&capture) {
-                    let mut record = state.lock().unwrap().capture_record(capture, Some(class));
-                    if let Some(record) = &mut record {
-                        if !checkpoint.attribute_record(record, boot, time, wait_for_processes) {
-                            return Err(io::Error::new(
-                                io::ErrorKind::WouldBlock,
-                                "Process history is being sealed",
-                            ));
-                        }
-                    }
+                    let record = state.lock().unwrap().capture_record(capture, Some(class));
                     if let Some(record) = record {
+                        use crate::ancestry::Attribution;
+                        let (status, record) = history.attribute_process_record(boot, time, wait_for_processes, record)?;
+                        match status {
+                            Attribution::Pending => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::WouldBlock,
+                                    "Process history is being sealed",
+                                ))
+                            }
+                            Attribution::Missing(pid) => missing_process = Some(pid),
+                            Attribution::Ready => (),
+                        }
                         let event = venera_debug_protocol::v1::HistoryEvent::Log { record };
                         let size = serde_json::to_vec(&event)?.len() + 2048;
                         if bytes + size > 850 * 1024 && !pending.is_empty() {
@@ -392,30 +397,29 @@ fn import_file(
                 bytes = 0;
             }
             Ok(())
+        };
+        let mut visit_failed = false;
+        let summary = files::read(path, &mut |event, boot, ordinal| {
+            let result = visit(event, boot, ordinal);
+            visit_failed |= result.is_err();
+            result
         });
         let (through, diagnostic) = match summary {
             Ok(summary) => {
                 let limit = if name.starts_with("recorder-") { 4 } else { 32 } * 1024 * 1024;
                 let capacity = summary.physical_bytes >= limit;
-                let loss = summary.events_lost != 0
-                    || summary.buffers_lost != 0
-                    || invalid_events != 0
-                    || capacity
-                    || receipt.process_context_lost != 0
-                    || recovered;
-                let count = if capacity
-                    || recovered
-                    || summary.buffers_lost != 0
-                    || receipt.process_context_lost != 0
-                {
-                    None
-                } else {
-                    Some(summary.events_lost as u64 + invalid_events)
-                };
-                (summary.events, loss.then(|| (format!("capture_loss events={} buffers={} invalid={} capacity={} recovered_export={} process_context_retired={}",
-                    summary.events_lost, summary.buffers_lost, invalid_events, capacity, recovered, receipt.process_context_lost), count)))
+                (
+                    summary.events,
+                    capture_storage::capture_loss(
+                        summary.events_lost,
+                        summary.buffers_lost,
+                        invalid_events,
+                        capacity,
+                        recovered,
+                    ),
+                )
             }
-            Err(error) if corrupt(&error) => {
+            Err(error) if !visit_failed && corrupt(&error) => {
                 (last, Some((format!("capture_read_failed: {error}"), None)))
             }
             Err(error) => return Err(error),
@@ -427,6 +431,11 @@ fn import_file(
             entries: pending,
             now_ms: (clock::filetime() - 116444736000000000) / 10000,
         })?;
+        if let Some(pid) = missing_process.filter(|_| diagnostic.is_none()) {
+            state.lock().unwrap().status.health["process_history"] = serde_json::json!({
+                "error": "Process history unavailable for captured record", "pid": pid, "file": name,
+            });
+        }
         finish_source(state, history, path, source.clone(), diagnostic)?;
     }
     // The file identity is rechecked after the owner has confirmed durable completion.
@@ -514,6 +523,7 @@ fn import_sealed(
                 ));
             }
             Err(error) => {
+                trusted = false;
                 state.lock().unwrap().status.health["capture_inventory"] =
                     serde_json::json!({"error":error.to_string(),"file":path});
             }
@@ -749,7 +759,7 @@ mod tests {
         let HistoryEvent::Gap { gap } = &imported.records[0].event else {
             panic!("expected capture loss: {imported:?}")
         };
-        assert_eq!(gap.reason, format!("capture_loss events=28 buffers=0 invalid=0 capacity=false recovered_export=false process_context_retired=0; source={}", source.id));
+        assert_eq!(gap.reason, format!("capture_loss events=28 buffers=0 invalid=0 capacity=false recovered_export=false; source={}", source.id));
         assert_eq!(
             (gap.count, gap.first_seq, gap.last_seq),
             (Some(DecimalU64(28)), None, None)
@@ -993,86 +1003,6 @@ mod tests {
         records
     }
 
-    fn budget_retirements(before: &serde_json::Value, after: &serde_json::Value) -> usize {
-        let mut restored = after.clone();
-        let mut removed = 0;
-        let key = |entry: &serde_json::Value| {
-            (
-                entry["identity"]["pid"].as_u64().unwrap(),
-                entry["identity"]["start_time_filetime"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned(),
-            )
-        };
-        for (boot, checkpoint) in before.as_object().unwrap() {
-            let current = after[boot]["processes"]["instances"].as_array().unwrap();
-            let keys: std::collections::BTreeSet<_> = current.iter().map(&key).collect();
-            assert_eq!(
-                after[boot]["processes"]["interruptions"], checkpoint["processes"]["interruptions"],
-                "capture interruption changed during rotation"
-            );
-            for entry in checkpoint["processes"]["instances"].as_array().unwrap() {
-                if !keys.contains(&key(entry)) {
-                    removed += 1;
-                    restored[boot]["processes"]["instances"]
-                        .as_array_mut()
-                        .unwrap()
-                        .push(entry.clone());
-                }
-            }
-        }
-        let limit = (venera_debug_protocol::DEFAULT_MAX_LINE_BYTES as u64 / 2)
-            .min(capture_storage::JOURNAL_BYTES / 4) as usize;
-        let bytes = serde_json::to_vec(after).unwrap().len();
-        let restored_bytes = serde_json::to_vec(&restored).unwrap().len();
-        assert!(bytes <= limit);
-        if removed > 0 {
-            assert!(
-                restored_bytes > limit,
-                "retirement requires metadata budget evidence"
-            );
-        }
-        println!("process retirement count={removed} bytes={bytes} restored_bytes={restored_bytes} limit={limit}");
-        removed
-    }
-
-    fn matches_budget_gap(
-        gap: &venera_debug_protocol::v1::Gap,
-        source: &ImportSource,
-        retired: usize,
-    ) -> bool {
-        retired > 0 && gap.count.is_none() && gap.first_seq.is_none() && gap.last_seq.is_none()
-            && gap.reason == format!("capture_loss events=0 buffers=0 invalid=0 capacity=false recovered_export=false process_context_retired={retired}; source={}", source.id)
-    }
-
-    #[test]
-    fn rotation_budget_gap_requires_exact_source_and_loss_fields() {
-        let source = ImportSource {
-            id: "sealed-source".into(),
-            boot_filetime: 100,
-        };
-        let mut gap = venera_debug_protocol::v1::Gap { stream_id: "test".into(),
-            reason: "capture_loss events=0 buffers=0 invalid=0 capacity=false recovered_export=false process_context_retired=32; source=sealed-source".into(),
-            count: None, first_seq: None, last_seq: None };
-        assert!(matches_budget_gap(&gap, &source, 32));
-        assert!(!matches_budget_gap(&gap, &source, 31));
-        for (field, unexpected) in [
-            ("events=0", "events=1"),
-            ("buffers=0", "buffers=1"),
-            ("invalid=0", "invalid=1"),
-            ("capacity=false", "capacity=true"),
-            ("recovered_export=false", "recovered_export=true"),
-            ("sealed-source", "another-source"),
-        ] {
-            let mut changed = gap.clone();
-            changed.reason = gap.reason.replace(field, unexpected);
-            assert!(!matches_budget_gap(&changed, &source, 32), "{unexpected}");
-        }
-        gap.count = Some(venera_debug_protocol::v1::DecimalU64(32));
-        assert!(!matches_budget_gap(&gap, &source, 32));
-    }
-
     fn costs() -> (u64, u64, u64) {
         unsafe {
             let mut created: FILETIME = std::mem::zeroed();
@@ -1219,6 +1149,51 @@ mod tests {
                 0
             );
         }
+        write_process_marker(provider, &role);
+        if matches!(role.as_str(), "parent" | "rotation-parent") {
+            if let Some(emitter) = std::env::var_os("VENERA_UMD_EMITTER") {
+                let emitter = PathBuf::from(emitter);
+                assert!(std::process::Command::new(&emitter)
+                    .arg("emit")
+                    .current_dir(emitter.parent().unwrap())
+                    .status()
+                    .unwrap()
+                    .success());
+            } else {
+                assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "windows::capture::tests::process_history_child_fixture",
+                        "--ignored",
+                        "--exact",
+                        "--test-threads=1"
+                    ])
+                    .env(
+                        "VENERA_HISTORY_FIXTURE",
+                        if role == "rotation-parent" { "rotation-child" } else { "child" },
+                    )
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            if let Some(directory) = std::env::var_os("VENERA_HISTORY_BARRIER") {
+                let directory = PathBuf::from(directory);
+                fs::write(directory.join("ready"), std::process::id().to_string()).unwrap();
+                let until = Instant::now() + Duration::from_secs(30);
+                while !directory.join("release").exists() {
+                    assert!(Instant::now() < until, "process fixture release timed out");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            if role == "rotation-parent" {
+                write_process_marker(provider, "rotation-parent-after");
+            }
+        }
+        unsafe {
+            assert_eq!(EventUnregister(provider), 0);
+        }
+    }
+
+    fn write_process_marker(provider: REGHANDLE, role: &str) {
         let mut payload = vec![0u8; 8];
         payload[4..8].copy_from_slice(&4u32.to_le_bytes());
         payload.extend_from_slice(
@@ -1242,41 +1217,369 @@ mod tests {
         unsafe {
             assert_eq!(EventWrite(provider, &descriptor, 1, &data), 0);
         }
-        if role == "parent" {
-            if let Some(emitter) = std::env::var_os("VENERA_UMD_EMITTER") {
-                let emitter = PathBuf::from(emitter);
-                assert!(std::process::Command::new(&emitter)
-                    .arg("emit")
-                    .current_dir(emitter.parent().unwrap())
-                    .status()
-                    .unwrap()
-                    .success());
-            } else {
-                assert!(std::process::Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "windows::capture::tests::process_history_child_fixture",
-                        "--ignored",
-                        "--exact",
-                        "--test-threads=1"
-                    ])
-                    .env("VENERA_HISTORY_FIXTURE", "child")
-                    .status()
-                    .unwrap()
-                    .success());
-            }
-            if let Some(directory) = std::env::var_os("VENERA_HISTORY_BARRIER") {
-                let directory = PathBuf::from(directory);
-                fs::write(directory.join("ready"), std::process::id().to_string()).unwrap();
-                let until = Instant::now() + Duration::from_secs(30);
-                while !directory.join("release").exists() {
-                    assert!(Instant::now() < until, "process fixture release timed out");
-                    std::thread::sleep(Duration::from_millis(10));
+    }
+
+    fn rotation_process_evidence(
+        path: &Path,
+        boot: u64,
+        pid: u32,
+        output: &Path,
+    ) -> (u64, Vec<(u64, u64, u64, Option<u64>)>) {
+        use crate::ancestry::Lifecycle;
+        let mut rows = Vec::new();
+        let mut stops = Vec::new();
+        let summary = files::read(path, &mut |event, event_boot, ordinal| {
+            assert_eq!(event_boot, boot);
+            let source_time = event.EventHeader.TimeStamp as u64;
+            match unsafe { etw::process_lifecycle(event, event_boot) }? {
+                Some(Lifecycle::Start { identity, .. }) if identity.pid == pid => {
+                    rows.push(serde_json::json!({"ordinal": ordinal, "event_filetime": source_time,
+                        "start": identity}));
                 }
+                Some(Lifecycle::End { pid: stopped, start, end, key }) if stopped == pid => {
+                    rows.push(serde_json::json!({"ordinal": ordinal, "event_filetime": source_time,
+                        "pid": stopped, "start_filetime": start, "exit_filetime": end, "start_key": key}));
+                    stops.push((ordinal, start, end, key));
+                }
+                _ => (),
             }
+            Ok(())
+        }).unwrap();
+        fs::write(
+            output,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "trace": summary, "process": rows,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!((summary.events_lost, summary.buffers_lost), (0, 0));
+        assert_eq!(summary.boot_time_filetime, boot.to_string());
+        (summary.events, stops)
+    }
+
+    #[test]
+    #[ignore = "Replays the saved process rotation ETLs from VENERA_PROCESS_ROTATION_ETL"]
+    fn replay_saved_process_rotation() {
+        let fixture = PathBuf::from(std::env::var_os("VENERA_PROCESS_ROTATION_ETL").unwrap());
+        let directory =
+            std::env::temp_dir().join(format!("venera-process-replay-{}", clock::filetime()));
+        let capture = directory.join("capture");
+        fs::create_dir_all(&capture).unwrap();
+        println!("Process rotation replay: {}", directory.display());
+        let boot = 134396142795000000;
+        let pid = 13464;
+        let live_at = 134396344449899815;
+        let exit = 134396344450044459;
+        let path = directory.join("history");
+        let open =
+            || crate::journal::Journal::open(&path, "process-replay", Default::default()).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (history, owner) = crate::history::History::start(open(), stop.clone()).unwrap();
+        let state = Arc::new(Mutex::new(State::new("process-replay".into(), true)));
+        state.lock().unwrap().boot_id = boot.to_string();
+        let first = capture.join("kernel-live-1.etl");
+        fs::copy(fixture.join("before.etl"), &first).unwrap();
+        assert!(rotation_process_evidence(
+            &first,
+            boot,
+            pid,
+            &directory.join("before-process.json")
+        )
+        .1
+        .is_empty());
+        import_sealed(&state, &history, &capture, &[]).unwrap();
+        assert!(!first.exists());
+        let second = capture.join("kernel-live-2.etl");
+        fs::copy(fixture.join("after.etl"), &second).unwrap();
+        let (events, stops) =
+            rotation_process_evidence(&second, boot, pid, &directory.join("after-process.json"));
+        assert_eq!(
+            stops,
+            [(4, 134396344447018506, exit, Some(114841790497963724))]
+        );
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&second)
+            .unwrap();
+        let source = files::header(&second).unwrap();
+        import_sealed(&state, &history, &capture, &[]).unwrap();
+        let receipt = crate::journal::ImportReceipt {
+            source: source.clone(),
+            through: events,
+            complete: true,
+        };
+        assert_eq!(history.import_receipt(source.clone()).unwrap(), receipt);
+        let check = |snapshot: crate::ancestry::Checkpoint| {
+            let (identity, _) = snapshot.processes.observed(pid, live_at).unwrap();
+            assert_eq!(identity.start_key.as_deref(), Some("114841790497963724"));
+            assert_eq!(
+                snapshot.processes.observed(pid, exit - 1).unwrap().0,
+                identity
+            );
+            assert_eq!(snapshot.processes.observed(pid, exit + 1), None);
+        };
+        check(history.process_checkpoint(boot).unwrap());
+        stop.store(true, Ordering::Release);
+        owner.join().unwrap().unwrap();
+        let journal = open();
+        assert_eq!(journal.import_receipt(&source).unwrap(), receipt);
+        check(journal.process_checkpoint(boot).unwrap());
+        journal.close().unwrap();
+        drop(held);
+    }
+
+    #[test]
+    #[ignore = "Uses an independent elevated Windows ETW file session"]
+    fn process_history_survives_etl_rotation_and_reopen() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use venera_debug_protocol::v1::HistoryEvent;
+        use venera_debug_protocol::{matches_filter, Filter, Target};
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let directory =
+            std::env::temp_dir().join(format!("venera-process-rotation-{}", clock::filetime()));
+        let capture = directory.join("capture");
+        fs::create_dir_all(&capture).unwrap();
+        println!("Process rotation evidence: {}", directory.display());
+        let first = capture.join("kernel-live-1.etl");
+        let name = format!("Venera process rotation {}", std::process::id());
+        let session = FileSession::start(&name, &first, 0, 32).unwrap();
+        session.enable(&etw::PROCESS_PROVIDER, 4, 0x10).unwrap();
+        session.enable(&etw::PROVIDER, 4, 1).unwrap();
+        let mut sessions = [CaptureSession {
+            session,
+            active: first.clone(),
+            prefix: "kernel-live-",
+        }];
+        let mut producer = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "windows::capture::tests::process_history_child_fixture",
+                "--ignored",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env("VENERA_HISTORY_FIXTURE", "rotation-parent")
+            .env("VENERA_HISTORY_BARRIER", &directory)
+            .env_remove("VENERA_UMD_EMITTER")
+            .spawn()
+            .unwrap();
+        let producer_pid = producer.id();
+        let until = Instant::now() + Duration::from_secs(30);
+        while !directory.join("ready").exists() {
+            assert!(Instant::now() < until, "process fixture ready timed out");
+            assert!(producer.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(10));
         }
-        unsafe {
-            assert_eq!(EventUnregister(provider), 0);
+        let live_at = clock::filetime();
+        let second = sessions[0]
+            .session
+            .rotate(&capture.join("kernel-live-2.etl"))
+            .unwrap();
+        let first_rotated_at = clock::filetime();
+        sessions[0].active = second.clone();
+        let source = files::header(&first).unwrap();
+        let boot = source.boot_filetime;
+        let inspect = |path: &Path, label: &str| {
+            fs::copy(path, directory.join(format!("{label}.etl"))).unwrap();
+            rotation_process_evidence(
+                path,
+                boot,
+                producer_pid,
+                &directory.join(format!("{label}-process.json")),
+            )
+        };
+        assert!(inspect(&first, "before").1.is_empty());
+        let path = directory.join("history");
+        let open = || {
+            crate::journal::Journal::open(&path, "process-rotation", Default::default()).unwrap()
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let (history, owner) = crate::history::History::start(open(), stop.clone()).unwrap();
+        let state = Arc::new(Mutex::new(State::new("process-rotation".into(), true)));
+        state.lock().unwrap().boot_id = boot.to_string();
+        import_sealed(&state, &history, &capture, &sessions).unwrap();
+        assert!(!first.exists() && second.exists());
+        assert!(history.import_sources().unwrap().is_empty());
+        let before = history_records(&history);
+        let logs = |records: &[venera_debug_protocol::v1::HistoryRecord]| {
+            records
+                .iter()
+                .filter_map(|entry| {
+                    assert_eq!(entry.boot_id, boot.to_string());
+                    match &entry.event {
+                        HistoryEvent::Log { record }
+                            if record.text.contains(" I offline process rotation-") =>
+                        {
+                            Some(record.clone())
+                        }
+                        HistoryEvent::Log { .. } => None,
+                        event => panic!("unexpected rotation event: {event:?}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let initial = logs(&before);
+        assert_eq!(initial.len(), 2);
+        let parent = &initial[0];
+        let child = &initial[1];
+        let identity = parent.process.as_ref().unwrap();
+        let child_identity = child.process.as_ref().unwrap();
+        assert_eq!(identity.pid, producer.id());
+        assert_ne!(identity.pid, child_identity.pid);
+        for (record, body) in [(parent, "rotation-parent"), (child, "rotation-child")] {
+            let process = record.process.as_ref().unwrap();
+            assert_eq!(
+                record.text,
+                format!("venera_d3d12[{}:1] I offline process {body}", process.pid)
+            );
+            assert_eq!(process.boot_time_filetime, Some(boot.to_string()));
+            assert!(process.start_key.is_some());
         }
+        assert_eq!(child.ancestors.first(), Some(identity));
+        let filter = |include_descendants, start_key| Filter {
+            targets: vec![Target::ProcessInstance {
+                pid: identity.pid,
+                start_time_filetime: identity.start_time_filetime.clone().unwrap(),
+                boot_time_filetime: identity.boot_time_filetime.clone(),
+                start_key,
+                include_descendants,
+            }],
+            ..Default::default()
+        };
+        let direct = filter(false, identity.start_key.clone());
+        let family = filter(true, identity.start_key.clone());
+        let other = filter(
+            true,
+            Some((identity.start_key.as_ref().unwrap().parse::<u64>().unwrap() ^ 1).to_string()),
+        );
+        assert!(matches_filter(&direct, parent, &parent.ancestors));
+        assert!(!matches_filter(&direct, child, &child.ancestors));
+        assert!(matches_filter(&family, child, &child.ancestors));
+        assert!(!matches_filter(&other, child, &child.ancestors));
+        let owns_parent = |checkpoint: crate::ancestry::Checkpoint| {
+            assert_eq!(
+                checkpoint
+                    .processes
+                    .observed(identity.pid, live_at)
+                    .unwrap()
+                    .0,
+                *identity
+            );
+        };
+        owns_parent(history.process_checkpoint(boot).unwrap());
+        fs::write(directory.join("release"), b"continue").unwrap();
+        assert!(producer.wait().unwrap().success());
+        let wait_sample = clock::filetime();
+        sessions[0].active = sessions[0]
+            .session
+            .rotate(&capture.join("kernel-live-3.etl"))
+            .unwrap();
+        let second_rotated_at = clock::filetime();
+        fs::write(directory.join("timing.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "pid": identity.pid, "live_sample_filetime": live_at, "first_rotate_return_filetime": first_rotated_at,
+            "wait_sample_filetime": wait_sample, "second_rotate_return_filetime": second_rotated_at,
+        })).unwrap()).unwrap();
+        let (events, stop_events) = inspect(&second, "after");
+        let [(stop_ordinal, start, exit, key)] = stop_events.as_slice() else {
+            panic!(
+                "expected one sealed process stop for PID {}: {stop_events:?}",
+                identity.pid
+            );
+        };
+        assert_eq!(
+            *start,
+            identity
+                .start_time_filetime
+                .as_ref()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        );
+        assert_eq!(key.map(|n| n.to_string()), identity.start_key);
+        assert!(live_at < *exit);
+        let after_exit = exit.checked_add(1).unwrap();
+        let owns_lifecycle = |checkpoint: crate::ancestry::Checkpoint| {
+            assert_eq!(
+                checkpoint
+                    .processes
+                    .observed(identity.pid, exit - 1)
+                    .unwrap()
+                    .0,
+                *identity
+            );
+            assert_eq!(checkpoint.processes.observed(identity.pid, *exit), None);
+            assert_eq!(
+                checkpoint.processes.observed(identity.pid, after_exit),
+                None
+            );
+            owns_parent(checkpoint);
+        };
+        let source = files::header(&second).unwrap();
+        let active = sessions[0].active.clone();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&second)
+            .unwrap();
+        import_sealed(&state, &history, &capture, &sessions).unwrap();
+        assert!(second.exists() && active.exists());
+        assert_eq!(history.import_sources().unwrap(), [source.clone()]);
+        let receipt = crate::journal::ImportReceipt {
+            source: source.clone(),
+            through: events,
+            complete: true,
+        };
+        assert!((1..=receipt.through).contains(stop_ordinal));
+        assert_eq!(history.import_receipt(source.clone()).unwrap(), receipt);
+        fs::write(
+            directory.join("receipt.json"),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        owns_lifecycle(history.process_checkpoint(boot).unwrap());
+        let after = history_records(&history);
+        assert_eq!(&after[..before.len()], &before);
+        let observed = logs(&after);
+        assert_eq!(observed.len(), 3);
+        let last = &observed[2];
+        assert_eq!(
+            last.text,
+            format!(
+                "venera_d3d12[{}:1] I offline process rotation-parent-after",
+                identity.pid
+            )
+        );
+        assert_eq!(last.process.as_ref(), Some(identity));
+        assert!(matches_filter(&direct, last, &last.ancestors));
+        assert!(!matches_filter(&other, last, &last.ancestors));
+
+        stop.store(true, Ordering::Release);
+        owner.join().unwrap().unwrap();
+        let journal = open();
+        assert_eq!(journal.import_receipt(&source).unwrap(), receipt);
+        owns_lifecycle(journal.process_checkpoint(boot).unwrap());
+        drop(held);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (history, owner) = crate::history::History::start(journal, stop.clone()).unwrap();
+        assert_eq!(history_records(&history), after);
+        import_sealed(&state, &history, &capture, &sessions).unwrap();
+        assert!(!second.exists() && active.exists());
+        assert!(history.import_sources().unwrap().is_empty());
+        assert_eq!(history_records(&history), after);
+        owns_lifecycle(history.process_checkpoint(boot).unwrap());
+        fs::write(
+            directory.join("records.json"),
+            serde_json::to_vec_pretty(&after).unwrap(),
+        )
+        .unwrap();
+        stop.store(true, Ordering::Release);
+        owner.join().unwrap().unwrap();
+        let [session] = sessions;
+        session.session.stop().unwrap();
     }
 
     #[test]
@@ -1858,19 +2161,12 @@ mod tests {
         let state = Arc::new(Mutex::new(State::new("numbered-boot".into(), true)));
         state.lock().unwrap().boot_id = clock::boot_id().unwrap();
         preserve(&sessions);
-        let snapshot = |label: &str| {
-            let bytes = fs::read(history_path.join("metadata.json")).unwrap();
-            fs::write(evidence.join(format!("{label}-metadata.json")), &bytes).unwrap();
-            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["processes"].clone()
-        };
-        snapshot("initial-before");
         let started = Instant::now();
         import_sealed(&state, &history, &capture, &sessions).unwrap();
         println!(
             "initial sealed import elapsed_ms={}",
             started.elapsed().as_millis()
         );
-        snapshot("initial-after");
         let range = history.range().unwrap();
         let baseline = venera_debug_protocol::v1::HistoryCursor {
             journal_id: range.journal_id,
@@ -1886,7 +2182,12 @@ mod tests {
                             .structured
                             .as_ref()
                             .filter(|event| event.producer_instance.0 == instance)
-                            .map(|event| event.producer_sequence.0)
+                            .map(|event| {
+                                assert_eq!(entry.boot_id, clock::boot_id().unwrap());
+                                assert_eq!(record.text, "boot rotation continuity");
+                                assert_eq!(event.event_id, 1);
+                                event.producer_sequence.0
+                            })
                     } else {
                         None
                     }
@@ -1947,20 +2248,18 @@ mod tests {
             let summary = files::read(&sealed, &mut |_, _, _| Ok(())).unwrap();
             assert!(summary.end_time_filetime.parse::<u64>().unwrap() > 0);
             assert_eq!((summary.events_lost, summary.buffers_lost), (0, 0));
-            let source = files::header(&sealed).unwrap();
             let bytes = fs::metadata(&sealed).unwrap().len();
             preserve(&sessions);
             assert_eq!(fs::metadata(&sealed).unwrap().len(), bytes);
-            let before = snapshot(&format!("round-{round}-before"));
+            let source = files::header(&sealed).unwrap();
             let started = Instant::now();
             import_sealed(&state, &history, &capture, &sessions).unwrap();
             println!(
                 "round={round} sealed import elapsed_ms={}",
                 started.elapsed().as_millis()
             );
-            let after = snapshot(&format!("round-{round}-after"));
-            let retired = budget_retirements(&before, &after);
             assert!(!sealed.exists());
+            assert!(!history.import_sources().unwrap().contains(&source));
             assert!(actual.exists());
             let active_id = files::file_identity(&actual).unwrap();
             assert!(!history
@@ -1984,18 +2283,7 @@ mod tests {
                     }
                 })
                 .collect();
-            assert_eq!(
-                gaps.len(),
-                usize::from(retired > 0),
-                "rotation Gap observations: {gaps:?}"
-            );
-            if retired > 0 {
-                assert!(
-                    matches_budget_gap(gaps[0], &source, retired),
-                    "{:?}",
-                    gaps[0]
-                );
-            }
+            assert!(gaps.is_empty(), "rotation Gap observations: {gaps:?}");
         }
         unsafe {
             assert_eq!(EventUnregister(provider), 0);
@@ -2043,6 +2331,11 @@ mod tests {
                 24
             ]
         );
+        fs::write(
+            evidence.join("history.json"),
+            serde_json::to_vec_pretty(&reopened).unwrap(),
+        )
+        .unwrap();
         journal.close().unwrap();
     }
 

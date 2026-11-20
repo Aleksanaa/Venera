@@ -287,7 +287,7 @@ unsafe fn serve_peer(
                 }
             } else {
                 let generation = state.lock().unwrap().history_generation();
-                let received = connection.receive_with(
+                let received = connection.receive_negotiated(
                     &buffer[..count as usize],
                     |message| {
                         let expires = match &message {
@@ -299,7 +299,7 @@ unsafe fn serve_peer(
                         };
                         state.lock().unwrap().control(message, expires)
                     },
-                    |request, local| history_request(state, request, local),
+                    |request, local, encoding| history_request(state, request, local, encoding),
                 );
                 state.lock().unwrap().parse_errors += received.parse_errors;
                 for response in received.output {

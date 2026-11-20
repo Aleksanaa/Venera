@@ -206,6 +206,7 @@ pub fn history_request(
     state: &Shared,
     request: venera_debug_protocol::v1::Incoming,
     local: bool,
+    encoding: venera_debug_protocol::v1::HistoryEncoding,
 ) -> venera_debug_protocol::v1::RpcResult<serde_json::Value> {
     use venera_debug_protocol::v1::{Incoming, RpcError};
     let failure = |error: io::Error| RpcError::new(-32007, error.to_string());
@@ -222,5 +223,5 @@ pub fn history_request(
             .and_then(serde_json::to_value)
             .map_err(|error| RpcError::new(-32603, error.to_string()));
     }
-    history.rpc(request, local || forwarding)
+    history.rpc_encoded(request, local || forwarding, encoding)
 }

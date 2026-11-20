@@ -1,5 +1,6 @@
 mod ancestry;
 mod user_events;
+mod engine_events;
 #[cfg(any(windows, test))]
 mod collector;
 #[cfg(any(windows, test))]

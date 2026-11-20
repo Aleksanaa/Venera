@@ -396,7 +396,7 @@ fn rpc_client(
         }
         let mut bytes = first.to_vec();
         while !client_stopped(local_stop) {
-            let received = connection.receive_with(
+            let received = connection.receive_negotiated(
                 &bytes,
                 |message| {
                     let expires = match &message {
@@ -408,7 +408,7 @@ fn rpc_client(
                     };
                     state.lock().unwrap().control(message, expires)
                 },
-                |request, local| history_request(&state, request, local),
+                |request, local, encoding| history_request(&state, request, local, encoding),
             );
             for value in received.output {
                 reply(&mut file, &value)?;
