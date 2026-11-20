@@ -1,6 +1,16 @@
 # Venera Protocol 1.0.0
 
-Rust types and method declarations generate OpenRPC 1.4.1 receiving interface documents for both endpoints. Messages use JSON-RPC 2.0, with UTF-8 JSONL transport over VirtIO socket.
+Rust types and method declarations generate OpenRPC 1.4.1 receiving interface documents for both endpoints. Messages use JSON-RPC 2.0, with UTF-8 JSONL transport over VirtIO sockets and Windows named pipes.
+
+Log records preserve the observation timestamp and the source timestamp independently. History wraps each record with its journal cursor, Windows boot identity and recording time.
+
+The optional `structured` object carries the event provider, event ID and version, boot FILETIME, producer instance and sequence, source FILETIME, and typed event fields. Integer identities and FILETIMEs use decimal strings to preserve their full precision. Kernel fields include severity, source function and line, and NTSTATUS.
+
+The optional `ancestors` array snapshots the available parent process instances at capture time, nearest parent first. Each instance carries its PID and creation FILETIME, plus the executable path when available. Historical descendant matching uses these saved identities. An omitted array represents an empty snapshot.
+
+History pages carry complete archived records. Display selection combines component and level selection with a matching process target: an executable path or a PID/creation-FILETIME pair, optionally including descendants. Windows `logs --follow` applies the current effective display filter and advances through the whole consumed page after output flush. Local history remains available while host forwarding is paused.
+
+Linux collection uses separate connections for archival history and interactive controls. Archive progress advances after a history page is saved. Windows `logs --follow` starts at the current history position and resumes from its consumed position after a connection interruption.
 
 ## Generation and Validation
 
@@ -17,7 +27,11 @@ cargo run --manifest-path debug-channel/Cargo.toml -p venera-debug-protocol --ex
 | guest | `status.get` | request |
 | guest | `filter.set` | request |
 | guest | `filter.reset` | request |
+| guest | `forwarding.set` | request |
 | guest | `system.info.get` | request |
+| guest | `history.range` | request |
+| guest | `history.read` | request |
+| guest | `history.ack` | request |
 | guest | `rpc.discover` | request |
 | host | `endpoint.info` | request |
 | host | `rpc.discover` | request |
@@ -39,11 +53,19 @@ Each UTF-8 JSONL line carries one object or batch array, preserving the original
 
 ## Data Representation
 
-Sequence numbers, revisions, counts, durations in milliseconds, and FILETIME values use canonical decimal u64 strings ranging from `0` to `18446744073709551615`. PIDs, thread IDs, and session IDs use JSON integers ranging from `0` to `4294967295`.
+Sequence numbers, history positions, Unix milliseconds, revisions, counts, durations in milliseconds, and FILETIME values use canonical decimal u64 strings ranging from `0` to `18446744073709551615`. PIDs, thread IDs, and session IDs use JSON integers ranging from `0` to `4294967295`.
 
 Serde u32 decoding uses integer lexical syntax; Draft-07 integer uses mathematical integer semantics. Thus `1.0` and `1e0` are valid under the Schema and produce type errors in Serde decoding. Shared samples record each side's result separately.
 
 Parameter Schemas follow the deserialization contract, and result Schemas follow the serialization contract. Input/Output prefixes on component names distinguish required-field and nullability rules. The Schema dialect is Draft-07, with references pointing to `/components/schemas`. Optional input fields support omission and null; output follows the type's Serde attributes.
+
+## History Synchronization
+
+Discover the guest's `history.range`, `history.read`, and `history.ack` methods through `rpc.discover`. Call `history.range` with `{}` to obtain `journal_id`, `oldest`, and `high_water`. A cursor pairs that journal identity with a durable `position`; position `0` starts before the first entry. Journal identity and positions persist across service restarts and boots. Each record includes its cursor, `boot_id`, `recorded_at_ms`, `startup` classification, and an `event` tagged by `type`: `log` carries `record`, and `gap` carries `gap`. The event preserves its original content and sequence numbers.
+
+Call `history.read` with a `limit` from 1 through 256, an optional `after` cursor, and an optional inclusive `through` position. Omit `after` to start at position 0; omit `through` to use the current high water. Snapshot `high_water` as `through` to page through a bounded backlog. Pages contain `range`, `records`, inclusive `missing` intervals with reason `retention_expired`, and the `next` cursor. Follow `next` for the next page. Each page accounts for positions through `next` using records or missing intervals; page size also follows the JSONL frame limit. At the current high water, an empty page keeps the cursor there. An empty retained set has `oldest` one greater than `high_water`.
+
+Store a page and its continuous progress together, then send `history.ack` with `{"cursor":{"journal_id":"journal-1","position":"42"}}`. A successful acknowledgement echoes the cursor. Each consumer maintains its own progress. Repeated reads preserve record identity and content.
 
 ## System Report Messages
 

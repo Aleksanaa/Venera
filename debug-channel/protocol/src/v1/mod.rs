@@ -53,7 +53,7 @@ pub enum Receiver {
 /// One declaration connects decoding, typed handlers, dispatch and discovery.
 macro_rules! methods {
     (
-        calls { $( $call:ident, $handler:ident, $name:literal, $role:ident, $params:ty => $result:ty; )* }
+        calls { $( $call:ident, $handler:ident, $name:literal, $role:ident, $params:ty => $result:ty $(, $default:ident)?; )* }
         notifications { $( $event:ident, $event_handler:ident, $event_name:literal, $event_params:ty; )* }
     ) => {
         #[derive(Clone, Debug, PartialEq)]
@@ -81,7 +81,7 @@ macro_rules! methods {
             }
         }
         pub trait Handler {
-            $( fn $handler(&mut self, params: $params) -> RpcResult<$result>; )*
+            $( methods!(@handler $handler, $params => $result $(, $default)?); )*
             $( fn $event_handler(&mut self, params: $event_params); )*
         }
         impl Incoming {
@@ -137,6 +137,14 @@ macro_rules! methods {
     };
     (@role Guest) => { Some(Receiver::Guest) };
     (@role Both) => { None::<Receiver> };
+    (@handler $handler:ident, $params:ty => $result:ty) => {
+        fn $handler(&mut self, params: $params) -> RpcResult<$result>;
+    };
+    (@handler $handler:ident, $params:ty => $result:ty, optional) => {
+        fn $handler(&mut self, _: $params) -> RpcResult<$result> {
+            Err(RpcError::new(-32601, "Method not found"))
+        }
+    };
 }
 
 fn request_id<'de, D: serde::Deserializer<'de>>(
@@ -151,7 +159,11 @@ methods! {
         StatusGet, status_get, "status.get", Guest, Empty => Status;
         FilterSet, filter_set, "filter.set", Guest, FilterSet => Status;
         FilterReset, filter_reset, "filter.reset", Guest, Empty => Status;
+        ForwardingSet, forwarding_set, "forwarding.set", Guest, ForwardingSet => Status, optional;
         SystemInfoGet, system_info_get, "system.info.get", Guest, Empty => SystemInfo;
+        HistoryRange, history_range, "history.range", Guest, Empty => HistoryRange, optional;
+        HistoryRead, history_read, "history.read", Guest, HistoryRead => HistoryPage, optional;
+        HistoryAck, history_ack, "history.ack", Guest, HistoryAck => HistoryAck, optional;
         Discover, discover, "rpc.discover", Both, Empty => Discovery;
     }
     notifications {

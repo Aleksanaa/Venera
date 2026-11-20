@@ -98,6 +98,47 @@ pub struct RpcBatch {
     emitted: bool,
 }
 impl RpcBatch {
+    fn budget_error(id: RpcId) -> RpcResponse {
+        RpcResponse::Error {
+            jsonrpc: Version::V2,
+            id,
+            error: RpcError::new(-32008, "Request processed; response exceeds frame budget"),
+        }
+    }
+    fn reserved_bytes(&self) -> usize {
+        let punctuation = if self.array {
+            2 + self.slots.len().saturating_sub(1)
+        } else {
+            0
+        };
+        punctuation
+            + self
+                .slots
+                .iter()
+                .map(|slot| {
+                    let reserve = Self::budget_error(slot.id.clone());
+                    serde_json::to_vec(slot.response.as_ref().unwrap_or(&reserve))
+                        .unwrap()
+                        .len()
+                })
+                .sum::<usize>()
+    }
+    pub fn fits_response_budget(&self, budget: usize) -> bool {
+        self.reserved_bytes() <= budget
+    }
+    pub fn complete_bounded(
+        &mut self,
+        correlation: Correlation,
+        result: RpcResult<Value>,
+        budget: usize,
+    ) -> RpcResult<()> {
+        self.complete(correlation, result)?;
+        if self.reserved_bytes() > budget {
+            let slot = &mut self.slots[correlation.0];
+            slot.response = Some(Self::budget_error(slot.id.clone()));
+        }
+        Ok(())
+    }
     fn slot(&mut self, id: RpcId, error: Option<RpcError>) -> Correlation {
         let correlation = Correlation(self.slots.len());
         let response = error.map(|error| RpcResponse::Error {

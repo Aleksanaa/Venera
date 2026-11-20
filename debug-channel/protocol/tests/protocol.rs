@@ -94,6 +94,7 @@ fn expected_vectors() -> Vec<Envelope> {
                         pid: 4120,
                         start_time_filetime: "134124000000000000".into(),
                         include_descendants: true,
+                        boot_time_filetime: None, start_key: None,
                     },
                     Target::ExePath {
                         path: "C:\\Games\\demo.exe".into(),
@@ -120,6 +121,8 @@ fn expected_vectors() -> Vec<Envelope> {
         }),
         Envelope::new(Message::Log {
             record: LogRecord {
+                structured: None,
+                ancestors: Vec::new(),
                 stream_id: "guest-run-1".into(),
                 seq: 42,
                 observed_at: "2026-11-10T08:00:01.123Z".into(),
@@ -133,6 +136,7 @@ fn expected_vectors() -> Vec<Envelope> {
                     pid: 4120,
                     start_time_filetime: Some("134124000000000000".into()),
                     exe_path: Some("C:\\Games\\demo.exe".into()),
+                    ..Default::default()
                 }),
                 tid: None,
                 text: "中文警告\n下一行".into(),
@@ -280,6 +284,7 @@ fn filters_intersect_dimensions_and_use_process_instances() {
             pid: 4120,
             start_time_filetime: "134124000000000000".into(),
             include_descendants: false,
+            boot_time_filetime: None, start_key: None,
         }],
     };
     assert!(matches_filter(&filter, &record, &[]));
@@ -299,6 +304,7 @@ fn filters_intersect_dimensions_and_use_process_instances() {
         pid: 1,
         start_time_filetime: "10".into(),
         include_descendants: true,
+        boot_time_filetime: None, start_key: None,
     }];
     assert!(matches_filter(
         &filter,
@@ -306,7 +312,8 @@ fn filters_intersect_dimensions_and_use_process_instances() {
         &[ProcessIdentity {
             pid: 1,
             start_time_filetime: Some("10".into()),
-            exe_path: None
+            exe_path: None,
+            ..Default::default()
         }]
     ));
     if let Target::ProcessInstance {
@@ -322,7 +329,8 @@ fn filters_intersect_dimensions_and_use_process_instances() {
         &[ProcessIdentity {
             pid: 1,
             start_time_filetime: Some("10".into()),
-            exe_path: None
+            exe_path: None,
+            ..Default::default()
         }]
     ));
     record.process = None;

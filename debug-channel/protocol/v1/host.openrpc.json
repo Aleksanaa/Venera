@@ -135,6 +135,16 @@
           }
         },
         {
+          "name": "ancestors",
+          "required": false,
+          "schema": {
+            "items": {
+              "$ref": "#/components/schemas/InputProcessIdentity"
+            },
+            "type": "array"
+          }
+        },
+        {
           "name": "process",
           "required": false,
           "schema": {
@@ -168,6 +178,20 @@
             "type": [
               "string",
               "null"
+            ]
+          }
+        },
+        {
+          "name": "structured",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputStructuredEvent"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -259,6 +283,115 @@
       "InputEmpty": {
         "type": "object"
       },
+      "InputEventValue": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "uint8",
+                "type": "string"
+              },
+              "value": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "uint16",
+                "type": "string"
+              },
+              "value": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "uint32",
+                "type": "string"
+              },
+              "value": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "int32",
+                "type": "string"
+              },
+              "value": {
+                "format": "int32",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "uint64",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "ansi_string",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "InputFilter": {
         "properties": {
           "components": {
@@ -334,6 +467,12 @@
       },
       "InputLogRecord": {
         "properties": {
+          "ancestors": {
+            "items": {
+              "$ref": "#/components/schemas/InputProcessIdentity"
+            },
+            "type": "array"
+          },
           "component": {
             "type": "string"
           },
@@ -380,6 +519,16 @@
           "stream_id": {
             "type": "string"
           },
+          "structured": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputStructuredEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "text": {
             "type": "string"
           },
@@ -407,6 +556,16 @@
       },
       "InputProcessIdentity": {
         "properties": {
+          "boot_time_filetime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "exe_path": {
             "type": [
               "string",
@@ -418,7 +577,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "start_time_filetime": {
+          "start_key": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/InputDecimalU64"
@@ -427,6 +586,17 @@
                 "type": "null"
               }
             ]
+          },
+          "start_time_filetime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -463,11 +633,69 @@
         ],
         "type": "object"
       },
+      "InputStructuredEvent": {
+        "properties": {
+          "boot_time_filetime": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          },
+          "event_id": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fields": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/InputEventValue"
+            },
+            "type": "object"
+          },
+          "producer_instance": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          },
+          "producer_sequence": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "source_time_filetime": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          },
+          "version": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider",
+          "event_id",
+          "version",
+          "boot_time_filetime",
+          "producer_instance",
+          "producer_sequence",
+          "source_time_filetime",
+          "fields"
+        ],
+        "type": "object"
+      },
       "InputTarget": {
         "oneOf": [
           {
             "additionalProperties": false,
             "properties": {
+              "boot_time_filetime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InputDecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "include_descendants": {
                 "type": "boolean"
               },
@@ -479,6 +707,16 @@
                 "maximum": 4294967295,
                 "minimum": 0,
                 "type": "integer"
+              },
+              "start_key": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InputDecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "start_time_filetime": {
                 "$ref": "#/components/schemas/InputDecimalU64"

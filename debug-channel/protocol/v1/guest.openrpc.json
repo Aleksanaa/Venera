@@ -73,6 +73,25 @@
       }
     },
     {
+      "name": "forwarding.set",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "enabled",
+          "required": true,
+          "schema": {
+            "type": "boolean"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputStatus"
+        }
+      }
+    },
+    {
       "name": "system.info.get",
       "paramStructure": "by-name",
       "params": [],
@@ -80,6 +99,85 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/OutputSystemInfo"
+        }
+      }
+    },
+    {
+      "name": "history.range",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputHistoryRange"
+        }
+      }
+    },
+    {
+      "name": "history.read",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "limit",
+          "required": true,
+          "schema": {
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "after",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputHistoryCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        {
+          "name": "through",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputHistoryPage"
+        }
+      }
+    },
+    {
+      "name": "history.ack",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "cursor",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/InputHistoryCursor"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/OutputHistoryAck"
         }
       }
     },
@@ -155,11 +253,91 @@
         ],
         "type": "object"
       },
+      "InputForwardingSet": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "type": "object"
+      },
+      "InputHistoryAck": {
+        "properties": {
+          "cursor": {
+            "$ref": "#/components/schemas/InputHistoryCursor"
+          }
+        },
+        "required": [
+          "cursor"
+        ],
+        "type": "object"
+      },
+      "InputHistoryCursor": {
+        "properties": {
+          "journal_id": {
+            "type": "string"
+          },
+          "position": {
+            "$ref": "#/components/schemas/InputDecimalU64"
+          }
+        },
+        "required": [
+          "journal_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "InputHistoryRead": {
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputHistoryCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "through": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/InputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "limit"
+        ],
+        "type": "object"
+      },
       "InputTarget": {
         "oneOf": [
           {
             "additionalProperties": false,
             "properties": {
+              "boot_time_filetime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InputDecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "include_descendants": {
                 "type": "boolean"
               },
@@ -171,6 +349,16 @@
                 "maximum": 4294967295,
                 "minimum": 0,
                 "type": "integer"
+              },
+              "start_key": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/InputDecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "start_time_filetime": {
                 "$ref": "#/components/schemas/InputDecimalU64"
@@ -308,6 +496,115 @@
         ],
         "type": "string"
       },
+      "OutputEventValue": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "uint8",
+                "type": "string"
+              },
+              "value": {
+                "format": "uint8",
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "uint16",
+                "type": "string"
+              },
+              "value": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "uint32",
+                "type": "string"
+              },
+              "value": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "int32",
+                "type": "string"
+              },
+              "value": {
+                "format": "int32",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "uint64",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/components/schemas/OutputDecimalU64"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "ansi_string",
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "OutputFilter": {
         "properties": {
           "components": {
@@ -336,6 +633,210 @@
         ],
         "type": "object"
       },
+      "OutputGap": {
+        "properties": {
+          "count": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "first_seq": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_seq": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "stream_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "stream_id",
+          "reason",
+          "count",
+          "first_seq",
+          "last_seq"
+        ],
+        "type": "object"
+      },
+      "OutputHistoryAck": {
+        "properties": {
+          "cursor": {
+            "$ref": "#/components/schemas/OutputHistoryCursor"
+          }
+        },
+        "required": [
+          "cursor"
+        ],
+        "type": "object"
+      },
+      "OutputHistoryCursor": {
+        "properties": {
+          "journal_id": {
+            "type": "string"
+          },
+          "position": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          }
+        },
+        "required": [
+          "journal_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "OutputHistoryEvent": {
+        "oneOf": [
+          {
+            "properties": {
+              "record": {
+                "$ref": "#/components/schemas/OutputLogRecord"
+              },
+              "type": {
+                "const": "log",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "record"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "gap": {
+                "$ref": "#/components/schemas/OutputGap"
+              },
+              "type": {
+                "const": "gap",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "gap"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "OutputHistoryMissing": {
+        "properties": {
+          "first": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "last": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "first",
+          "last",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "OutputHistoryPage": {
+        "properties": {
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/OutputHistoryMissing"
+            },
+            "type": "array"
+          },
+          "next": {
+            "$ref": "#/components/schemas/OutputHistoryCursor"
+          },
+          "range": {
+            "$ref": "#/components/schemas/OutputHistoryRange"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/OutputHistoryRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "range",
+          "records",
+          "missing",
+          "next"
+        ],
+        "type": "object"
+      },
+      "OutputHistoryRange": {
+        "properties": {
+          "high_water": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "journal_id": {
+            "type": "string"
+          },
+          "oldest": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          }
+        },
+        "required": [
+          "journal_id",
+          "oldest",
+          "high_water"
+        ],
+        "type": "object"
+      },
+      "OutputHistoryRecord": {
+        "properties": {
+          "boot_id": {
+            "type": "string"
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/OutputHistoryCursor"
+          },
+          "event": {
+            "$ref": "#/components/schemas/OutputHistoryEvent"
+          },
+          "recorded_at_ms": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "startup": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cursor",
+          "boot_id",
+          "recorded_at_ms",
+          "startup",
+          "event"
+        ],
+        "type": "object"
+      },
       "OutputLocalizedMessage": {
         "properties": {
           "args": {
@@ -358,6 +859,99 @@
         "required": [
           "id",
           "args"
+        ],
+        "type": "object"
+      },
+      "OutputLogRecord": {
+        "properties": {
+          "ancestors": {
+            "items": {
+              "$ref": "#/components/schemas/OutputProcessIdentity"
+            },
+            "type": "array"
+          },
+          "component": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "process": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputProcessIdentity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "raw_level": {
+            "type": "string"
+          },
+          "seq": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "session_id": {
+            "default": null,
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          },
+          "source_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stream_id": {
+            "type": "string"
+          },
+          "structured": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputStructuredEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "tid": {
+            "default": null,
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "stream_id",
+          "seq",
+          "observed_at",
+          "source_time",
+          "source",
+          "component",
+          "level",
+          "raw_level",
+          "session_id",
+          "process",
+          "tid",
+          "text"
         ],
         "type": "object"
       },
@@ -399,6 +993,58 @@
         ],
         "type": "string"
       },
+      "OutputProcessIdentity": {
+        "properties": {
+          "boot_time_filetime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exe_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pid": {
+            "maximum": 4294967295,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_key": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "start_time_filetime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputDecimalU64"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "pid",
+          "start_time_filetime",
+          "exe_path"
+        ],
+        "type": "object"
+      },
       "OutputStatus": {
         "properties": {
           "effective_filter": {
@@ -426,6 +1072,54 @@
           "expires_at",
           "health",
           "loss"
+        ],
+        "type": "object"
+      },
+      "OutputStructuredEvent": {
+        "properties": {
+          "boot_time_filetime": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "event_id": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fields": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/OutputEventValue"
+            },
+            "type": "object"
+          },
+          "producer_instance": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "producer_sequence": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "source_time_filetime": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "version": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider",
+          "event_id",
+          "version",
+          "boot_time_filetime",
+          "producer_instance",
+          "producer_sequence",
+          "source_time_filetime",
+          "fields"
         ],
         "type": "object"
       },
@@ -542,6 +1236,16 @@
           {
             "additionalProperties": false,
             "properties": {
+              "boot_time_filetime": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OutputDecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "include_descendants": {
                 "type": "boolean"
               },
@@ -553,6 +1257,16 @@
                 "maximum": 4294967295,
                 "minimum": 0,
                 "type": "integer"
+              },
+              "start_key": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OutputDecimalU64"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "start_time_filetime": {
                 "$ref": "#/components/schemas/OutputDecimalU64"

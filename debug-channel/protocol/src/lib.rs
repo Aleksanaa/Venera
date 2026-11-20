@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod client;
 pub mod v1;
 
 pub const MAJOR: u32 = 1;
@@ -74,30 +75,22 @@ pub enum Message {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LogRecord {
-    pub stream_id: String,
-    #[serde(deserialize_with = "integer::u64")]
-    pub seq: u64,
-    pub observed_at: String,
-    pub source_time: Option<String>,
-    pub source: String,
-    pub component: String,
-    pub level: String,
-    pub raw_level: String,
-    #[serde(default, deserialize_with = "integer::optional_u32")]
-    pub session_id: Option<u32>,
-    pub process: Option<ProcessIdentity>,
-    #[serde(default, deserialize_with = "integer::optional_u32")]
-    pub tid: Option<u32>,
-    pub text: String,
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub use v1::LogRecord;
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProcessIdentity {
-    #[serde(deserialize_with = "integer::u32")]
+    #[cfg_attr(feature = "schema", schemars(schema_with = "v1::u32_schema"))]
     pub pid: u32,
+    #[serde(default, with = "v1::optional_filetime")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<v1::DecimalU64>"))]
     pub start_time_filetime: Option<String>,
     pub exe_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "v1::optional_filetime")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<v1::DecimalU64>"))]
+    pub boot_time_filetime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "v1::optional_filetime")]
+    #[cfg_attr(feature = "schema", schemars(with = "Option<v1::DecimalU64>"))]
+    pub start_key: Option<String>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Filter {
@@ -113,6 +106,10 @@ pub enum Target {
         pid: u32,
         start_time_filetime: String,
         include_descendants: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boot_time_filetime: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_key: Option<String>,
     },
     ExePath {
         path: String,
@@ -356,10 +353,14 @@ pub fn matches_filter(filter: &Filter, record: &LogRecord, ancestors: &[ProcessI
                         pid,
                         start_time_filetime,
                         include_descendants,
+                        boot_time_filetime,
+                        start_key,
                     } => {
                         let same = |p: &ProcessIdentity| {
-                            p.pid == *pid
+                            (start_key.is_none() || boot_time_filetime.is_some()) && p.pid == *pid
                                 && p.start_time_filetime.as_ref() == Some(start_time_filetime)
+                                && boot_time_filetime.as_ref().is_none_or(|boot| p.boot_time_filetime.as_ref() == Some(boot))
+                                && start_key.as_ref().is_none_or(|key| p.start_key.as_ref() == Some(key))
                         };
                         same(p) || (*include_descendants && ancestors.iter().any(same))
                     }

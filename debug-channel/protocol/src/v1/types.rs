@@ -88,6 +88,34 @@ impl<'de> Deserialize<'de> for DecimalU64 {
     }
 }
 
+mod sequence {
+    use super::*;
+    pub fn serialize<S: Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
+        DecimalU64(*value).serialize(serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
+        DecimalU64::deserialize(de).map(|value| value.0)
+    }
+}
+
+pub mod optional_filetime {
+    use super::*;
+    pub fn serialize<S: Serializer>(
+        value: &Option<String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .as_deref()
+            .map(str::parse::<DecimalU64>)
+            .transpose()
+            .map_err(|_| serde::ser::Error::custom("invalid internal FILETIME"))?
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Option<String>, D::Error> {
+        Option::<DecimalU64>::deserialize(de).map(|value| value.map(|value| value.to_string()))
+    }
+}
+
 #[cfg(feature = "schema")]
 impl schemars::JsonSchema for DecimalU64 {
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -115,7 +143,7 @@ impl schemars::JsonSchema for DecimalU64 {
 }
 
 #[cfg(feature = "schema")]
-fn u32_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub fn u32_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({"type": "integer", "minimum": 0, "maximum": u32::MAX})
 }
 #[cfg(feature = "schema")]
@@ -145,6 +173,10 @@ pub enum Target {
         pid: u32,
         start_time_filetime: DecimalU64,
         include_descendants: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        boot_time_filetime: Option<DecimalU64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_key: Option<DecimalU64>,
     },
     ExePath {
         path: String,
@@ -159,6 +191,11 @@ pub struct FilterSet {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ForwardingSet {
+    pub enabled: bool,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Status {
     pub forwarding_enabled: bool,
     pub revision: DecimalU64,
@@ -167,19 +204,39 @@ pub struct Status {
     pub health: Value,
     pub loss: Value,
 }
+pub use crate::ProcessIdentity;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct ProcessIdentity {
-    #[cfg_attr(feature = "schema", schemars(schema_with = "u32_schema"))]
-    pub pid: u32,
-    pub start_time_filetime: Option<DecimalU64>,
-    pub exe_path: Option<String>,
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum EventValue {
+    Uint8(u8),
+    Uint16(u16),
+    Uint32(u32),
+    Int32(i32),
+    Uint64(DecimalU64),
+    AnsiString(String),
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct StructuredEvent {
+    pub provider: String,
+    pub event_id: u16,
+    pub version: u8,
+    pub boot_time_filetime: DecimalU64,
+    pub producer_instance: DecimalU64,
+    pub producer_sequence: DecimalU64,
+    pub source_time_filetime: DecimalU64,
+    pub fields: std::collections::BTreeMap<String, EventValue>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LogRecord {
     pub stream_id: String,
-    pub seq: DecimalU64,
+    #[serde(with = "sequence")]
+    #[cfg_attr(feature = "schema", schemars(with = "DecimalU64"))]
+    pub seq: u64,
     pub observed_at: String,
     pub source_time: Option<String>,
     pub source: String,
@@ -190,10 +247,14 @@ pub struct LogRecord {
     #[serde(default)]
     pub session_id: Option<u32>,
     pub process: Option<ProcessIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ancestors: Vec<ProcessIdentity>,
     #[cfg_attr(feature = "schema", schemars(schema_with = "optional_u32_schema"))]
     #[serde(default)]
     pub tid: Option<u32>,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<StructuredEvent>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -203,6 +264,71 @@ pub struct Gap {
     pub count: Option<DecimalU64>,
     pub first_seq: Option<DecimalU64>,
     pub last_seq: Option<DecimalU64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoryCursor {
+    pub journal_id: String,
+    pub position: DecimalU64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HistoryEvent {
+    Log { record: LogRecord },
+    Gap { gap: Gap },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoryRecord {
+    pub cursor: HistoryCursor,
+    pub boot_id: String,
+    pub recorded_at_ms: DecimalU64,
+    pub startup: bool,
+    pub event: HistoryEvent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoryRange {
+    pub journal_id: String,
+    pub oldest: DecimalU64,
+    pub high_water: DecimalU64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoryRead {
+    pub after: Option<HistoryCursor>,
+    pub through: Option<DecimalU64>,
+    #[cfg_attr(feature = "schema", schemars(schema_with = "u32_schema"))]
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoryMissing {
+    pub first: DecimalU64,
+    pub last: DecimalU64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoryPage {
+    pub range: HistoryRange,
+    pub records: Vec<HistoryRecord>,
+    pub missing: Vec<HistoryMissing>,
+    pub next: HistoryCursor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct HistoryAck {
+    pub cursor: HistoryCursor,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

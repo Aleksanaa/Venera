@@ -18,6 +18,12 @@ fn shared_codec_samples() {
             "Gap" => accepts::<Gap>(value),
             "Empty" => accepts::<Empty>(value),
             "SystemInfo" => accepts::<SystemInfo>(value),
+            "HistoryCursor" => accepts::<HistoryCursor>(value),
+            "HistoryRecord" => accepts::<HistoryRecord>(value),
+            "HistoryRead" => accepts::<HistoryRead>(value),
+            "HistoryPage" => accepts::<HistoryPage>(value),
+            "HistoryRange" => accepts::<HistoryRange>(value),
+            "HistoryAck" => accepts::<HistoryAck>(value),
             other => panic!("unknown sample type {other}"),
         };
         assert_eq!(accepted, sample["serde"].as_bool().unwrap(), "{sample}");
@@ -139,7 +145,7 @@ fn typed_handlers_dispatch_requests_and_events() {
         handler.events,
         vec![
             json!({"revision":"9"}),
-            json!({"seq":"18446744073709551615","text":"ready"}),
+            json!({"seq":18446744073709551615u64,"text":"ready"}),
             json!({"count":"3"})
         ]
     );
@@ -149,6 +155,36 @@ fn typed_handlers_dispatch_requests_and_events() {
     assert_eq!(
         reply["result"]["info"],
         json!({"title":"Venera guest","version":"1.0.0"})
+    );
+}
+
+#[test]
+fn existing_handlers_return_method_not_found_for_history() {
+    let mut handler = Recorder::default();
+    for (method, params) in [
+        ("history.range", json!({})),
+        ("history.read", json!({"limit":1})),
+        (
+            "history.ack",
+            json!({"cursor":{"journal_id":"j","position":"0"}}),
+        ),
+    ] {
+        let request = json!({"jsonrpc":"2.0","id":"h","method":method,"params":params});
+        assert_eq!(
+            execute_packet(&request.to_string(), &mut handler),
+            Some(
+                json!({"jsonrpc":"2.0","id":"h","error":{"code":-32601,"message":"Method not found"}})
+            )
+        );
+    }
+    assert_eq!(
+        execute_packet(
+            r#"{"jsonrpc":"2.0","id":"old","method":"endpoint.info"}"#,
+            &mut handler
+        ),
+        Some(
+            json!({"jsonrpc":"2.0","id":"old","result":{"role":"guest","software_version":"0.9.0","protocol_version":"1.0.0"}})
+        )
     );
 }
 
@@ -230,11 +266,14 @@ fn discovery_methods_decode_to_the_registered_handler_branches() {
         for method in document.methods {
             let params = match method.name.as_str() {
                 "filter.set" => json!({"filter":{"components":[],"levels":[],"targets":[]}}),
+                "forwarding.set" => json!({"enabled":true}),
                 "status.changed" => serde_json::to_value(status()).unwrap(),
                 "log" => {
                     json!({"stream_id":"s","seq":"0","observed_at":"now","source":"dbwin","component":"umd","level":"debug","raw_level":"TRACE","text":"ready"})
                 }
                 "gap" => json!({"stream_id":"s","reason":"overflow"}),
+                "history.read" => json!({"limit":32}),
+                "history.ack" => json!({"cursor":{"journal_id":"j","position":"9"}}),
                 _ => json!({}),
             };
             let mut wire = json!({"jsonrpc":"2.0","method":method.name,"params":params});
@@ -254,7 +293,11 @@ fn discovery_methods_decode_to_the_registered_handler_branches() {
                     "status.get",
                     "filter.set",
                     "filter.reset",
+                    "forwarding.set",
                     "system.info.get",
+                    "history.range",
+                    "history.read",
+                    "history.ack",
                     "rpc.discover"
                 ],
                 Receiver::Host => vec![
