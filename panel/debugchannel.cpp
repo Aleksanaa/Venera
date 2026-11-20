@@ -3,11 +3,23 @@
 #include "debugjson.h"
 #include <shellapi.h>
 #include <algorithm>
+#include <cstdio>
 
 namespace panel {
 namespace {
 using debugjson::Value;
 std::wstring field(const Value& v) { return widen(v.text); }
+SYSTEMTIME observedTime(const std::string& text) {
+    SYSTEMTIME utc={}, local={};
+    if(std::sscanf(text.c_str(), "%4hu-%2hu-%2huT%2hu:%2hu:%2hu",
+                   &utc.wYear,&utc.wMonth,&utc.wDay,&utc.wHour,&utc.wMinute,&utc.wSecond)!=6) return utc;
+    if(text.size()>20 && text[19]=='.') {
+        unsigned millis=0, scale=100;
+        for(size_t i=20;i<text.size() && scale && text[i]>='0' && text[i]<='9';++i,scale/=10) millis+=(text[i]-'0')*scale;
+        utc.wMilliseconds=static_cast<WORD>(millis);
+    }
+    return SystemTimeToTzSpecificLocalTime(nullptr,&utc,&local)?local:utc;
+}
 std::wstring winError(DWORD code) {
     wchar_t* text=nullptr;
     FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS,
@@ -105,7 +117,7 @@ std::wstring selection(const Value& v) {
 }
 DebugStatus status(const Value& v) {
     DebugStatus s;
-    if(v["forwarding_enabled"].type!=Value::Bool || v["revision"].type!=Value::Number ||
+    if(v["forwarding_enabled"].type!=Value::Bool || v["revision"].type!=Value::String ||
        v["effective_filter"].type!=Value::Object || v["health"].type!=Value::Object) {
         s.error={IDS_DebugStatusInvalid}; return s;
     }
@@ -163,6 +175,7 @@ void GuestLogs::start(std::function<void(LogLine&&)> sink) {
             if(v["type"].text=="status") return;
             LogLine l={}; GetLocalTime(&l.time);
             if(v["type"].text=="log" && v["text"].type==Value::String) {
+                l.time=observedTime(v["observed_at"].text);
                 l.component=field(v["component"]); l.text=field(v["text"]);
                 l.level=v["level"].text=="error"?2:v["level"].text=="warn"||v["level"].text=="warning"?1:0;
                 l.pid=std::strtoul(v["process"]["pid"].text.c_str(),nullptr,10);
