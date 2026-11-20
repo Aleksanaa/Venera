@@ -38,6 +38,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include "capture.h"
 
 namespace fs = std::filesystem;
 
@@ -63,6 +64,23 @@ std::wstring staging_dir()
 std::wstring install_dir()
 {
     return known_folder(FOLDERID_ProgramFiles) + L"\\Venera";
+}
+
+void configure_capture(bool enabled)
+{
+    const auto directory = known_folder(FOLDERID_ProgramData) + L"\\Venera\\DebugCapture";
+    DWORD code;
+    if (enabled) {
+        std::error_code error;
+        fs::create_directories(directory, error);
+        if (error) fail(L"Creating the kernel capture directory failed", error.value());
+        code = capture::configure(capture::primary, directory, false);
+        if (!code) code = capture::configure(capture::legacy, directory, true);
+    } else {
+        code = capture::remove(capture::primary, L"VeneraKernelLog", directory);
+        if (!code) code = capture::remove(capture::legacy, L"NT Kernel Logger", directory);
+    }
+    if (code) fail(L"Updating kernel capture failed", code);
 }
 
 // --- The payload
@@ -1088,6 +1106,9 @@ bool install(const SystemState& state, const std::wstring& version, const Progre
         }
         if (collector.empty() || !fs::is_regular_file(collector))
             fail(L"Repair Graphics to restore the debug collector files", ERROR_FILE_NOT_FOUND);
+        DWORD prepared = run(collector, L"prepare-history");
+        if (prepared) fail(L"Preparing captured history failed", prepared);
+        configure_capture(true);
         SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
         if (!scm)
             fail(L"Opening Windows services failed");
@@ -1139,6 +1160,7 @@ bool install(const SystemState& state, const std::wstring& version, const Progre
     } else if (!plan.selected.collector) {
         progress(90, L"Removing the debug collector");
         stop_debug_service(true);
+        configure_capture(false);
     }
     recorded = components::completed(recorded, plan.selected, false, true, true);
     save_selection();
@@ -1179,6 +1201,7 @@ bool uninstall(const Progress& progress)
 {
     progress(5, L"Removing the debug collector");
     stop_debug_service(true);
+    configure_capture(false);
     progress(10, L"Switching the VirtIO GPU to Microsoft Basic Display, from the next boot");
     int devices = install_on_devices(inf_dir() + L"\\display.inf", true);
     log(format(L"Switched %d VirtIO GPU(s) to Microsoft Basic Display; it starts at the next boot", devices));

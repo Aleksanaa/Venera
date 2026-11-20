@@ -45,7 +45,7 @@ std::wstring format(const wchar_t* fmt, ...);
 std::wstring known_folder(const KNOWNFOLDERID& id);
 std::wstring system_dir();
 std::wstring self_path();
-// Runs a program from System32 hidden, waits for it, and returns its exit code; its output goes to the log.
+// Runs an absolute program path or a System32 tool, waits for it, and logs its output.
 DWORD run(const std::wstring& exe, const std::wstring& args);
 // Compares the four numbers of dotted versions ("0.1.0.85.1a2b3c4"); the commit hash after them does not rank.
 int compare_versions(const std::wstring& a, const std::wstring& b);

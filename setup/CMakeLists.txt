@@ -20,7 +20,8 @@ set(payload "${VENERA_KMD_SYS}" "${VENERA_ICD_DIR}/venera_vulkan_virtio.dll" "${
     "${CMAKE_SOURCE_DIR}/pkg/venera_vulkan_virtio.json" "${CMAKE_SOURCE_DIR}/pkg/venera_vulkan_virtio_32.json"
     $<TARGET_FILE:venera_d3d11> $<TARGET_FILE:venera_d3d12> ${VENERA_UMD32_DLLS}
     $<TARGET_FILE:vgpusrv> $<TARGET_FILE:viogpuap>
-    $<TARGET_FILE:venera-panel> $<TARGET_FILE:venera-panel-com> "${VENERA_DEBUG_GUEST_EXE}")
+    $<TARGET_FILE:venera-panel> $<TARGET_FILE:venera-panel-com> "${VENERA_DEBUG_GUEST_EXE}"
+    "${CMAKE_SOURCE_DIR}/kmd/logging/generated/venera-recorder.tmf")
 foreach(f "${VENERA_KMD_SYS}" "${VENERA_ICD_DIR}/venera_vulkan_virtio.dll"
           "${VENERA_ICD_DIR}/venera_vulkan_virtio_32.dll")
   if(NOT EXISTS "${f}")
@@ -99,7 +100,7 @@ endforeach()
 write_if_changed("${CMAKE_CURRENT_BINARY_DIR}/licenses.rc" "${license_rc}")
 
 enable_language(RC)
-add_executable(venera-setup WIN32 main.cpp system.cpp install.cpp uninstaller-copy.cpp ui.cpp setup.rc
+add_executable(venera-setup WIN32 main.cpp run.cpp system.cpp install.cpp uninstaller-copy.cpp ui.cpp setup.rc
     "${CMAKE_CURRENT_BINARY_DIR}/payload.rc" "${CMAKE_CURRENT_BINARY_DIR}/licenses.rc")
 # The WIM holds the panel: it has to be built first.
 add_dependencies(venera-setup venera-panel venera-panel-com venera-debug-guest)
