@@ -40,7 +40,7 @@ add_library(venera-umd-common STATIC
     common/vulkan_device.cpp
     common/vulkan_icd.cpp)
 target_include_directories(venera-umd-common PUBLIC common)
-target_link_libraries(venera-umd-common PUBLIC venera-vulkan-headers)
+target_link_libraries(venera-umd-common PUBLIC venera-vulkan-headers advapi32)
 target_compile_options(venera-umd-common PRIVATE ${VENERA_UMD_WARNINGS} ${VENERA_UMD_WDK_INCLUDES})
 
 add_subdirectory(d3d12)

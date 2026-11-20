@@ -2,7 +2,9 @@
 #include "log.h"
 
 #include <windows.h>
+#include <evntprov.h>
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -14,8 +16,48 @@ namespace {
 
 std::mutex g_lock;
 HANDLE g_file = INVALID_HANDLE_VALUE;
-bool g_verbose = false;
+std::atomic<bool> g_verbose{false};
 const char* g_component = "venera";
+bool g_initialized = false;
+USHORT g_event_id = 0;
+ULONGLONG g_process_created = 0;
+ULONGLONG g_sequence = 0;
+
+constexpr GUID kLogProvider = {0x6c5a2378, 0x22b9, 0x4c10, {0xa9, 0x1f, 0x69, 0xe3, 0x4c, 0x28, 0x0b, 0x81}};
+
+// Each pinned UMD owns this registration through process teardown.
+struct Registration {
+    REGHANDLE handle = 0;
+    ~Registration()
+    {
+        const REGHANDLE registered = handle;
+        handle = 0;
+        if (registered)
+            EventUnregister(registered);
+    }
+} g_registration;
+
+ULONGLONG filetime_value(const FILETIME& t)
+{
+    return (static_cast<ULONGLONG>(t.dwHighDateTime) << 32) | t.dwLowDateTime;
+}
+
+bool emit(LogLevel level, ULONGLONG timestamp, const char* body)
+{
+    ++g_sequence;
+    if (!g_registration.handle || !g_process_created || !g_event_id)
+        return false;
+    const EVENT_DESCRIPTOR event{g_event_id, 1, 0, static_cast<UCHAR>(2 + static_cast<int>(level)), 0, 0, 1};
+    if (!EventEnabled(g_registration.handle, &event))
+        return false;
+    EVENT_DATA_DESCRIPTOR data[5];
+    EventDataDescCreate(&data[0], &timestamp, sizeof(timestamp));
+    EventDataDescCreate(&data[1], &g_process_created, sizeof(g_process_created));
+    EventDataDescCreate(&data[2], &g_sequence, sizeof(g_sequence));
+    EventDataDescCreate(&data[3], g_component, static_cast<ULONG>(std::strlen(g_component) + 1));
+    EventDataDescCreate(&data[4], body, static_cast<ULONG>(std::strlen(body) + 1));
+    return EventWrite(g_registration.handle, &event, 5, data) == ERROR_SUCCESS;
+}
 
 constexpr const char* kKey = "SOFTWARE\\Venera";
 
@@ -68,7 +110,22 @@ void log_file_beside(const char* name, const char* suffix)
 void log_init(const char* component)
 {
     std::lock_guard lock(g_lock);
-    g_component = component;
+    if (!g_initialized) {
+        g_initialized = true;
+        if (std::strcmp(component, "venera_d3d11") == 0) {
+            g_component = "venera_d3d11";
+            g_event_id = 5;
+        } else if (std::strcmp(component, "venera_d3d12") == 0) {
+            g_component = "venera_d3d12";
+            g_event_id = 6;
+        }
+        FILETIME created, exited, kernel, user;
+        if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+            g_process_created = filetime_value(created);
+        REGHANDLE handle = 0;
+        if (g_event_id && EventRegister(&kLogProvider, nullptr, nullptr, &handle) == ERROR_SUCCESS)
+            g_registration.handle = handle;
+    }
     if (g_file != INVALID_HANDLE_VALUE)
         return;
     char path[MAX_PATH];
@@ -84,7 +141,7 @@ void log_init(const char* component)
     g_verbose = setting("VENERA_VERBOSE", v, sizeof(v)) && v[0] == '1';
 }
 
-bool verbose() { return g_verbose; }
+bool verbose() { return g_verbose.load(std::memory_order_relaxed); }
 
 void logf(LogLevel level, const char* fmt, ...)
 {
@@ -95,6 +152,9 @@ void logf(LogLevel level, const char* fmt, ...)
     std::vsnprintf(body, sizeof(body), fmt, ap);
     va_end(ap);
 
+    FILETIME timestamp;
+    GetSystemTimePreciseAsFileTime(&timestamp);
+    std::lock_guard lock(g_lock);
     // Local wall-clock time, to line up with logs from the host.
     SYSTEMTIME t;
     GetLocalTime(&t);
@@ -102,8 +162,8 @@ void logf(LogLevel level, const char* fmt, ...)
     std::snprintf(line, sizeof(line), "%02u:%02u:%02u.%03u %s[%lu:%lu] %s %s\n", t.wHour, t.wMinute, t.wSecond,
                   t.wMilliseconds, g_component, GetCurrentProcessId(), GetCurrentThreadId(),
                   names[static_cast<int>(level)], body);
-    OutputDebugStringA(line);
-    std::lock_guard lock(g_lock);
+    if (!emit(level, filetime_value(timestamp), body))
+        OutputDebugStringA(line);
     if (g_file != INVALID_HANDLE_VALUE) {
         DWORD written;
         WriteFile(g_file, line, static_cast<DWORD>(std::strlen(line)), &written, nullptr);
