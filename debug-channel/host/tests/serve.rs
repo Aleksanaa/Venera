@@ -84,7 +84,7 @@ fn serve_cli_reports_minimum_archive_capacity() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("73784"), "{error}");
+    assert!(error.contains("81984"), "{error}");
 }
 
 #[cfg(not(feature = "web"))]
@@ -551,7 +551,7 @@ fn injected_service() {
         dir.join("history.db"),
         std::env::var("VENERA_TEST_BUDGET")
             .unwrap()
-            .parse()
+            .parse::<u64>()
             .unwrap(),
         dir.join("control.sock"),
         Some(dir),

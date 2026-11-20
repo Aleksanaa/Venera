@@ -1,6 +1,6 @@
 # Venera Host Debug History
 
-The host service connects to a Windows guest over VirtIO sockets, saving guest logs, effective filters, connection changes, and channel diagnostics. SQLite stores history in reception order and evicts the oldest records when the capacity budget is reached. The same service provides the browser workbench and command-line controls.
+The host service connects to a Windows guest over VirtIO sockets, saving guest logs, effective filters, connection changes, and channel diagnostics. SQLite stores history in reception order and evicts the oldest records when a configured capacity budget is reached. The same service provides the browser workbench and command-line controls.
 
 ## Build and Run
 
@@ -19,11 +19,11 @@ venera-debug-host serve --cid 73 --database ./history.db
 
 When serving by name, the host tracks the domain UUID and refreshes its live CID whenever the control or history stream reconnects. The default database is `$XDG_DATA_HOME/venera/<domain-uuid>/history.db` (`XDG_DATA_HOME` defaults to `~/.local/share`). Renaming the guest preserves its archive.
 
-The service defaults to a 1 GiB history budget, guest port `49152`, and control socket `$XDG_RUNTIME_DIR/venera/control.sock` (runtime directory fallback: `/run/user/<uid>`). The host creates the directories for its default paths. Use `--database`, `--max-bytes`, `--port`, `--control`, and `--listen` to customize a deployment. Give concurrent services separate control sockets and listen addresses.
+The service defaults to guest port `49152`, and control socket `$XDG_RUNTIME_DIR/venera/control.sock` (runtime directory fallback: `/run/user/<uid>`). The host creates the directories for its default paths. Use `--database`, `--max-bytes`, `--port`, `--control`, and `--listen` to customize a deployment. Give concurrent services separate control sockets and listen addresses.
 
 The dashboard loads from `../share/venera/web` relative to the executable directory, or from `debug-channel/web/dist` for a source build (`nix develop -c scripts/build workbench`). Use `--assets DIR` to choose another frontend or `--no-web` for collection alone.
 
-`--max-bytes` is the total capacity budget for the history database and SQLite workspace, with a minimum of 73784 bytes. Transaction workspace is reserved within it, and history data uses the remaining capacity. History is evicted in batches starting with the oldest records, and database pages are reclaimed on commit. Archive reads adapt their page size to the available capacity and resume from committed progress. Connection status includes archive progress and diagnostic-write status.
+The archive grows with the available filesystem space by default. Set `--max-bytes` to choose the total capacity budget for the history database and SQLite workspace, with a minimum of 81984 bytes. Transaction workspace is reserved within it, and history data uses the remaining capacity. History is evicted in batches starting with the oldest records, and database pages are reclaimed on commit. Archive reads adapt their page size to the available capacity and resume from committed progress. Connection status includes archive progress and diagnostic-write status.
 
 ## User Service Deployment
 
@@ -39,7 +39,6 @@ python3 scripts/venera-debug-host-service \
   --cid 73 --port 49152 \
   --control "$XDG_RUNTIME_DIR/venera/control.sock" \
   --database "$HOME/.local/share/venera/history.db" \
-  --max-bytes 1073741824 \
   --assets "$HOME/.local/share/venera/web" \
   --listen 127.0.0.1:8787 \
   --output "$HOME/.config/systemd/user/venera-debug-host.service"

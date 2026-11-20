@@ -6,7 +6,19 @@ use venera_debug_protocol::v1::{DecimalU64, HistoryCursor, HistoryEvent, History
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub const MIN_STORAGE_BYTES: u64 = 16384 + 7 * (2 * 4096 + 8);
+pub const MIN_STORAGE_BYTES: u64 = 16384 + 8 * (2 * 4096 + 8);
+
+const EVENTS: &str = "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, message TEXT NOT NULL, raw_message TEXT)";
+const DIAGNOSTIC: &str = "INSERT INTO events(received_at,message,raw_message) VALUES (?1,?2,?3)";
+
+#[derive(Debug)]
+pub(super) struct DiagnosticCapacity;
+impl std::fmt::Display for DiagnosticCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("storage budget cannot hold this diagnostic")
+    }
+}
+impl std::error::Error for DiagnosticCapacity {}
 
 #[derive(Debug)]
 pub(super) struct HistoryCapacity;
@@ -31,17 +43,20 @@ pub fn now() -> String {
 
 pub struct Store {
     db: Connection,
+    pages: Option<u64>,
 }
 impl Store {
-    pub fn open(path: &Path, max_bytes: u64) -> Result<Self> {
-        if max_bytes < MIN_STORAGE_BYTES {
+    pub fn open(path: &Path, max_bytes: impl Into<Option<u64>>) -> Result<Self> {
+        let max_bytes = max_bytes.into();
+        if max_bytes.is_some_and(|n| n < MIN_STORAGE_BYTES) {
             return Err(
                 format!("storage budget must be at least {MIN_STORAGE_BYTES} bytes").into(),
             );
         }
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(2))?;
-        db.execute_batch("PRAGMA page_size=4096; PRAGMA auto_vacuum=FULL; PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, message TEXT NOT NULL, raw_message TEXT);")?;
+        db.execute_batch("PRAGMA page_size=4096; PRAGMA auto_vacuum=FULL; PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=FULL;")?;
+        db.execute_batch(EVENTS)?;
         let mode: String = db.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
         let synchronous: u32 = db.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
         if mode != "truncate" || synchronous != 2 {
@@ -61,53 +76,41 @@ impl Store {
         if auto != 1 {
             return Err("database requires FULL auto_vacuum".into());
         }
-        let store = Self { db };
-        let pages = (max_bytes - 16384) / (2 * 4096 + 8);
-        while store
-            .db
-            .query_row("PRAGMA page_count", [], |row| row.get::<_, u64>(0))?
-            > pages
-        {
-            if !store.evict()? {
-                return Err("storage budget cannot hold the database metadata".into());
-            }
-        }
-        store.db.pragma_update(None, "max_page_count", pages)?;
-        let sql: String = store.db.query_row(
+        let pages = max_bytes.map(|n| ((n - 16384) / (2 * 4096 + 8)).min(0xfffffffe));
+        let store = Self { db, pages };
+        let tx = rusqlite::Transaction::new_unchecked(
+            &store.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let sql: String = tx.query_row(
             "SELECT sql FROM sqlite_master WHERE name='events'",
             [],
             |r| r.get(0),
         )?;
         if !sql.to_uppercase().contains("AUTOINCREMENT") {
-            loop {
-                match store.db.execute_batch("BEGIN IMMEDIATE; ALTER TABLE events RENAME TO events_previous; CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, message TEXT NOT NULL, raw_message TEXT); INSERT INTO events(id,received_at,message,raw_message) SELECT id,received_at,message,raw_message FROM events_previous ORDER BY id; DROP TABLE events_previous; COMMIT;") {
-                    Ok(()) => break,
-                    Err(Error::SqliteFailure(error, _)) if error.code == ErrorCode::DiskFull => {
-                        let _ = store.db.execute_batch("ROLLBACK");
-                        if !store.evict()? { return Err("storage budget cannot hold the database metadata".into()); }
-                    }
-                    Err(error) => return Err(error.into()),
+            tx.execute_batch("ALTER TABLE events RENAME TO events_previous; CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT NOT NULL, message TEXT NOT NULL, raw_message TEXT); INSERT INTO events(id,received_at,message,raw_message) SELECT id,received_at,message,raw_message FROM events_previous ORDER BY id; DROP TABLE events_previous;")?;
+        }
+        Self::migrate_history(&tx)?;
+        if let Some(pages) = pages {
+            while tx.query_row(
+                "SELECT page_count-freelist_count FROM pragma_page_count,pragma_freelist_count",
+                [],
+                |r| r.get::<_, u64>(0),
+            )? > pages
+            {
+                if tx.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT MAX(1,(SELECT COUNT(*)/10 FROM events)))", [])? == 0 {
+                    return Err("storage budget cannot hold the database metadata".into());
                 }
             }
         }
-        loop {
-            match store.migrate_history() {
-                Ok(()) => break,
-                Err(error) if error.downcast_ref::<Error>().is_some_and(|error| {
-                    matches!(error, Error::SqliteFailure(e, _) if e.code == ErrorCode::DiskFull)
-                }) => {
-                    if !store.evict()? {
-                        return Err("storage budget cannot hold the database metadata".into());
-                    }
-                }
-                Err(error) => return Err(error),
-            }
+        tx.commit()?;
+        if let Some(pages) = pages {
+            store.db.pragma_update(None, "max_page_count", pages)?;
         }
         Ok(store)
     }
 
-    fn migrate_history(&self) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
+    fn migrate_history(tx: &Connection) -> Result<()> {
         for column in ["journal_id", "position"] {
             let exists: bool = tx.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name=?1",
@@ -119,11 +122,14 @@ impl Store {
             }
         }
         tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS events_history_identity ON events(journal_id,position); CREATE TABLE IF NOT EXISTS history_checkpoints(journal_id TEXT PRIMARY KEY, position TEXT NOT NULL);")?;
-        tx.commit()?;
+        if !tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_missing')", [], |r| r.get::<_,bool>(0))? {
+            tx.execute_batch("CREATE TABLE history_missing(id INTEGER PRIMARY KEY,journal_id TEXT NOT NULL,received_at TEXT NOT NULL,first TEXT NOT NULL,last TEXT NOT NULL);
+                INSERT INTO history_missing SELECT id,journal_id,received_at,json_extract(message,'$.first_position'),json_extract(message,'$.last_position') FROM events WHERE journal_id IS NOT NULL AND position IS NULL AND raw_message IS NULL AND json_extract(message,'$.reason')='retention_expired';")?;
+        }
+        tx.execute_batch("CREATE TRIGGER IF NOT EXISTS record_history_missing AFTER INSERT ON events
+            WHEN NEW.journal_id IS NOT NULL AND NEW.position IS NULL AND NEW.raw_message IS NULL AND json_extract(NEW.message,'$.reason')='retention_expired'
+            BEGIN INSERT INTO history_missing VALUES(NEW.id,NEW.journal_id,NEW.received_at,json_extract(NEW.message,'$.first_position'),json_extract(NEW.message,'$.last_position')); END;")?;
         Ok(())
-    }
-    fn evict(&self) -> Result<bool> {
-        Ok(self.db.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT MAX(1,(SELECT COUNT(*)/10 FROM events)))", [])? > 0)
     }
     pub(super) fn nonblocking_writes(&self) -> Result<()> {
         self.db.busy_timeout(std::time::Duration::ZERO)?;
@@ -134,22 +140,33 @@ impl Store {
     }
     pub fn append_with_raw(&self, message: &Value, raw: Option<&str>) -> Result<()> {
         let text = serde_json::to_string(message)?;
-        let raw_text = raw.map(str::to_owned);
         let received = now();
-        loop {
-            match self.db.execute(
-                "INSERT INTO events(received_at,message,raw_message) VALUES (?1,?2,?3)",
-                params![received, text, raw_text],
-            ) {
-                Ok(_) => return Ok(()),
-                Err(Error::SqliteFailure(e, _)) if e.code == ErrorCode::DiskFull => {
-                    if !self.evict()? {
-                        return Err("storage budget cannot hold this record".into());
-                    }
+        let result = self.with_eviction(|tx, count| {
+            evict(tx, count)?;
+            tx.execute(DIAGNOSTIC, params![received, text, raw])?;
+            Ok(())
+        });
+        // FULL can also come from the filesystem. Reject only records that cannot
+        // fit in an empty archive with the same page limit.
+        if let Err(error) = &result {
+            if error.is::<HistoryCapacity>() {
+                let pages = self.pages.expect("explicit budget");
+                if (text.len() + raw.map_or(0, str::len)) as u64 > pages * 4096 {
+                    return Err(DiagnosticCapacity.into());
                 }
-                Err(error) => return Err(error.into()),
+                let probe = Connection::open_in_memory()?;
+                probe.execute_batch("PRAGMA page_size=4096; PRAGMA auto_vacuum=FULL;")?;
+                probe.execute_batch(EVENTS)?;
+                Self::migrate_history(&probe)?;
+                probe.pragma_update(None, "max_page_count", pages)?;
+                if matches!(probe.execute(DIAGNOSTIC,params![received,text,raw]),Err(Error::SqliteFailure(e,_)) if e.code==ErrorCode::DiskFull)
+                {
+                    return Err(DiagnosticCapacity.into());
+                }
+                return Err("archive space unavailable for diagnostic".into());
             }
         }
+        result
     }
 
     pub fn history_cursor(&self, journal_id: &str) -> Result<Option<HistoryCursor>> {
@@ -173,30 +190,44 @@ impl Store {
 
     pub fn append_history_page(&self, page: &HistoryPage) -> Result<HistoryCursor> {
         validate_history_page(page)?;
-        let mut evict_count = 0i64;
+        self.with_eviction(|tx, count| self.history_transaction(tx, page, count))
+    }
+
+    fn with_eviction<T>(&self, mut write: impl FnMut(&Connection, i64) -> Result<T>) -> Result<T> {
+        let mut count = 0;
         loop {
-            let result = self.history_transaction(page, evict_count);
+            let tx = rusqlite::Transaction::new_unchecked(
+                &self.db,
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let result = write(&tx, count).and_then(|value| {
+                tx.commit()?;
+                Ok(value)
+            });
             match result {
-                Ok(cursor) => return Ok(cursor),
-                Err(error) if error.downcast_ref::<Error>().is_some_and(|error| {
-                    matches!(error, Error::SqliteFailure(e, _) if e.code == ErrorCode::DiskFull)
-                }) => {
-                    let count: i64 = self.db.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
-                    if evict_count >= count {
+                Err(error)
+                    if self.pages.is_some()
+                        && matches!(error.downcast_ref::<Error>(),Some(Error::SqliteFailure(e,_)) if e.code==ErrorCode::DiskFull) =>
+                {
+                    let rows: i64 = self
+                        .db
+                        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
+                    if count >= rows {
                         return Err(HistoryCapacity.into());
                     }
-                    evict_count = (evict_count + (count / 10).max(1)).min(count);
+                    count = (count + (rows / 10).max(1)).min(rows);
                 }
-                Err(error) => return Err(error),
+                other => return other,
             }
         }
     }
 
-    fn history_transaction(&self, page: &HistoryPage, evict_count: i64) -> Result<HistoryCursor> {
-        let tx = rusqlite::Transaction::new_unchecked(
-            &self.db,
-            rusqlite::TransactionBehavior::Immediate,
-        )?;
+    fn history_transaction(
+        &self,
+        tx: &Connection,
+        page: &HistoryPage,
+        evict_count: i64,
+    ) -> Result<HistoryCursor> {
         let journal = &page.range.journal_id;
         let current = self.history_cursor(journal)?.map_or(0, |c| c.position.0);
         let next = page.next.position.0.max(current);
@@ -242,50 +273,59 @@ impl Store {
             }
         }
         // Read the original gaps before capacity eviction can remove their evidence.
-        let stale: BTreeSet<_> = page.records.iter().map(|r| r.cursor.position.0)
-            .filter(|&p| p <= current).collect();
+        let stale: BTreeSet<_> = page
+            .records
+            .iter()
+            .map(|r| r.cursor.position.0)
+            .filter(|&p| p <= current)
+            .collect();
         let mut recovered = BTreeSet::new();
         let mut replaced = Vec::new();
         let mut remaining = Vec::new();
         if !stale.is_empty() {
-            let mut stmt = tx.prepare("SELECT id,received_at,message FROM events WHERE journal_id=?1 AND position IS NULL AND raw_message IS NULL")?;
+            let mut stmt = tx.prepare(
+                "SELECT id,received_at,first,last FROM history_missing WHERE journal_id=?1",
+            )?;
             let mut gaps = stmt.query([journal])?;
             while let Some(row) = gaps.next()? {
-                let message: Value = serde_json::from_str(&row.get::<_, String>(2)?)?;
-                if message["type"] != "gap" || message["reason"] != "retention_expired" {
-                    continue;
-                }
-                let bound = |key: &str| -> Result<u64> {
-                    Ok(message[key].as_str().ok_or("missing stored gap bound")?.parse()?)
-                };
-                let (first, last) = (bound("first_position")?, bound("last_position")?);
+                let first: u64 = row.get::<_, String>(2)?.parse()?;
+                let last: u64 = row.get::<_, String>(3)?.parse()?;
                 if first == 0 || first > last {
                     return Err("invalid stored history gap".into());
                 }
                 let mut matches = stale.range(first..=last).peekable();
-                if matches.peek().is_none() { continue; }
+                if matches.peek().is_none() {
+                    continue;
+                }
                 replaced.push(row.get::<_, i64>(0)?);
                 let received: String = row.get(1)?;
                 let mut start = first;
                 for &p in matches {
                     recovered.insert(p);
-                    if start < p { remaining.push((received.clone(), start, p - 1)); }
+                    if start < p {
+                        remaining.push((received.clone(), start, p - 1));
+                    }
                     start = p.saturating_add(1);
                 }
-                if !stale.contains(&last) { remaining.push((received, start, last)); }
+                if !stale.contains(&last) {
+                    remaining.push((received, start, last));
+                }
             }
         }
-        tx.execute(
-            "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT ?1)",
-            [evict_count],
-        )?;
-        for id in replaced { tx.execute("DELETE FROM events WHERE id=?1", [id])?; }
-        for (received, first, last) in remaining { insert_missing(&tx, journal, &received, first, last)?; }
+        evict(tx, evict_count)?;
+        for id in replaced {
+            tx.execute("DELETE FROM events WHERE id=?1", [id])?;
+            tx.execute("DELETE FROM history_missing WHERE id=?1", [id])?;
+        }
+        for (received, first, last) in remaining {
+            insert_missing(&tx, journal, &received, first, last)?;
+        }
         let received = now();
         for record in &page.records {
             let position = record.cursor.position.to_string();
             // Already consumed entries stay consumed after their display rows expire.
-            if record.cursor.position.0 <= current && !recovered.contains(&record.cursor.position.0) {
+            if record.cursor.position.0 <= current && !recovered.contains(&record.cursor.position.0)
+            {
                 continue;
             }
             let (mut projection, kind) = match &record.event {
@@ -306,7 +346,6 @@ impl Store {
         }
         tx.execute("INSERT INTO history_checkpoints(journal_id,position) VALUES(?1,?2) ON CONFLICT(journal_id) DO UPDATE SET position=excluded.position",
             params![journal, next.to_string()])?;
-        tx.commit()?;
         Ok(HistoryCursor {
             journal_id: journal.clone(),
             position: DecimalU64(next),
@@ -314,15 +353,33 @@ impl Store {
     }
 }
 
-fn insert_missing(db: &Connection, journal: &str, received: &str, first: u64, last: u64) -> Result<()> {
+fn evict(db: &Connection, count: i64) -> Result<()> {
+    if count > 0 {
+        db.execute(
+            "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT ?1)",
+            [count],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_missing(
+    db: &Connection,
+    journal: &str,
+    received: &str,
+    first: u64,
+    last: u64,
+) -> Result<()> {
     let projection = serde_json::json!({
         "major":1,"type":"gap","stream_id":journal,"journal_id":journal,
         "reason":"retention_expired","count":(last-first+1).to_string(),
         "first_seq":null,"last_seq":null,
         "first_position":first.to_string(),"last_position":last.to_string()
     });
-    db.execute("INSERT INTO events(received_at,message,journal_id) VALUES(?1,?2,?3)",
-        params![received, projection.to_string(), journal])?;
+    db.execute(
+        "INSERT INTO events(received_at,message,journal_id) VALUES(?1,?2,?3)",
+        params![received, projection.to_string(), journal],
+    )?;
     Ok(())
 }
 
@@ -472,7 +529,7 @@ mod tests {
                 db.execute_batch(sql).unwrap();
                 db.execute("INSERT INTO events(id,received_at,message) VALUES(1,'2026-11-10T00:00:00Z','{\"text\":\"legacy\"}')", []).unwrap();
             }
-            let store = Store::open(&path, 73784).unwrap();
+            let store = Store::open(&path, 81984).unwrap();
             store.append(&json!({"text":"current"})).unwrap();
             let mut bytes = Vec::new();
             export(&path, &mut bytes, &ExportRange::default()).unwrap();
@@ -497,10 +554,10 @@ mod tests {
                     .db
                     .query_row("PRAGMA page_count", [], |r| r.get::<_, u64>(0))
                     .unwrap(),
-                7
+                8
             );
             drop(store);
-            let reopened = Store::open(&path, 73784).unwrap();
+            let reopened = Store::open(&path, 81984).unwrap();
             assert_eq!(
                 reopened
                     .history_cursor("minimum")
@@ -523,7 +580,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 error.to_string(),
-                "storage budget must be at least 73784 bytes"
+                "storage budget must be at least 81984 bytes"
             );
         }
     }

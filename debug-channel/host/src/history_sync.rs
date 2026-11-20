@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -10,25 +10,34 @@ type Diagnostic = (Value, Option<String>);
 
 pub(super) struct Diagnostics {
     sender: SyncSender<Diagnostic>,
+    stop: Arc<AtomicBool>,
+    bursts: Bursts,
     pub status: Arc<Mutex<Value>>,
 }
 
 pub(super) struct DiagnosticWriter {
     receiver: Receiver<Diagnostic>,
+    bursts: Bursts,
     pending: Option<Diagnostic>,
     status: Arc<Mutex<Value>>,
 }
 
-pub(super) fn diagnostics() -> (Diagnostics, DiagnosticWriter) {
+type Bursts = Arc<Mutex<std::collections::BTreeMap<String, Value>>>;
+
+pub(super) fn diagnostics(stop: Arc<AtomicBool>) -> (Diagnostics, DiagnosticWriter) {
     let (sender, receiver) = sync_channel(256);
+    let bursts = Bursts::default();
     let status = Arc::new(Mutex::new(json!({"state":"ready","dropped":0})));
     (
         Diagnostics {
             sender,
+            stop,
+            bursts: bursts.clone(),
             status: status.clone(),
         },
         DiagnosticWriter {
             receiver,
+            bursts,
             pending: None,
             status,
         },
@@ -36,21 +45,48 @@ pub(super) fn diagnostics() -> (Diagnostics, DiagnosticWriter) {
 }
 
 impl Diagnostics {
-    pub fn append(&self, message: Value, raw: Option<String>) {
-        if let Err(error) = self.sender.try_send((message, raw)) {
-            let mut status = self.status.lock().unwrap();
-            let dropped = status["dropped"].as_u64().unwrap_or(0) + 1;
-            status["dropped"] = json!(dropped);
-            status["queue_error"] = json!(error.to_string());
+    pub fn append(&self, message: Value, raw: Option<String>) -> Result<()> {
+        let mut item = (message, raw);
+        loop {
+            match self.sender.try_send(item) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Disconnected(_)) => {
+                    return Err("Archive diagnostic writer stopped".into())
+                }
+                Err(TrySendError::Full(value)) => item = value,
+            }
+            if let Some(kind @ ("status" | "host.connection")) = item.0["type"].as_str() {
+                let at = store::now();
+                let mut bursts = self.bursts.lock().unwrap();
+                let summary=bursts.entry(kind.to_owned()).or_insert_with(||json!({"major":1,"type":"host.diagnostic_summary","kind":kind,"count":0,"first_at":at}));
+                summary["count"] = json!(summary["count"].as_u64().unwrap() + 1);
+                summary["last_at"] = json!(at);
+                return Ok(());
+            }
+            if self.stop.load(Ordering::Acquire) {
+                return Err("Archive stopped with a waiting diagnostic".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 }
 
 impl DiagnosticWriter {
     fn drain(&mut self, store: &Store) -> bool {
-        for _ in 0..16 {
+        for i in 0..16 {
             if self.pending.is_none() {
-                self.pending = self.receiver.try_recv().ok();
+                let summary = || {
+                    self.bursts
+                        .lock()
+                        .unwrap()
+                        .pop_first()
+                        .map(|(_, v)| (v, None))
+                };
+                self.pending = if i == 15 {
+                    summary().or_else(|| self.receiver.try_recv().ok())
+                } else {
+                    self.receiver.try_recv().ok().or_else(summary)
+                };
             }
             let Some((message, raw)) = &self.pending else {
                 return true;
@@ -61,6 +97,12 @@ impl DiagnosticWriter {
                     let mut status = self.status.lock().unwrap();
                     status["state"] = json!("ready");
                     status.as_object_mut().unwrap().remove("error");
+                }
+                Err(error) if error.is::<store::DiagnosticCapacity>() => {
+                    let mut status = self.status.lock().unwrap();
+                    status["dropped"] = json!(status["dropped"].as_u64().unwrap_or(0) + 1);
+                    status["last_rejection"] = json!({"at":store::now(),"reason":error.to_string(),"type":message["type"]});
+                    self.pending = None;
                 }
                 Err(error) => {
                     let mut status = self.status.lock().unwrap();
@@ -292,15 +334,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn diagnostic_queue_reports_overflow_and_flushes_accepted_records() {
+    fn status_burst_exports_each_transition_or_its_count_and_interval() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("archive.db");
         let store = Store::open(&path, 1048576).unwrap();
-        let (queue, mut writer) = diagnostics();
+        let (queue, mut writer) = diagnostics(Arc::default());
         for n in 0..300 {
-            queue.append(json!({"number":n}), None);
+            queue
+                .append(json!({"type":"status","number":n}), None)
+                .unwrap();
         }
-        assert_eq!(queue.status.lock().unwrap()["dropped"], 44);
+        assert_eq!(queue.status.lock().unwrap()["dropped"], 0);
         writer.flush(&store).unwrap();
         let mut output = Vec::new();
         store::export(&path, &mut output, &store::ExportRange::default()).unwrap();
@@ -309,10 +353,45 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(records.len(), 256);
-        assert_eq!(records[0]["message"], json!({"number":0}));
-        assert_eq!(records[255]["message"], json!({"number":255}));
-        assert_eq!(queue.status.lock().unwrap()["dropped"], 44);
+        let singles: Vec<_> = records
+            .iter()
+            .filter_map(|r| r["message"]["number"].as_u64())
+            .collect();
+        assert_eq!(singles, (0..256).collect::<Vec<_>>());
+        let summary = &records
+            .iter()
+            .find(|r| r["message"]["type"] == "host.diagnostic_summary")
+            .unwrap()["message"];
+        assert_eq!(summary["count"], 44);
+        assert!(summary["first_at"].as_str().unwrap() <= summary["last_at"].as_str().unwrap());
+        assert_eq!(queue.status.lock().unwrap()["dropped"], 0);
+    }
+
+    #[test]
+    fn oversized_diagnostic_reports_rejection_and_releases_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.db");
+        let store = Store::open(&path, 131072).unwrap();
+        let (queue, mut writer) = diagnostics(Arc::default());
+        queue
+            .append(json!({"text":"x".repeat(100000)}), None)
+            .unwrap();
+        queue
+            .append(json!({"type":"status","sequence":2}), None)
+            .unwrap();
+        writer.flush(&store).unwrap();
+        let mut bytes = Vec::new();
+        store::export(&path, &mut bytes, &Default::default()).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["message"]["sequence"],
+            2
+        );
+        let status = queue.status.lock().unwrap();
+        assert_eq!(status["dropped"], 1);
+        assert_eq!(
+            status["last_rejection"]["reason"],
+            "storage budget cannot hold this diagnostic"
+        );
     }
 
     #[test]
@@ -323,8 +402,10 @@ mod tests {
         store.nonblocking_writes().unwrap();
         let lock = rusqlite::Connection::open(&path).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let (queue, mut writer) = diagnostics();
-        queue.append(json!({"type":"host.connection","connected":true}), None);
+        let (queue, mut writer) = diagnostics(Arc::default());
+        queue
+            .append(json!({"type":"host.connection","connected":true}), None)
+            .unwrap();
         assert_eq!(
             writer.flush(&store).unwrap_err().to_string(),
             "Archive diagnostic flush timed out with queued records"

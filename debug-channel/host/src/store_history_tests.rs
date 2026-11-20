@@ -49,7 +49,9 @@ fn process_keys_and_exited_ancestors_survive_sync_reopen_and_export() {
     let path = dir.path().join("history.db");
     let mut page = page("process-boot", &[1], &[], 1);
     page.records[0].boot_id = "134393633875000000".into();
-    let venera_debug_protocol::v1::HistoryEvent::Log { record } = &mut page.records[0].event else { panic!("log") };
+    let venera_debug_protocol::v1::HistoryEvent::Log { record } = &mut page.records[0].event else {
+        panic!("log")
+    };
     record.process = Some(serde_json::from_value(json!({"pid":42,"start_time_filetime":"134393633875000200",
         "boot_time_filetime":"134393633875000000","start_key":"18446744073709551614","exe_path":"C:\\child.exe"})).unwrap());
     record.ancestors = vec![serde_json::from_value(json!({"pid":20,"start_time_filetime":"134393633875000100",
@@ -62,13 +64,19 @@ fn process_keys_and_exited_ancestors_survive_sync_reopen_and_export() {
     let rows = projections(&path);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["process"]["start_key"], "18446744073709551614");
-    assert_eq!(rows[0]["ancestors"][0]["boot_time_filetime"], "134393633875000000");
+    assert_eq!(
+        rows[0]["ancestors"][0]["boot_time_filetime"],
+        "134393633875000000"
+    );
     let mut output = Vec::new();
     export(&path, &mut output, &ExportRange::default()).unwrap();
     let exported: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(exported["message"]["event"]["record"]["ancestors"][0], json!({"pid":20,
+    assert_eq!(
+        exported["message"]["event"]["record"]["ancestors"][0],
+        json!({"pid":20,
         "start_time_filetime":"134393633875000100","boot_time_filetime":"134393633875000000",
-        "start_key":"9007199254740997","exe_path":"C:\\parent.exe"}));
+        "start_key":"9007199254740997","exe_path":"C:\\parent.exe"})
+    );
 }
 
 #[test]
@@ -149,7 +157,10 @@ fn delayed_page_fills_retention_gap_across_connections_and_reopen() {
     let mut bytes = Vec::new();
     export(&path, &mut bytes, &ExportRange::default()).unwrap();
     let row: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(row["message"], serde_json::to_value(&real.records[0]).unwrap());
+    assert_eq!(
+        row["message"],
+        serde_json::to_value(&real.records[0]).unwrap()
+    );
 }
 
 #[test]
@@ -362,9 +373,9 @@ fn store_history_metadata_budget_error_can_be_reopened_with_capacity() {
     let error = Store::open(&path, 65536).err().unwrap();
     assert_eq!(
         error.to_string(),
-        "storage budget must be at least 73784 bytes"
+        "storage budget must be at least 81984 bytes"
     );
-    let store = Store::open(&path, 73784).unwrap();
+    let store = Store::open(&path, 81984).unwrap();
     assert_eq!(
         store
             .append_history_page(&page("a", &[], &[], 0))
@@ -409,4 +420,122 @@ fn store_history_legacy_migration_keeps_content_and_next_event_id() {
         9
     );
     assert_eq!(store.history_cursor("a").unwrap().unwrap().position.0, 1);
+}
+
+#[test]
+fn diagnostic_capacity_failure_preserves_fifty_committed_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive.db");
+    let store = Store::open(&path, 262144).unwrap();
+    for n in 1..=50 {
+        store.append_history_page(&page("a", &[n], &[], n)).unwrap();
+    }
+    let mut original = Vec::new();
+    export(&path, &mut original, &ExportRange::default()).unwrap();
+    assert_eq!(original.split(|b| *b == b'\n').count() - 1, 50);
+    assert!(store.append(&json!({"text":"x".repeat(150000)})).is_err());
+    drop(store);
+    let store = Store::open(&path, 262144).unwrap();
+    let mut reopened = Vec::new();
+    export(&path, &mut reopened, &ExportRange::default()).unwrap();
+    assert_eq!(reopened, original);
+    assert_eq!(store.history_cursor("a").unwrap().unwrap().position.0, 50);
+}
+
+#[test]
+fn backfill_survives_display_eviction_by_another_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive.db");
+    let store = Store::open(&path, 131072).unwrap();
+    store
+        .append_history_page(&page("a", &[], &[(1, 2)], 2))
+        .unwrap();
+    let other = Store::open(&path, 131072).unwrap();
+    for n in 0..80 {
+        other
+            .append(&json!({"n":n,"text":"x".repeat(1500)}))
+            .unwrap();
+    }
+    assert!(projections(&path).iter().all(|v| v["reason"].is_null()));
+    store.append_history_page(&page("a", &[2], &[], 2)).unwrap();
+    let rows = projections(&path);
+    assert!(rows.iter().any(|v| v["text"] == "captured"));
+    assert!(rows
+        .iter()
+        .any(|v| v["first_position"] == "1" && v["last_position"] == "1"));
+}
+
+#[test]
+#[ignore = "allocates a 1 GiB archive"]
+fn reopen_gib_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive.db");
+    let store = Store::open(&path, None).unwrap();
+    store.append(&json!({"first":true})).unwrap();
+    let payload = json!({"text":"x".repeat(4<<20)});
+    for _ in 0..256 {
+        store.append(&payload).unwrap();
+    }
+    drop(store);
+    let size = path.metadata().unwrap().len();
+    assert!(size > 1 << 30);
+    let store = Store::open(&path, None).unwrap();
+    let (first, count): (String, u64) = store
+        .db
+        .query_row(
+            "SELECT (SELECT message FROM events ORDER BY id LIMIT 1),count(*) FROM events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(first, r#"{"first":true}"#);
+    assert_eq!(count, 257);
+    eprintln!("archive bytes={size}, retained={count}, first={first}");
+}
+
+#[test]
+#[ignore = "requires a private 8 MiB tmpfs at TMPDIR"]
+fn resume_after_filesystem_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive.db");
+    let store = Store::open(&path, None).unwrap();
+    // Fixed maximum allocation even when run outside the test mount.
+    let reserve = dir.path().join("reserve");
+    std::fs::write(&reserve, vec![0u8; 2 << 20]).unwrap();
+    let mut committed = 0;
+    for n in 1..=32 {
+        let mut p = page("a", &[n], &[], n);
+        p.records[0] = record("a", n, &"x".repeat(256 << 10));
+        match store.append_history_page(&p) {
+            Ok(_) => committed = n,
+            Err(e) => {
+                assert!(
+                    matches!(e.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::SqliteFailure(code,_)) if code.code==rusqlite::ErrorCode::DiskFull)
+                );
+                break;
+            }
+        }
+    }
+    assert!((1..32).contains(&committed));
+    drop(store);
+    std::fs::remove_file(reserve).unwrap();
+    let store = Store::open(&path, None).unwrap();
+    assert_eq!(
+        store.history_cursor("a").unwrap().unwrap().position.0,
+        committed
+    );
+    let expected = "x".repeat(256 << 10);
+    let rows = projections(&path);
+    assert_eq!(rows.len(), committed as usize);
+    assert!(rows.iter().all(|r| r["text"] == expected));
+    let next = committed + 1;
+    assert_eq!(
+        store
+            .append_history_page(&page("a", &[next], &[], next))
+            .unwrap()
+            .position
+            .0,
+        next
+    );
+    eprintln!("FULL after {committed} commits, released 2 MiB, resumed at {next}");
 }

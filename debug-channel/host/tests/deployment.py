@@ -22,6 +22,11 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'WantedBy=default.target' in text
     subprocess.run(command + ['--no-web'], check=True, capture_output=True)
     assert '"--no-web"' in output.read_text()
+    default = command.copy()
+    index = default.index('--max-bytes')
+    del default[index:index+2]
+    subprocess.run(default, check=True, capture_output=True)
+    assert '"--database" "/home/user/logs $$data%%/history.db" "--assets"' in output.read_text()
     invalid = command.copy()
     invalid[invalid.index('--binary') + 1] = 'relative/bin'
     result = subprocess.run(invalid, capture_output=True, text=True)

@@ -38,8 +38,8 @@ enum Command {
         port: u32,
         #[arg(long)]
         database: Option<PathBuf>,
-        #[arg(long, default_value_t = 1 << 30, value_parser = clap::value_parser!(u64).range(store::MIN_STORAGE_BYTES..))]
-        max_bytes: u64,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(store::MIN_STORAGE_BYTES..))]
+        max_bytes: Option<u64>,
         #[arg(long)]
         control: Option<PathBuf>,
         #[arg(long)]
@@ -415,7 +415,7 @@ fn guest_packet(
     for (event, source) in client.take_events() {
         if let Some(projected) = project(&event) {
             if projected["type"] == "status" {
-                diagnostics.append(projected, Some(source));
+                diagnostics.append(projected, Some(source))?;
             }
         }
     }
@@ -423,7 +423,7 @@ fn guest_packet(
         diagnostics.append(
             json!({"major":1,"type":"host.protocol_error","error":error}),
             None,
-        );
+        )?;
     }
     Ok(())
 }
@@ -440,7 +440,7 @@ struct Collector {
 }
 async fn initialize(
     database: &std::path::Path,
-    max_bytes: u64,
+    max_bytes: Option<u64>,
     control: PathBuf,
 ) -> Result<Collector> {
     let listener = match UnixListener::bind(&control) {
@@ -484,7 +484,7 @@ async fn initialize(
 pub fn serve(
     connector: impl transport::Connector,
     database: PathBuf,
-    max_bytes: u64,
+    max_bytes: impl Into<Option<u64>>,
     control: PathBuf,
     assets: Option<PathBuf>,
     listen: std::net::SocketAddr,
@@ -521,7 +521,7 @@ pub fn serve(
         use tokio::signal::unix::{signal, SignalKind};
         let mut terminate = signal(SignalKind::terminate())?;
         let mut interrupt = signal(SignalKind::interrupt())?;
-        let collector = initialize(&database, max_bytes, control.clone()).await?;
+        let collector = initialize(&database, max_bytes.into(), control.clone()).await?;
         #[cfg(feature = "web")]
         let listener = if no_web {
             None
@@ -605,7 +605,7 @@ fn collect(
     let archive_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_stop = archive_stop.clone();
     let archive_status = history_status.clone();
-    let (diagnostics, diagnostic_writer) = history_sync::diagnostics();
+    let (diagnostics, diagnostic_writer) = history_sync::diagnostics(stop.clone());
     let archive_worker = std::thread::Builder::new()
         .name("history-archive".into())
         .spawn(move || {
@@ -642,7 +642,7 @@ fn collect(
                     diagnostics.append(
                         json!({"major":1,"type":"host.connection","connected":true}),
                         None,
-                    );
+                    )?;
                 }
             }
             if guest.is_some() && !status_sent && client.negotiation().failure.is_none() {
@@ -715,7 +715,7 @@ fn collect(
                 diagnostics.append(
                     json!({"major":1,"type":"host.connection","connected":false}),
                     None,
-                );
+                )?;
                 if let Some(p) = pending.as_mut() {
                     if p.response.is_none() && p.id.is_some() {
                         p.finish(Err(outcome(

@@ -71,6 +71,10 @@ impl Guest {
         oldest: u64,
         high_water: u64,
     ) -> Self {
+        Self::accept_with_status_burst(listener,journal,oldest,high_water,1)
+    }
+
+    fn accept_with_status_burst(listener:&UnixListener,journal:&'static str,oldest:u64,high_water:u64,burst:usize)->Self {
         listener.set_nonblocking(true).unwrap();
         let deadline = Instant::now() + TIMEOUT;
         let writer = loop {
@@ -96,7 +100,7 @@ impl Guest {
         loop {
             let mut line = String::new();
             if guest.reader.read_line(&mut line).unwrap() == 0 {
-                return Self::accept(listener, journal, oldest, high_water);
+                return Self::accept_with_status_burst(listener, journal, oldest, high_water,burst);
             }
             if line.trim().is_empty() {
                 continue;
@@ -115,11 +119,11 @@ impl Guest {
                             match guest.reader.read_line(&mut line) { Ok(0) | Err(_) => break, _ => () }
                             if line.trim().is_empty() { continue; }
                             let request: Value = serde_json::from_str(&line).unwrap();
-                            guest.send(json!({"jsonrpc":"2.0","method":"status.changed","params":status.clone()}));
+                            for _ in 0..burst {guest.send(json!({"jsonrpc":"2.0","method":"status.changed","params":status.clone()}));}
                             guest.reply(&request, status.clone());
                         }
                     });
-                    return Self::accept(listener, journal, oldest, high_water);
+                    return Self::accept_with_status_burst(listener, journal, oldest, high_water,burst);
                 }
                 method => panic!("unexpected initial method {method}"),
             }
@@ -484,7 +488,7 @@ fn archive_write_lock_preserves_control_responses_and_flushes_diagnostics() {
     let dir = TempDir::new().unwrap();
     let listener = UnixListener::bind(dir.path().join("guest.sock")).unwrap();
     let mut service = Service::start(dir.path());
-    let mut guest = Guest::accept(&listener, "journal-a", 1, 1);
+    let mut guest = Guest::accept_with_status_burst(&listener, "journal-a", 1, 1,60);
     let read = first_read(&mut guest);
     let db = Connection::open(dir.path().join("history.db")).unwrap();
     db.busy_timeout(Duration::from_secs(2)).unwrap();
@@ -513,12 +517,12 @@ fn archive_write_lock_preserves_control_responses_and_flushes_diagnostics() {
     loop {
         let count: i64 = db
             .query_row(
-                "SELECT COUNT(*) FROM events WHERE json_extract(message,'$.type')='status'",
+                "SELECT coalesce(sum(CASE WHEN json_extract(message,'$.type')='status' THEN 1 WHEN json_extract(message,'$.kind')='status' THEN json_extract(message,'$.count') ELSE 0 END),0) FROM events",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
-        if count == 5 {
+        if count == 300 {
             break;
         }
         assert!(Instant::now() < deadline, "archived status count: {count}");
@@ -548,12 +552,12 @@ fn archive_write_lock_preserves_control_responses_and_flushes_diagnostics() {
     }
     assert_eq!(
         db.query_row(
-            "SELECT COUNT(*) FROM events WHERE json_extract(message,'$.type')='status'",
+            "SELECT coalesce(sum(CASE WHEN json_extract(message,'$.type')='status' THEN 1 WHEN json_extract(message,'$.kind')='status' THEN json_extract(message,'$.count') ELSE 0 END),0) FROM events",
             [],
             |r| r.get::<_, i64>(0)
         )
         .unwrap(),
-        6
+        360
     );
 }
 
@@ -856,7 +860,7 @@ fn injected_service() {
         dir.join("history.db"),
         std::env::var("VENERA_HISTORY_TEST_BUDGET")
             .unwrap()
-            .parse()
+            .parse::<u64>()
             .unwrap(),
         dir.join("control.sock"),
         Some(dir),
