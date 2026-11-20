@@ -149,7 +149,10 @@ virtio_gpu_formats ColorFormat(UINT format)
         case D3DDDIFMT_X8B8G8R8:
             return VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM;
     }
-    DbgPrint(TRACE_LEVEL_ERROR, ("---> %s Unsupported color format %d\n", __FUNCTION__, format));
+    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+    {
+        DbgPrint("VioGpu: ---> %s Unsupported color format %d\n", __FUNCTION__, format);
+    }
     return VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
 }
 
@@ -161,7 +164,10 @@ VioGpuAdapter::VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     *((UINT *)&m_Flags) = 0;
     RtlZeroMemory(&m_DxgkInterface, sizeof(m_DxgkInterface));
     RtlZeroMemory(&m_DeviceInfo, sizeof(m_DeviceInfo));
@@ -207,13 +213,19 @@ VioGpuAdapter::VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     m_PageTableSegmentId = 0;
 #endif
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 }
 
 VioGpuAdapter::~VioGpuAdapter(void)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 
     DestroyCursor();
     VioGpuAdapterClose();
@@ -231,7 +243,10 @@ BOOLEAN VioGpuAdapter::CheckHardware()
 
     NTSTATUS Status = STATUS_GRAPHICS_DRIVER_MISMATCH;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     PCI_COMMON_HEADER Header = {0};
     ULONG BytesRead;
@@ -245,11 +260,16 @@ BOOLEAN VioGpuAdapter::CheckHardware()
 
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("DxgkCbReadDeviceSpace failed with status 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: DxgkCbReadDeviceSpace failed with status 0x%X\n", Status);
+        }
         return FALSE;
     }
-    DbgPrint(TRACE_LEVEL_INFORMATION,
-             ("<--- %s VendorId = 0x%04X DeviceId = 0x%04X\n", __FUNCTION__, Header.VendorID, Header.DeviceID));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: <--- %s VendorId = 0x%04X DeviceId = 0x%04X\n", __FUNCTION__, Header.VendorID, Header.DeviceID);
+    }
     if (Header.VendorID == REDHAT_PCI_VENDOR_ID && Header.DeviceID == 0x1050)
     {
         SetVgaDevice(Header.SubClass == PCI_SUBCLASS_VID_VGA_CTLR);
@@ -296,9 +316,11 @@ NTSTATUS VioGpuAdapter::AllocatePageTableSegment(void)
 
     if (m_pPageTableSegment == NULL)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s could not reserve %u bytes of contiguous memory for page tables\n",
-                  __FUNCTION__, (UINT)VIOGPU_PAGE_TABLE_SEGMENT_SIZE));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s could not reserve %u bytes of contiguous memory for page tables\n",
+                     __FUNCTION__, (UINT)VIOGPU_PAGE_TABLE_SEGMENT_SIZE);
+        }
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -313,9 +335,11 @@ NTSTATUS VioGpuAdapter::AllocatePageTableSegment(void)
     const bool bHasShmem = pShmemBar && m_VioDev.shmem_len;
     m_PageTableSegmentId = (bHasShmem ? 2 : 1) + 1;
 
-    DbgPrint(TRACE_LEVEL_INFORMATION,
-             ("%s reserved %u bytes for page tables at physical %I64x\n",
-              __FUNCTION__, (UINT)m_PageTableSegmentSize, m_PageTableSegmentPA.QuadPart));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: %s reserved %u bytes for page tables at physical %I64x\n",
+                 __FUNCTION__, (UINT)m_PageTableSegmentSize, m_PageTableSegmentPA.QuadPart);
+    }
 
     return STATUS_SUCCESS;
 }
@@ -362,20 +386,29 @@ NTSTATUS VioGpuAdapter::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
     if (!CheckHardware())
     {
         Status = STATUS_NO_MEMORY;
-        DbgPrint(TRACE_LEVEL_ERROR, ("StartDevice failed to allocate memory\n"));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: StartDevice failed to allocate memory\n");
+        }
         return Status;
     }
 
     Status = GetRegisterInfo();
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_WARNING, ("GetRegisterInfo failed with status 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: GetRegisterInfo failed with status 0x%X\n", Status);
+        }
     }
 
     Status = HWInit(m_DeviceInfo.TranslatedResourceList);
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("HWInit failed with status 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: HWInit failed with status 0x%X\n", Status);
+        }
         return Status;
     }
 
@@ -387,8 +420,10 @@ NTSTATUS VioGpuAdapter::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
     Status = AllocatePageTableSegment();
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("AllocatePageTableSegment failed with status 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: AllocatePageTableSegment failed with status 0x%X\n", Status);
+        }
         return Status;
     }
 #endif
@@ -403,21 +438,30 @@ NTSTATUS VioGpuAdapter::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
     Status = vidpn.Start(pNumberOfViews, pNumberOfChildren);
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("VioGpuaVidPN::Start failed with status 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: VioGpuaVidPN::Start failed with status 0x%X\n", Status);
+        }
         VioGpuDbgBreak();
         return STATUS_UNSUCCESSFUL;
     }
 
     m_Flags.DriverStarted = TRUE;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
     return STATUS_SUCCESS;
 }
 
 NTSTATUS VioGpuAdapter::StopDevice(VOID)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s\n", __FUNCTION__);
+    }
     m_Flags.DriverStarted = FALSE;
     vidpn.StopVsyncTimer();
     StopWorkThread();
@@ -435,7 +479,10 @@ NTSTATUS VioGpuAdapter::DispatchIoRequest(_In_ ULONG VidPnSourceId, _In_ VIDEO_R
     PAGED_CODE();
     UNREFERENCED_PARAMETER(VidPnSourceId);
     UNREFERENCED_PARAMETER(pVideoRequestPacket);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--> %s\n", __FUNCTION__);
+    }
 
     return STATUS_SUCCESS;
 }
@@ -498,13 +545,15 @@ NTSTATUS VioGpuAdapter::SetPowerState(_In_ ULONG HardwareUid,
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_FATAL,
-             ("---> %s HardwareUid = 0x%x ActionType = %s DevicePowerState = %s AdapterPowerState = %s\n",
-              __FUNCTION__,
-              HardwareUid,
-              DbgPowerActionString(ActionType),
-              DbgDevicePowerString(DevicePowerState),
-              DbgDevicePowerString(m_AdapterPowerState)));
+    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+    {
+        DbgPrint("VioGpu: ---> %s HardwareUid = 0x%x ActionType = %s DevicePowerState = %s AdapterPowerState = %s\n",
+                 __FUNCTION__,
+                 HardwareUid,
+                 DbgPowerActionString(ActionType),
+                 DbgDevicePowerString(DevicePowerState),
+                 DbgDevicePowerString(m_AdapterPowerState));
+    }
 
     if (HardwareUid == DISPLAY_ADAPTER_HW_ID)
     {
@@ -515,8 +564,10 @@ NTSTATUS VioGpuAdapter::SetPowerState(_In_ ULONG HardwareUid,
             status = vidpn.AcquirePostDisplayOwnership();
             if (!NT_SUCCESS(status))
             {
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s AcquirePostDisplayOwnership failed: 0x%x\n", __FUNCTION__, status));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: %s AcquirePostDisplayOwnership failed: 0x%x\n", __FUNCTION__, status);
+                }
                 return status;
             }
 
@@ -528,8 +579,10 @@ NTSTATUS VioGpuAdapter::SetPowerState(_In_ ULONG HardwareUid,
                 status = vidpn.SetVidPnSourceVisibility(&Visibility);
                 if (!NT_SUCCESS(status))
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s SetVidPnSourceVisibility failed: 0x%x\n", __FUNCTION__, status));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s SetVidPnSourceVisibility failed: 0x%x\n", __FUNCTION__, status);
+                    }
                     return status;
                 }
             }
@@ -573,11 +626,13 @@ NTSTATUS VioGpuAdapter::SetPowerState(_In_ ULONG HardwareUid,
 
         if (!NT_SUCCESS(status))
         {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("%s failed to switch to %s: 0x%x\n",
-                      __FUNCTION__,
-                      DbgDevicePowerString(DevicePowerState),
-                      status));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: %s failed to switch to %s: 0x%x\n",
+                         __FUNCTION__,
+                         DbgDevicePowerString(DevicePowerState),
+                         status);
+            }
             return status;
         }
 
@@ -593,7 +648,10 @@ VioGpuAdapter::QueryChildRelations(_Out_writes_bytes_(ChildRelationsSize) DXGK_C
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     VIOGPU_ASSERT(pChildRelations != NULL);
 
     ULONG ChildRelationsCount = (ChildRelationsSize / sizeof(DXGK_CHILD_DESCRIPTOR)) - 1;
@@ -612,7 +670,10 @@ VioGpuAdapter::QueryChildRelations(_Out_writes_bytes_(ChildRelationsSize) DXGK_C
         pChildRelations[ChildIndex].ChildUid = ChildIndex;
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -620,7 +681,10 @@ NTSTATUS VioGpuAdapter::QueryChildStatus(_Inout_ DXGK_CHILD_STATUS *pChildStatus
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     UNREFERENCED_PARAMETER(NonDestructiveOnly);
     VIOGPU_ASSERT(pChildStatus != NULL);
@@ -636,14 +700,19 @@ NTSTATUS VioGpuAdapter::QueryChildStatus(_Inout_ DXGK_CHILD_STATUS *pChildStatus
 
         case StatusRotation:
             {
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("Child status being queried for StatusRotation even though D3DKMDT_MOA_NONE was reported"));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: Child status being queried for StatusRotation even though D3DKMDT_MOA_NONE was reported");
+                }
                 return STATUS_INVALID_PARAMETER;
             }
 
         default:
             {
-                DbgPrint(TRACE_LEVEL_WARNING, ("Unknown pChildStatus->Type (0x%I64x) requested.", pChildStatus->Type));
+                if (nDebugLevel >= TRACE_LEVEL_WARNING)
+                {
+                    DbgPrint("VioGpu: Unknown pChildStatus->Type (0x%I64x) requested.", pChildStatus->Type);
+                }
                 return STATUS_NOT_SUPPORTED;
             }
     }
@@ -653,7 +722,10 @@ NTSTATUS VioGpuAdapter::QueryDeviceDescriptor(_In_ ULONG ChildUid, _Inout_ DXGK_
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     VIOGPU_ASSERT(pDeviceDescriptor != NULL);
     VIOGPU_ASSERT(ChildUid < MAX_CHILDREN);
@@ -672,7 +744,10 @@ NTSTATUS VioGpuAdapter::QueryDeviceDescriptor(_In_ ULONG ChildUid, _Inout_ DXGK_
         return STATUS_SUCCESS;
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
     return STATUS_MONITOR_NO_MORE_DESCRIPTOR_DATA;
 }
 
@@ -681,7 +756,10 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
     PAGED_CODE();
 
     VIOGPU_ASSERT(pQueryAdapterInfo != NULL);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     switch (pQueryAdapterInfo->Type)
     {
@@ -689,11 +767,13 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
             {
                 if (pQueryAdapterInfo->OutputDataSize < FIELD_OFFSET(VIOGPU_ADAPTERINFO, AdapterLuid))
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than VIOGPU_ADAPTERINFO "
-                              "without AdapterLuid (0x%u)\n",
-                              pQueryAdapterInfo->OutputDataSize,
-                              FIELD_OFFSET(VIOGPU_ADAPTERINFO, AdapterLuid)));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than VIOGPU_ADAPTERINFO "
+                                 "without AdapterLuid (0x%u)\n",
+                                 pQueryAdapterInfo->OutputDataSize,
+                                 FIELD_OFFSET(VIOGPU_ADAPTERINFO, AdapterLuid));
+                    }
                     return STATUS_BUFFER_TOO_SMALL;
                 }
                 VIOGPU_ADAPTERINFO *info = (VIOGPU_ADAPTERINFO *)pQueryAdapterInfo->pOutputData;
@@ -724,19 +804,23 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
             {
                 if (!pQueryAdapterInfo->OutputDataSize)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(DXGK_DRIVERCAPS) "
-                              "(0x%u)\n",
-                              pQueryAdapterInfo->OutputDataSize,
-                              sizeof(DXGK_DRIVERCAPS)));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(DXGK_DRIVERCAPS) "
+                                 "(0x%u)\n",
+                                 pQueryAdapterInfo->OutputDataSize,
+                                 sizeof(DXGK_DRIVERCAPS));
+                    }
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
                 DXGK_DRIVERCAPS *pDriverCaps = (DXGK_DRIVERCAPS *)pQueryAdapterInfo->pOutputData;
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("InterruptMessageNumber = %d, WDDMVersion = %d\n",
-                          pDriverCaps->InterruptMessageNumber,
-                          pDriverCaps->WDDMVersion));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: InterruptMessageNumber = %d, WDDMVersion = %d\n",
+                             pDriverCaps->InterruptMessageNumber,
+                             pDriverCaps->WDDMVersion);
+                }
                 RtlZeroMemory(pDriverCaps, pQueryAdapterInfo->OutputDataSize /*sizeof(DXGK_DRIVERCAPS)*/);
                 /*
                  * D3D12 needs WDDM 2.0.  Everything the D3D12 runtime asks of
@@ -830,22 +914,30 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 pDriverCaps->PointerCaps.Color = 1;
                 pDriverCaps->PointerCaps.MaskedColor = 1;
 
-                DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Driver caps return\n", __FUNCTION__));
+                if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                {
+                    DbgPrint("VioGpu: <--- %s Driver caps return\n", __FUNCTION__);
+                }
                 return STATUS_SUCCESS;
             }
         case DXGKQAITYPE_QUERYSEGMENT3:
             {
                 if (pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_QUERYSEGMENTOUT3))
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(DXGK_QUERYSEGMENTOUT) "
-                              "(0x%u)\n",
-                              pQueryAdapterInfo->OutputDataSize,
-                              sizeof(DXGK_QUERYSEGMENTOUT)));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(DXGK_QUERYSEGMENTOUT) "
+                                 "(0x%u)\n",
+                                 pQueryAdapterInfo->OutputDataSize,
+                                 sizeof(DXGK_QUERYSEGMENTOUT));
+                    }
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
-                DbgPrint(TRACE_LEVEL_ERROR, ("QUERY SEG\n"));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: QUERY SEG\n");
+                }
                 DXGK_QUERYSEGMENTOUT3 *pSegmentInfo = (DXGK_QUERYSEGMENTOUT3 *)pQueryAdapterInfo->pOutputData;
                 ULONGLONG shmem_len = m_VioDev.shmem_len;
                 CPciBar *shmem_bar = m_PciResources.GetPciBar(m_VioDev.shmem_bar);
@@ -909,14 +1001,29 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
 
                     for (UINT i=0; i<segment_count; i++) 
                     {
-                        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s pSegmentDesc[%d].BaseAddress=%llx\n", __FUNCTION__, i, pSegmentDesc[i].BaseAddress.QuadPart));
-                        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s pSegmentDesc[%d].CpuTranslatedAddress=%llx\n", __FUNCTION__, i, pSegmentDesc[i].CpuTranslatedAddress.QuadPart));
-                        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s pSegmentDesc[%d].Size=%zx\n", __FUNCTION__, i, pSegmentDesc[i].Size));
-                        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s pSegmentDesc[%d].Flags: Aperture=%u CpuVisible=%u CacheCoherent=%u DirectFlip=%u\n", __FUNCTION__, i, pSegmentDesc[i].Flags.Aperture, pSegmentDesc[i].Flags.CpuVisible, pSegmentDesc[i].Flags.CacheCoherent, pSegmentDesc[i].Flags.DirectFlip));
+                        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                        {
+                            DbgPrint("VioGpu: %s pSegmentDesc[%d].BaseAddress=%llx\n", __FUNCTION__, i, pSegmentDesc[i].BaseAddress.QuadPart);
+                        }
+                        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                        {
+                            DbgPrint("VioGpu: %s pSegmentDesc[%d].CpuTranslatedAddress=%llx\n", __FUNCTION__, i, pSegmentDesc[i].CpuTranslatedAddress.QuadPart);
+                        }
+                        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                        {
+                            DbgPrint("VioGpu: %s pSegmentDesc[%d].Size=%zx\n", __FUNCTION__, i, pSegmentDesc[i].Size);
+                        }
+                        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                        {
+                            DbgPrint("VioGpu: %s pSegmentDesc[%d].Flags: Aperture=%u CpuVisible=%u CacheCoherent=%u DirectFlip=%u\n", __FUNCTION__, i, pSegmentDesc[i].Flags.Aperture, pSegmentDesc[i].Flags.CpuVisible, pSegmentDesc[i].Flags.CacheCoherent, pSegmentDesc[i].Flags.DirectFlip);
+                        }
                     }
                 }
                 
-                DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Requested segments\n", __FUNCTION__));
+                if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                {
+                    DbgPrint("VioGpu: <--- %s Requested segments\n", __FUNCTION__);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -936,11 +1043,13 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                  */
                 if (pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_QUERYSEGMENTOUT4))
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s OutputDataSize (%u) smaller than DXGK_QUERYSEGMENTOUT4 (%u)\n",
-                              __FUNCTION__,
-                              pQueryAdapterInfo->OutputDataSize,
-                              (UINT)sizeof(DXGK_QUERYSEGMENTOUT4)));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s OutputDataSize (%u) smaller than DXGK_QUERYSEGMENTOUT4 (%u)\n",
+                                 __FUNCTION__,
+                                 pQueryAdapterInfo->OutputDataSize,
+                                 (UINT)sizeof(DXGK_QUERYSEGMENTOUT4));
+                    }
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
@@ -963,10 +1072,12 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
 
                 if (pSegmentInfo->NbSegment != segment_count || !pSegmentInfo->pSegmentDescriptor)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s QUERYSEGMENT4 invalid fill buffer: count %u, expected %u, descriptors %p\n",
-                              __FUNCTION__, pSegmentInfo->NbSegment, segment_count,
-                              pSegmentInfo->pSegmentDescriptor));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s QUERYSEGMENT4 invalid fill buffer: count %u, expected %u, descriptors %p\n",
+                                 __FUNCTION__, pSegmentInfo->NbSegment, segment_count,
+                                 pSegmentInfo->pSegmentDescriptor);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
 
@@ -977,9 +1088,11 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 const SIZE_T stride = pSegmentInfo->SegmentDescriptorStride;
                 if (stride < required_descriptor_size || stride > MAXSIZE_T / segment_count)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s QUERYSEGMENT4 invalid descriptor stride %Iu: minimum %Iu, count %u\n",
-                              __FUNCTION__, stride, required_descriptor_size, segment_count));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s QUERYSEGMENT4 invalid descriptor stride %Iu: minimum %Iu, count %u\n",
+                                 __FUNCTION__, stride, required_descriptor_size, segment_count);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
 
@@ -1069,16 +1182,20 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                      * aperture segments only and stays zero here. */
                     pSegPt->SystemMemoryEndAddress = m_PageTableSegmentSize;
 
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s page table segment is id %u, %u bytes at physical %I64x\n",
-                              __FUNCTION__, m_PageTableSegmentId,
-                              (UINT)m_PageTableSegmentSize, m_PageTableSegmentPA.QuadPart));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s page table segment is id %u, %u bytes at physical %I64x\n",
+                                 __FUNCTION__, m_PageTableSegmentId,
+                                 (UINT)m_PageTableSegmentSize, m_PageTableSegmentPA.QuadPart);
+                    }
                 }
 
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s filled %u segments at stride %u, output %u bytes\n",
-                          __FUNCTION__, segment_count, (UINT)stride,
-                          pQueryAdapterInfo->OutputDataSize));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: %s filled %u segments at stride %u, output %u bytes\n",
+                             __FUNCTION__, segment_count, (UINT)stride,
+                             pQueryAdapterInfo->OutputDataSize);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -1111,10 +1228,12 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
 
                 if (pQueryAdapterInfo->OutputDataSize < required)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s OutputDataSize (%u) smaller than the %u bytes "
-                              "this query needs\n",
-                              __FUNCTION__, pQueryAdapterInfo->OutputDataSize, required));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s OutputDataSize (%u) smaller than the %u bytes "
+                                 "this query needs\n",
+                                 __FUNCTION__, pQueryAdapterInfo->OutputDataSize, required);
+                    }
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
@@ -1146,9 +1265,11 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 RtlZeroMemory(&pCaps->Flags, sizeof(pCaps->Flags));
                 pCaps->Flags.GpuMmuSupported = 1;
 
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s execution nodes=%u render=%u paging=%u\n", __FUNCTION__,
-                          VIOGPU_EXECUTION_NODE_COUNT, VIOGPU_RENDER_NODE, VIOGPU_PAGING_NODE));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: %s execution nodes=%u render=%u paging=%u\n", __FUNCTION__,
+                             VIOGPU_EXECUTION_NODE_COUNT, VIOGPU_RENDER_NODE, VIOGPU_PAGING_NODE);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -1174,9 +1295,11 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 for (UINT node = 0; node < VIOGPU_EXECUTION_NODE_COUNT; ++node)
                     pPrecision[node].PrecisionBits = 64;
 
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s history buffer precision 64 bits for %u nodes\n",
-                          __FUNCTION__, VIOGPU_EXECUTION_NODE_COUNT));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: %s history buffer precision 64 bits for %u nodes\n",
+                             __FUNCTION__, VIOGPU_EXECUTION_NODE_COUNT);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -1196,8 +1319,10 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 RtlZeroMemory(pQueryAdapterInfo->pOutputData,
                               sizeof(DXGK_DISPLAY_DRIVERCAPS_EXTENSION));
 
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s display caps extension, none supported\n", __FUNCTION__));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: %s display caps extension, none supported\n", __FUNCTION__);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -1227,9 +1352,11 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                  */
                 if (pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_GPUMMUCAPS))
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s GPUMMUCAPS wants %u bytes, got %u\n", __FUNCTION__,
-                              (UINT)sizeof(DXGK_GPUMMUCAPS), pQueryAdapterInfo->OutputDataSize));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s GPUMMUCAPS wants %u bytes, got %u\n", __FUNCTION__,
+                                 (UINT)sizeof(DXGK_GPUMMUCAPS), pQueryAdapterInfo->OutputDataSize);
+                    }
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
@@ -1242,9 +1369,11 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 pMmu->PageTableLevelCount = VIOGPU_PAGE_TABLE_LEVEL_COUNT;
                 pMmu->LeafPageTableSizeFor64KPagesInBytes = 0;
 
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s gpummu caps: %u va bits, %u levels\n", __FUNCTION__,
-                          pMmu->VirtualAddressBitCount, pMmu->PageTableLevelCount));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: %s gpummu caps: %u va bits, %u levels\n", __FUNCTION__,
+                             pMmu->VirtualAddressBitCount, pMmu->PageTableLevelCount);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -1283,11 +1412,13 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                     VIOGPU_PAGE_TABLE_ENTRY_COUNT * sizeof(VIOGPU_PAGE_TABLE_ENTRY);
                 pLevel->PageTableAlignmentInBytes = 0;
 
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s page table level %u: %u index bits, %u bytes, segment %u\n",
-                          __FUNCTION__, pIn ? pIn->LevelIndex : 0,
-                          pLevel->PageTableIndexBitCount, pLevel->PageTableSizeInBytes,
-                          pLevel->PageTableSegmentId));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: %s page table level %u: %u index bits, %u bytes, segment %u\n",
+                             __FUNCTION__, pIn ? pIn->LevelIndex : 0,
+                             pLevel->PageTableIndexBitCount, pLevel->PageTableSizeInBytes,
+                             pLevel->PageTableSegmentId);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -1302,8 +1433,10 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                  * GPUMMUCAPS (13), PAGETABLELEVELDESC (14) - and this driver
                  * answers none of them.
                  */
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("<--- %s unanswered query type %d\n", __FUNCTION__, pQueryAdapterInfo->Type));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: <--- %s unanswered query type %d\n", __FUNCTION__, pQueryAdapterInfo->Type);
+                }
                 return STATUS_NOT_SUPPORTED;
             }
     }
@@ -1334,7 +1467,10 @@ static NTSTATUS VioGpuCopyCapsetToUser(void *destination, const void *source, UL
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("Failed to copy"));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: Failed to copy");
+        }
         return STATUS_INVALID_PARAMETER;
     }
     return STATUS_SUCCESS;
@@ -1420,7 +1556,10 @@ BOOLEAN VioGpuAdapter::UploadCursor(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPoin
         VioGpuObj *obj = new (NonPagedPoolNx) VioGpuObj();
         if (!obj || !obj->Init(POINTER_SIZE * POINTER_SIZE * 4, &m_CursorSegment) || !vidpn.GpuObjectAttach(resid, obj))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s cannot create the cursor resource\n", __FUNCTION__));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: <--- %s cannot create the cursor resource\n", __FUNCTION__);
+            }
             ctrlQueue.DestroyResource(resid);
             resourceIdr.PutId(resid);
             delete obj;
@@ -1510,16 +1649,18 @@ NTSTATUS VioGpuAdapter::SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSet
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_INFORMATION,
-             ("<--> %s flags = 0x%x %u x %u pitch = %u hot = (%u, %u) source = %u\n",
-              __FUNCTION__,
-              pSetPointerShape->Flags.Value,
-              pSetPointerShape->Width,
-              pSetPointerShape->Height,
-              pSetPointerShape->Pitch,
-              pSetPointerShape->XHot,
-              pSetPointerShape->YHot,
-              pSetPointerShape->VidPnSourceId));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: <--> %s flags = 0x%x %u x %u pitch = %u hot = (%u, %u) source = %u\n",
+                 __FUNCTION__,
+                 pSetPointerShape->Flags.Value,
+                 pSetPointerShape->Width,
+                 pSetPointerShape->Height,
+                 pSetPointerShape->Pitch,
+                 pSetPointerShape->XHot,
+                 pSetPointerShape->YHot,
+                 pSetPointerShape->VidPnSourceId);
+    }
 
     RereadCursorSettings();
     // Shapes of the kinds the caps offer, that fit the resource; the converted kinds only on an unrotated display.
@@ -1567,14 +1708,16 @@ NTSTATUS VioGpuAdapter::SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("<--> %s (%d, %d) flags = 0x%x source = %u hidden = %d\n",
-              __FUNCTION__,
-              pSetPointerPosition->X,
-              pSetPointerPosition->Y,
-              pSetPointerPosition->Flags.Value,
-              pSetPointerPosition->VidPnSourceId,
-              m_bCursorHidden));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--> %s (%d, %d) flags = 0x%x source = %u hidden = %d\n",
+                 __FUNCTION__,
+                 pSetPointerPosition->X,
+                 pSetPointerPosition->Y,
+                 pSetPointerPosition->Flags.Value,
+                 pSetPointerPosition->VidPnSourceId,
+                 m_bCursorHidden);
+    }
 
     if (pSetPointerPosition->VidPnSourceId != 0)
     {
@@ -1627,7 +1770,10 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
 
     VIOGPU_ASSERT(pEscape != NULL);
 
-    DbgPrint(TRACE_LEVEL_INFORMATION, ("<---> %s Flags = %d\n", __FUNCTION__, pEscape->Flags.Value));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: <---> %s Flags = %d\n", __FUNCTION__, pEscape->Flags.Value);
+    }
     PAGED_CODE();
     PVIOGPU_ESCAPE pVioGpuEscape = (PVIOGPU_ESCAPE)pEscape->pPrivateDriverData;
     NTSTATUS status = STATUS_SUCCESS;
@@ -1637,11 +1783,13 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
     const UINT requiredSize = sizeof(VIOGPU_ESCAPE);
     if (size < requiredSize)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s buffer too small %u, should be at least %u\n",
-                  __FUNCTION__,
-                  pEscape->PrivateDriverDataSize,
-                  requiredSize));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s buffer too small %u, should be at least %u\n",
+                     __FUNCTION__,
+                     pEscape->PrivateDriverDataSize,
+                     requiredSize);
+        }
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
@@ -1662,11 +1810,13 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(ULONG);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
                 pVioGpuEscape->Id = m_Id;
@@ -1677,11 +1827,13 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_DISP_MODE);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
                 vidpn.EscapeCustomResoulution(&pVioGpuEscape->Resolution);
@@ -1692,23 +1844,31 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_CAPSET_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
 
                 if (!(m_supportedCapsetIDs & (1ull << pVioGpuEscape->Capset.CapsetId)))
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s capset id is not supported\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s capset id is not supported\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER_1;
                 }
                 CAPSET_INFO *pCapsetInfo = &m_capsetInfos[pVioGpuEscape->Capset.CapsetId];
                 if (pCapsetInfo->max_version < pVioGpuEscape->Capset.Version)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s capset version is too low\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s capset version is too low\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER_2;
                 };
 
@@ -1738,18 +1898,23 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_RES_INFO_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
                 VioGpuAllocationReference allocationReference(this, pVioGpuEscape->ResourceInfo.ResHandle);
                 VioGpuAllocation *allocation = allocationReference.Get();
                 if (allocation == NULL)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s ivalid handle\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s ivalid handle\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
 
@@ -1762,11 +1927,13 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_RES_ATTACH_WAIT_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
 
@@ -1774,34 +1941,46 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 VioGpuAllocation *allocation = allocationReference.Get();
                 if (allocation == NULL)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid attach-wait handle\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s invalid attach-wait handle\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
 
                 VioGpuDevice *device = reinterpret_cast<VioGpuDevice *>(pEscape->hDevice);
                 if (device == NULL)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s attach-wait without device context\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s attach-wait without device context\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
                 if (!virtio_is_feature_enabled(m_u64GuestFeatures, VIRTIO_GPU_F_CONTEXT_INIT))
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s attach-wait requires negotiated CONTEXT_INIT\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s attach-wait requires negotiated CONTEXT_INIT\n", __FUNCTION__);
+                    }
                     return STATUS_NOT_SUPPORTED;
                 }
                 if (!device->IsContextCreated())
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s attach-wait before context creation ctx_id=0x%x\n",
-                              __FUNCTION__, device->GetId()));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s attach-wait before context creation ctx_id=0x%x\n",
+                                 __FUNCTION__, device->GetId());
+                    }
                     return STATUS_DEVICE_NOT_READY;
                 }
                 if (!device->IsVenusContext())
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s attach-wait requires a Venus context ctx_id=0x%x capset=0x%x\n",
-                              __FUNCTION__, device->GetId(), device->GetCapsetId()));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s attach-wait requires a Venus context ctx_id=0x%x capset=0x%x\n",
+                                 __FUNCTION__, device->GetId(), device->GetCapsetId());
+                    }
                     return STATUS_NOT_SUPPORTED;
                 }
 
@@ -1810,9 +1989,11 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                     status = allocation->EnsureBlobCreatedAndWait(device->GetId());
                     if (!NT_SUCCESS(status))
                     {
-                        DbgPrint(TRACE_LEVEL_ERROR,
-                                 ("%s attach-wait blob create failed status=0x%x res_id=0x%x ctx_id=0x%x\n",
-                                  __FUNCTION__, status, allocation->GetId(), device->GetId()));
+                        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                        {
+                            DbgPrint("VioGpu: %s attach-wait blob create failed status=0x%x res_id=0x%x ctx_id=0x%x\n",
+                                     __FUNCTION__, status, allocation->GetId(), device->GetId());
+                        }
                         return status;
                     }
                 }
@@ -1821,9 +2002,11 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 status = ctrlQueue.CtxResourceWait(device->GetId(), allocation->GetId());
                 if (!NT_SUCCESS(status))
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s attach-wait failed status=0x%x res_id=0x%x ctx_id=0x%x\n",
-                              __FUNCTION__, status, allocation->GetId(), device->GetId()));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s attach-wait failed status=0x%x res_id=0x%x ctx_id=0x%x\n",
+                                 __FUNCTION__, status, allocation->GetId(), device->GetId());
+                    }
                 }
                 break;
             }
@@ -1832,18 +2015,23 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_RES_BUSY_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
                 VioGpuAllocationReference allocationReference(this, pVioGpuEscape->ResourceBusy.ResHandle);
                 VioGpuAllocation *allocation = allocationReference.Get();
                 if (allocation == NULL)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s ivalid handle\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s ivalid handle\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
                 status = allocation->EscapeResourceBusy(&pVioGpuEscape->ResourceBusy);
@@ -1855,18 +2043,23 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_RES_MAP_BLOB_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
                 VioGpuAllocationReference allocationReference(this, pVioGpuEscape->ResourceMapBlob.ResHandle);
                 VioGpuAllocation *allocation = allocationReference.Get();
                 if (allocation == NULL)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid handle\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s invalid handle\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_HANDLE;
                 }
 
@@ -1879,18 +2072,23 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_RES_UNMAP_BLOB_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
                 VioGpuAllocationReference allocationReference(this, pVioGpuEscape->ResourceUnmapBlob.ResHandle);
                 VioGpuAllocation *allocation = allocationReference.Get();
                 if (allocation == NULL)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid handle\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s invalid handle\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
 
@@ -1903,18 +2101,23 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_RES_SET_SCANOUT_BLOB_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
                 VioGpuAllocationReference allocationReference(this, pVioGpuEscape->ResourceSetScanoutBlob.ResHandle);
                 VioGpuAllocation *allocation = allocationReference.Get();
                 if (allocation == NULL)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid handle\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s invalid handle\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
 
@@ -1926,17 +2129,22 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_CTX_INIT_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
                 VioGpuDevice *context = reinterpret_cast<VioGpuDevice *>(pEscape->hDevice);
                 if (context == NULL)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s no hDdevice(context) supplied\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s no hDdevice(context) supplied\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
                 context->Init(&pVioGpuEscape->CtxInit);
@@ -1947,22 +2155,26 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 size = sizeof(VIOGPU_SUBMIT_CMD_REQ);
                 if (pVioGpuEscape->DataLength < size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s buffer too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s buffer too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
 
                 const UINT total_size = sizeof(VIOGPU_ESCAPE) + pVioGpuEscape->DataLength;
                 if (pEscape->PrivateDriverDataSize < total_size)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s escape size too small %d, should be at least %d\n",
-                              __FUNCTION__,
-                              pEscape->PrivateDriverDataSize,
-                              total_size));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s escape size too small %d, should be at least %d\n",
+                                 __FUNCTION__,
+                                 pEscape->PrivateDriverDataSize,
+                                 total_size);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
 
@@ -1971,18 +2183,23 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 const UINT needed = (UINT)(sizeof(*req) + req->CmdSize);
                 if (pVioGpuEscape->DataLength < needed)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s escape payload too small %d, need %d\n",
-                              __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              needed));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s escape payload too small %d, need %d\n",
+                                 __FUNCTION__,
+                                 pVioGpuEscape->DataLength,
+                                 needed);
+                    }
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
 
                 VioGpuDevice *device = reinterpret_cast<VioGpuDevice *>(pEscape->hDevice);
                 if (!device)
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR, ("%s NULL device\n", __FUNCTION__));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s NULL device\n", __FUNCTION__);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
 
@@ -1990,7 +2207,10 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 {
                     if (req->CmdSize == 0)
                     {
-                        DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid cmd_size=0\n", __FUNCTION__));
+                        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                        {
+                            DbgPrint("VioGpu: %s invalid cmd_size=0\n", __FUNCTION__);
+                        }
                         return STATUS_INVALID_PARAMETER;
                     }
 
@@ -2018,16 +2238,21 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 }
                 else
                 {
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s unsupported cmd_type=0x%x\n",
-                              __FUNCTION__, req->CmdType));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: %s unsupported cmd_type=0x%x\n",
+                                 __FUNCTION__, req->CmdType);
+                    }
                     return STATUS_INVALID_PARAMETER;
                 }
                 break;
             }
 
         default:
-            DbgPrint(TRACE_LEVEL_ERROR, ("%s: invalid Escape type 0x%x\n", __FUNCTION__, pVioGpuEscape->Type));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: %s: invalid Escape type 0x%x\n", __FUNCTION__, pVioGpuEscape->Type);
+            }
             status = STATUS_INVALID_PARAMETER;
     }
 
@@ -2040,7 +2265,10 @@ NTSTATUS VioGpuAdapter::QueryInterface(_In_ CONST PQUERY_INTERFACE pQueryInterfa
 
     VIOGPU_ASSERT(pQueryInterface != NULL);
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s Version = %d\n", __FUNCTION__, pQueryInterface->Version));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s Version = %d\n", __FUNCTION__, pQueryInterface->Version);
+    }
 
     return STATUS_NOT_SUPPORTED;
 }
@@ -2076,14 +2304,16 @@ BOOLEAN VioGpuAdapter::ShouldNotifyDmaFence(UINT fenceId,
 {
     if (nodeOrdinal >= kMaxTrackedNodes || engineOrdinal >= kMaxTrackedEngines)
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s fence=%u node=%u engine=%u out of tracked range; notify without monotonic check ctx_id=%u owner_pid=%p\n",
-                  __FUNCTION__,
-                  fenceId,
-                  nodeOrdinal,
-                  engineOrdinal,
-                  ctxId,
-                  ownerPid));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: %s fence=%u node=%u engine=%u out of tracked range; notify without monotonic check ctx_id=%u owner_pid=%p\n",
+                     __FUNCTION__,
+                     fenceId,
+                     nodeOrdinal,
+                     engineOrdinal,
+                     ctxId,
+                     ownerPid);
+        }
         return TRUE;
     }
 
@@ -2104,16 +2334,18 @@ BOOLEAN VioGpuAdapter::ShouldNotifyDmaFence(UINT fenceId,
     }
 
     LONG dropCount = InterlockedIncrement(&m_outOfOrderFenceDropCount);
-    DbgPrint(TRACE_LEVEL_WARNING,
-             ("%s stale/duplicate DMA completion observed (filtered) fence=%u last_notified=%u node=%u engine=%u ctx_id=%u owner_pid=%p count=%ld\n",
-              __FUNCTION__,
-              fenceId,
-              lastFence,
-              nodeOrdinal,
-              engineOrdinal,
-              ctxId,
-              ownerPid,
-              dropCount));
+    if (nDebugLevel >= TRACE_LEVEL_WARNING)
+    {
+        DbgPrint("VioGpu: %s stale/duplicate DMA completion observed (filtered) fence=%u last_notified=%u node=%u engine=%u ctx_id=%u owner_pid=%p count=%ld\n",
+                 __FUNCTION__,
+                 fenceId,
+                 lastFence,
+                 nodeOrdinal,
+                 engineOrdinal,
+                 ctxId,
+                 ownerPid,
+                 dropCount);
+    }
     return FALSE;
 }
 
@@ -2145,16 +2377,18 @@ void VioGpuAdapter::NotifyDmaPreempted(UINT preemptionFenceId,
     LONG notifyCount = InterlockedIncrement(&m_preemptionNotifyCount);
     if (ShouldLogPreemptionSample(notifyCount))
     {
-        DbgPrint(TRACE_LEVEL_VERBOSE,
-                 ("%s preemption_notify[%ld] reason=%s preempt_fence=%u last_completed=%u node=%u engine=%u from_isr=%u\n",
-                  __FUNCTION__,
-                  notifyCount,
-                  reason ? reason : "unknown",
-                  preemptionFenceId,
-                  lastCompletedFenceId,
-                  nodeOrdinal,
-                  engineOrdinal,
-                  fromIsr));
+        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+        {
+            DbgPrint("VioGpu: %s preemption_notify[%ld] reason=%s preempt_fence=%u last_completed=%u node=%u engine=%u from_isr=%u\n",
+                     __FUNCTION__,
+                     notifyCount,
+                     reason ? reason : "unknown",
+                     preemptionFenceId,
+                     lastCompletedFenceId,
+                     nodeOrdinal,
+                     engineOrdinal,
+                     fromIsr);
+        }
     }
 
     if (fromIsr)
@@ -2176,14 +2410,16 @@ void VioGpuAdapter::NotifyDmaPreempted(UINT preemptionFenceId,
                                                                   &callbackRet);
     if (!NT_SUCCESS(status) || !callbackRet)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s preemption_notify_sync_failed status=0x%x callback=%u preempt_fence=%u node=%u engine=%u\n",
-                  __FUNCTION__,
-                  status,
-                  callbackRet,
-                  preemptionFenceId,
-                  nodeOrdinal,
-                  engineOrdinal));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s preemption_notify_sync_failed status=0x%x callback=%u preempt_fence=%u node=%u engine=%u\n",
+                     __FUNCTION__,
+                     status,
+                     callbackRet,
+                     preemptionFenceId,
+                     nodeOrdinal,
+                     engineOrdinal);
+        }
         m_DxgkInterface.DxgkCbNotifyInterrupt(m_DxgkInterface.DeviceHandle, &interrupt);
         m_DxgkInterface.DxgkCbQueueDpc(m_DxgkInterface.DeviceHandle);
     }
@@ -2214,8 +2450,10 @@ void VioGpuAdapter::NotifyVsync(PHYSICAL_ADDRESS sourceAddress)
                                                                   &callbackRet);
     if (!NT_SUCCESS(status) || !callbackRet)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s vsync_notify_sync_failed status=0x%x callback=%u\n", __FUNCTION__, status, callbackRet));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s vsync_notify_sync_failed status=0x%x callback=%u\n", __FUNCTION__, status, callbackRet);
+        }
     }
 }
 
@@ -2264,14 +2502,16 @@ NTSTATUS VioGpuAdapter::PreemptCommand(_In_ CONST DXGKARG_PREEMPTCOMMAND *pPreem
     if (nodeOrdinal >= kMaxTrackedNodes || engineOrdinal >= kMaxTrackedEngines)
     {
         LONG invalidCount = InterlockedIncrement(&m_preemptionInvalidCount);
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s invalid_preemption[%ld] preempt_fence=%u node=%u engine=%u flags=0x%x\n",
-                  __FUNCTION__,
-                  invalidCount,
-                  preemptionFenceId,
-                  nodeOrdinal,
-                  engineOrdinal,
-                  pPreemptCommand->Flags.Value));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s invalid_preemption[%ld] preempt_fence=%u node=%u engine=%u flags=0x%x\n",
+                     __FUNCTION__,
+                     invalidCount,
+                     preemptionFenceId,
+                     nodeOrdinal,
+                     engineOrdinal,
+                     pPreemptCommand->Flags.Value);
+        }
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -2285,19 +2525,21 @@ NTSTATUS VioGpuAdapter::PreemptCommand(_In_ CONST DXGKARG_PREEMPTCOMMAND *pPreem
         LONG deferredCount = InterlockedIncrement(&m_preemptionDeferredCount);
         if (ShouldLogPreemptionSample(deferredCount))
         {
-            DbgPrint(TRACE_LEVEL_VERBOSE,
-                     ("%s preemption_deferred[%ld] request=%ld preempt_fence=%u previous_pending=%ld "
-                      "outstanding=%ld last_completed=%u node=%u engine=%u flags=0x%x\n",
-                      __FUNCTION__,
-                      deferredCount,
-                      requestCount,
-                      preemptionFenceId,
-                      previousFence,
-                      outstanding,
-                      GetLastNotifiedFence(nodeOrdinal, engineOrdinal),
-                      nodeOrdinal,
-                      engineOrdinal,
-                      pPreemptCommand->Flags.Value));
+            if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+            {
+                DbgPrint("VioGpu: %s preemption_deferred[%ld] request=%ld preempt_fence=%u previous_pending=%ld "
+                         "outstanding=%ld last_completed=%u node=%u engine=%u flags=0x%x\n",
+                         __FUNCTION__,
+                         deferredCount,
+                         requestCount,
+                         preemptionFenceId,
+                         previousFence,
+                         outstanding,
+                         GetLastNotifiedFence(nodeOrdinal, engineOrdinal),
+                         nodeOrdinal,
+                         engineOrdinal,
+                         pPreemptCommand->Flags.Value);
+            }
         }
 
         NotifyPendingPreemptionIfDrained(nodeOrdinal, engineOrdinal, FALSE, "preempt_race_drained");
@@ -2306,15 +2548,17 @@ NTSTATUS VioGpuAdapter::PreemptCommand(_In_ CONST DXGKARG_PREEMPTCOMMAND *pPreem
 
     if (ShouldLogPreemptionSample(requestCount))
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s preemption_idle request=%ld preempt_fence=%u last_completed=%u node=%u engine=%u flags=0x%x\n",
-                  __FUNCTION__,
-                  requestCount,
-                  preemptionFenceId,
-                  GetLastNotifiedFence(nodeOrdinal, engineOrdinal),
-                  nodeOrdinal,
-                  engineOrdinal,
-                  pPreemptCommand->Flags.Value));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: %s preemption_idle request=%ld preempt_fence=%u last_completed=%u node=%u engine=%u flags=0x%x\n",
+                     __FUNCTION__,
+                     requestCount,
+                     preemptionFenceId,
+                     GetLastNotifiedFence(nodeOrdinal, engineOrdinal),
+                     nodeOrdinal,
+                     engineOrdinal,
+                     pPreemptCommand->Flags.Value);
+        }
     }
     NotifyDmaPreempted(preemptionFenceId,
                        GetLastNotifiedFence(nodeOrdinal, engineOrdinal),
@@ -2336,22 +2580,26 @@ NTSTATUS VioGpuAdapter::QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *pCu
     if (pCurrentFence->NodeOrdinal >= kMaxTrackedNodes ||
         pCurrentFence->EngineOrdinal >= kMaxTrackedEngines)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s invalid_query node=%u engine=%u\n",
-                  __FUNCTION__,
-                  pCurrentFence->NodeOrdinal,
-                  pCurrentFence->EngineOrdinal));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s invalid_query node=%u engine=%u\n",
+                     __FUNCTION__,
+                     pCurrentFence->NodeOrdinal,
+                     pCurrentFence->EngineOrdinal);
+        }
         return STATUS_INVALID_PARAMETER;
     }
 
     pCurrentFence->CurrentFence = GetLastNotifiedFence(pCurrentFence->NodeOrdinal,
                                                        pCurrentFence->EngineOrdinal);
-    DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("%s node=%u engine=%u current_fence=%u\n",
-              __FUNCTION__,
-              pCurrentFence->NodeOrdinal,
-              pCurrentFence->EngineOrdinal,
-              pCurrentFence->CurrentFence));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: %s node=%u engine=%u current_fence=%u\n",
+                 __FUNCTION__,
+                 pCurrentFence->NodeOrdinal,
+                 pCurrentFence->EngineOrdinal,
+                 pCurrentFence->CurrentFence);
+    }
 
     return STATUS_SUCCESS;
 }
@@ -2364,14 +2612,16 @@ void VioGpuAdapter::RecordDmaSubmittedForPreemption(UINT fenceId,
 {
     if (nodeOrdinal >= kMaxTrackedNodes || engineOrdinal >= kMaxTrackedEngines)
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s skipped_out_of_range fence=%u node=%u engine=%u ctx_id=%u owner_pid=%p\n",
-                  __FUNCTION__,
-                  fenceId,
-                  nodeOrdinal,
-                  engineOrdinal,
-                  ctxId,
-                  ownerPid));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: %s skipped_out_of_range fence=%u node=%u engine=%u ctx_id=%u owner_pid=%p\n",
+                     __FUNCTION__,
+                     fenceId,
+                     nodeOrdinal,
+                     engineOrdinal,
+                     ctxId,
+                     ownerPid);
+        }
         return;
     }
 
@@ -2379,17 +2629,19 @@ void VioGpuAdapter::RecordDmaSubmittedForPreemption(UINT fenceId,
     LONG pendingFence = InterlockedCompareExchange(&m_pendingPreemptionFence[nodeOrdinal][engineOrdinal], 0, 0);
     if (pendingFence != 0)
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s submit_while_preempt_pending fence=%u pending_preempt=%ld outstanding=%ld "
-                  "node=%u engine=%u ctx_id=%u owner_pid=%p\n",
-                  __FUNCTION__,
-                  fenceId,
-                  pendingFence,
-                  outstanding,
-                  nodeOrdinal,
-                  engineOrdinal,
-                  ctxId,
-                  ownerPid));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: %s submit_while_preempt_pending fence=%u pending_preempt=%ld outstanding=%ld "
+                     "node=%u engine=%u ctx_id=%u owner_pid=%p\n",
+                     __FUNCTION__,
+                     fenceId,
+                     pendingFence,
+                     outstanding,
+                     nodeOrdinal,
+                     engineOrdinal,
+                     ctxId,
+                     ownerPid);
+        }
     }
 }
 
@@ -2407,14 +2659,16 @@ void VioGpuAdapter::RecordDmaCompletionForPreemptionFromIsr(UINT fenceId,
     LONG outstanding = InterlockedDecrement(&m_preemptSubmittedOutstanding[nodeOrdinal][engineOrdinal]);
     if (outstanding < 0)
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s outstanding_underflow fence=%u node=%u engine=%u ctx_id=%u owner_pid=%p\n",
-                  __FUNCTION__,
-                  fenceId,
-                  nodeOrdinal,
-                  engineOrdinal,
-                  ctxId,
-                  ownerPid));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: %s outstanding_underflow fence=%u node=%u engine=%u ctx_id=%u owner_pid=%p\n",
+                     __FUNCTION__,
+                     fenceId,
+                     nodeOrdinal,
+                     engineOrdinal,
+                     ctxId,
+                     ownerPid);
+        }
         InterlockedExchange(&m_preemptSubmittedOutstanding[nodeOrdinal][engineOrdinal], 0);
         outstanding = 0;
     }
@@ -2471,37 +2725,50 @@ BOOLEAN VioGpuAdapter::CtrlStagePopForDpc(PGPU_VBUFFER *buf, UINT *len)
 
 VOID VioGpuAdapter::ProcessCtrlQueueBuffer(PGPU_VBUFFER pvbuf, UINT len)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s ctrlQueue pvbuf = %p len = %d\n", __FUNCTION__, pvbuf, len));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s ctrlQueue pvbuf = %p len = %d\n", __FUNCTION__, pvbuf, len);
+    }
 
     PGPU_CTRL_HDR pcmd = (PGPU_CTRL_HDR)pvbuf->buf;
     PGPU_CTRL_HDR resp = (PGPU_CTRL_HDR)pvbuf->resp_buf;
 
     if (resp == NULL)
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("!!!!! Command failed resp_buf == NULL\n"));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: !!!!! Command failed resp_buf == NULL\n");
+        }
     }
     else if (resp->type >= VIRTIO_GPU_RESP_ERR_UNSPEC)
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("!!!!! Command failed resp->type=%x pcmd->type=%x\n", resp->type, pcmd->type));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: !!!!! Command failed resp->type=%x pcmd->type=%x\n", resp->type, pcmd->type);
+        }
     }
     else if (resp->type == VIRTIO_GPU_RESP_OK_NODATA)
     {
-        DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("<--- %s fence_id=%llu cmd_type=%lu\n",
-                  __FUNCTION__,
-                  (ULONGLONG)resp->fence_id,
-                  pcmd->type));
+        if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+        {
+            DbgPrint("VioGpu: <--- %s fence_id=%llu cmd_type=%lu\n",
+                     __FUNCTION__,
+                     (ULONGLONG)resp->fence_id,
+                     pcmd->type);
+        }
     }
     else
     {
-        DbgPrint(TRACE_LEVEL_VERBOSE,
-                 ("<--- %s type = %xlu flags = %lx fence_id = %llx ctx_id = %lx cmd_type = %lx\n",
-                  __FUNCTION__,
-                  resp->type,
-                  resp->flags,
-                  resp->fence_id,
-                  resp->ctx_id,
-                  pcmd->type));
+        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+        {
+            DbgPrint("VioGpu: <--- %s type = %xlu flags = %lx fence_id = %llx ctx_id = %lx cmd_type = %lx\n",
+                     __FUNCTION__,
+                     resp->type,
+                     resp->flags,
+                     resp->fence_id,
+                     resp->ctx_id,
+                     pcmd->type);
+        }
     }
 
     const bool auto_release = pvbuf->auto_release;
@@ -2517,7 +2784,10 @@ VOID VioGpuAdapter::ProcessCtrlQueueBuffer(PGPU_VBUFFER pvbuf, UINT len)
 
 VOID VioGpuAdapter::DpcRoutine(VOID)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     PGPU_VBUFFER pvbuf = NULL;
     UINT len = 0;
     ULONG reason;
@@ -2535,29 +2805,43 @@ VOID VioGpuAdapter::DpcRoutine(VOID)
         {
             while ((pvbuf = m_CursorQueue.DequeueCursor(&len)) != NULL)
             {
-                DbgPrint(TRACE_LEVEL_VERBOSE,
-                         ("---> %s m_CursorQueue pvbuf = %p len = %u\n", __FUNCTION__, pvbuf, len));
+                if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                {
+                    DbgPrint("VioGpu: ---> %s m_CursorQueue pvbuf = %p len = %u\n", __FUNCTION__, pvbuf, len);
+                }
                 m_CursorQueue.ReleaseBuffer(pvbuf);
             };
         }
         if (reason & ISR_REASON_CHANGE)
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("---> %s ConfigChanged\n", __FUNCTION__));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: ---> %s ConfigChanged\n", __FUNCTION__);
+            }
             KeSetEvent(&m_ConfigUpdateEvent, IO_NO_INCREMENT, FALSE);
         }
         // In ISR-staging mode, dequeue happens in ISR, so flush pending
         // control commands here after descriptor space has been returned.
         ctrlQueue.Flush();
     }
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 
     m_DxgkInterface.DxgkCbNotifyDpc((HANDLE)m_DxgkInterface.DeviceHandle);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 }
 
 VOID VioGpuAdapter::ResetDevice(VOID)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s\n", __FUNCTION__);
+    }
 }
 
 #pragma code_seg(pop) // End Non-Paged Code
@@ -2573,7 +2857,10 @@ NTSTATUS VioGpuAdapter::WriteRegistryString(_In_ HANDLE DevInstRegKeyHandle,
     ANSI_STRING AnsiStrValue;
     UNICODE_STRING UnicodeStrValue;
     UNICODE_STRING UnicodeStrValueName;
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     RtlInitUnicodeString(&UnicodeStrValueName, pszwValueName);
 
@@ -2581,7 +2868,10 @@ NTSTATUS VioGpuAdapter::WriteRegistryString(_In_ HANDLE DevInstRegKeyHandle,
     Status = RtlAnsiStringToUnicodeString(&UnicodeStrValue, &AnsiStrValue, TRUE);
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("RtlAnsiStringToUnicodeString failed with Status: 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: RtlAnsiStringToUnicodeString failed with Status: 0x%X\n", Status);
+        }
         return Status;
     }
 
@@ -2596,10 +2886,16 @@ NTSTATUS VioGpuAdapter::WriteRegistryString(_In_ HANDLE DevInstRegKeyHandle,
 
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("ZwSetValueKey failed with Status: 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: ZwSetValueKey failed with Status: 0x%X\n", Status);
+        }
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
     return Status;
 }
 
@@ -2611,7 +2907,10 @@ NTSTATUS VioGpuAdapter::WriteRegistryDWORD(_In_ HANDLE DevInstRegKeyHandle,
 
     NTSTATUS Status = STATUS_SUCCESS;
     UNICODE_STRING UnicodeStrValueName;
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     RtlInitUnicodeString(&UnicodeStrValueName, pszwValueName);
 
@@ -2619,10 +2918,16 @@ NTSTATUS VioGpuAdapter::WriteRegistryDWORD(_In_ HANDLE DevInstRegKeyHandle,
 
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("ZwSetValueKey failed with Status: 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: ZwSetValueKey failed with Status: 0x%X\n", Status);
+        }
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
     return Status;
 }
 
@@ -2636,7 +2941,10 @@ NTSTATUS VioGpuAdapter::ReadRegistryDWORD(_In_ HANDLE DevInstRegKeyHandle,
     UNICODE_STRING UnicodeStrValueName;
     ULONG ulRes;
     UCHAR Buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(DWORD)];
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     RtlInitUnicodeString(&UnicodeStrValueName, pszwValueName);
 
@@ -2663,10 +2971,16 @@ NTSTATUS VioGpuAdapter::ReadRegistryDWORD(_In_ HANDLE DevInstRegKeyHandle,
 
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("ZwQueryValueKey failed with Status: 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: ZwQueryValueKey failed with Status: 0x%X\n", Status);
+        }
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
     return Status;
 }
 
@@ -2675,7 +2989,10 @@ NTSTATUS VioGpuAdapter::SetRegisterInfo(_In_ ULONG Id, _In_ DWORD MemSize)
     PAGED_CODE();
 
     NTSTATUS Status = STATUS_SUCCESS;
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     PCSTR StrHWInfoChipType = "QEMU VIRTIO GPU";
     PCSTR StrHWInfoDacType = "VIRTIO GPU";
@@ -2686,8 +3003,10 @@ NTSTATUS VioGpuAdapter::SetRegisterInfo(_In_ ULONG Id, _In_ DWORD MemSize)
     Status = IoOpenDeviceRegistryKey(m_pPhysicalDevice, PLUGPLAY_REGKEY_DRIVER, KEY_SET_VALUE, &DevInstRegKeyHandle);
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("IoOpenDeviceRegistryKey failed for PDO: 0x%p, Status: 0x%X", m_pPhysicalDevice, Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: IoOpenDeviceRegistryKey failed for PDO: 0x%p, Status: 0x%X", m_pPhysicalDevice, Status);
+        }
         return Status;
     }
 
@@ -2696,28 +3015,40 @@ NTSTATUS VioGpuAdapter::SetRegisterInfo(_In_ ULONG Id, _In_ DWORD MemSize)
         Status = WriteRegistryString(DevInstRegKeyHandle, L"HardwareInformation.ChipType", StrHWInfoChipType);
         if (!NT_SUCCESS(Status))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("WriteRegistryString failed for ChipType with Status: 0x%X", Status));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: WriteRegistryString failed for ChipType with Status: 0x%X", Status);
+            }
             break;
         }
 
         Status = WriteRegistryString(DevInstRegKeyHandle, L"HardwareInformation.DacType", StrHWInfoDacType);
         if (!NT_SUCCESS(Status))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("WriteRegistryString failed DacType with Status: 0x%X", Status));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: WriteRegistryString failed DacType with Status: 0x%X", Status);
+            }
             break;
         }
 
         Status = WriteRegistryString(DevInstRegKeyHandle, L"HardwareInformation.AdapterString", StrHWInfoAdapterString);
         if (!NT_SUCCESS(Status))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("WriteRegistryString failed for AdapterString with Status: 0x%X", Status));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: WriteRegistryString failed for AdapterString with Status: 0x%X", Status);
+            }
             break;
         }
 
         Status = WriteRegistryString(DevInstRegKeyHandle, L"HardwareInformation.BiosString", StrHWInfoBiosString);
         if (!NT_SUCCESS(Status))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("WriteRegistryString failed for BiosString with Status: 0x%X", Status));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: WriteRegistryString failed for BiosString with Status: 0x%X", Status);
+            }
             break;
         }
 
@@ -2725,7 +3056,10 @@ NTSTATUS VioGpuAdapter::SetRegisterInfo(_In_ ULONG Id, _In_ DWORD MemSize)
         Status = WriteRegistryDWORD(DevInstRegKeyHandle, L"HardwareInformation.MemorySize", &MemorySize);
         if (!NT_SUCCESS(Status))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("WriteRegistryDWORD failed for MemorySize with Status: 0x%X", Status));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: WriteRegistryDWORD failed for MemorySize with Status: 0x%X", Status);
+            }
             break;
         }
 
@@ -2733,13 +3067,19 @@ NTSTATUS VioGpuAdapter::SetRegisterInfo(_In_ ULONG Id, _In_ DWORD MemSize)
         Status = WriteRegistryDWORD(DevInstRegKeyHandle, L"VioGpuAdapterID", &DeviceId);
         if (!NT_SUCCESS(Status))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("WriteRegistryDWORD failed for VioGpuAdapterID with Status: 0x%X", Status));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: WriteRegistryDWORD failed for VioGpuAdapterID with Status: 0x%X", Status);
+            }
         }
     } while (0);
 
     ZwClose(DevInstRegKeyHandle);
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
     return Status;
 }
 
@@ -2779,13 +3119,18 @@ NTSTATUS VioGpuAdapter::GetRegisterInfo(void)
     PAGED_CODE();
 
     NTSTATUS Status = STATUS_SUCCESS;
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     HANDLE DevInstRegKeyHandle;
     Status = IoOpenDeviceRegistryKey(m_pPhysicalDevice, PLUGPLAY_REGKEY_DRIVER, KEY_READ, &DevInstRegKeyHandle);
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("IoOpenDeviceRegistryKey failed for PDO: 0x%p, Status: 0x%X", m_pPhysicalDevice, Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: IoOpenDeviceRegistryKey failed for PDO: 0x%p, Status: 0x%X", m_pPhysicalDevice, Status);
+        }
         return Status;
     }
 
@@ -2806,7 +3151,10 @@ NTSTATUS VioGpuAdapter::GetRegisterInfo(void)
     }
 
     ZwClose(DevInstRegKeyHandle);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
     return Status;
 }
 PAGED_CODE_SEG_END
@@ -2818,18 +3166,27 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
     PAGED_CODE();
     NTSTATUS status = STATUS_SUCCESS;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     if (IsHardwareInit())
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("Already Initialized\n"));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: Already Initialized\n");
+        }
         VioGpuDbgBreak();
         return status;
     }
     status = VirtIoDeviceInit();
     if (!NT_SUCCESS(status))
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("Failed to initialize virtio device, error %x\n", status));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: Failed to initialize virtio device, error %x\n", status);
+        }
         VioGpuDbgBreak();
         return status;
     }
@@ -2843,18 +3200,26 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
         struct virtqueue *vqs[2];
         if (!AckFeature(VIRTIO_GPU_F_VIRGL))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("VioGpu3D cannot start because virgl is not enabled\n"));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: VioGpu3D cannot start because virgl is not enabled\n");
+            }
             status = STATUS_NOT_SUPPORTED;
             break;
         }
         if (!AckFeature(VIRTIO_GPU_F_CONTEXT_INIT))
         {
-            DbgPrint(TRACE_LEVEL_WARNING,
-                     ("VIRTIO_GPU_F_CONTEXT_INIT not supported; Venus contexts are unavailable\n"));
+            if (nDebugLevel >= TRACE_LEVEL_WARNING)
+            {
+                DbgPrint("VioGpu: VIRTIO_GPU_F_CONTEXT_INIT not supported; Venus contexts are unavailable\n");
+            }
         }
         if (!AckFeature(VIRTIO_GPU_F_RESOURCE_BLOB))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("VIRTIO_GPU_F_RESOURCE_BLOB not supported by host\n"));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: VIRTIO_GPU_F_RESOURCE_BLOB not supported by host\n");
+            }
         }
         if (!AckFeature(VIRTIO_F_VERSION_1))
         {
@@ -2878,7 +3243,10 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
         status = virtio_set_features(&m_VioDev, m_u64GuestFeatures);
         if (!NT_SUCCESS(status))
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("%s virtio_set_features failed with %x\n", __FUNCTION__, status));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: %s virtio_set_features failed with %x\n", __FUNCTION__, status);
+            }
             VioGpuDbgBreak();
             break;
         }
@@ -2886,14 +3254,20 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
         status = virtio_find_queues(&m_VioDev, 2, vqs);
         if (!NT_SUCCESS(status))
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("virtio_find_queues failed with error %x\n", status));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: virtio_find_queues failed with error %x\n", status);
+            }
             VioGpuDbgBreak();
             break;
         }
 
         if (!ctrlQueue.Init(&m_VioDev, vqs[0], 0) || !m_CursorQueue.Init(&m_VioDev, vqs[1], 1))
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("Failed to initialize virtio queues\n"));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: Failed to initialize virtio queues\n");
+            }
             status = STATUS_INSUFFICIENT_RESOURCES;
             VioGpuDbgBreak();
             break;
@@ -2920,7 +3294,10 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
         VioGpuDbgBreak();
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 
     return status;
 }
@@ -2928,7 +3305,10 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
 void VioGpuAdapter::VioGpuAdapterClose()
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_FATAL, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     vidpn.StopVsyncTimer();
     StopWorkThread();
 
@@ -2971,7 +3351,10 @@ void VioGpuAdapter::VioGpuAdapterClose()
         virtio_device_shutdown(&m_VioDev);
     }
     m_shmem_allocator.Reset();
-    DbgPrint(TRACE_LEVEL_FATAL, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 }
 
 void VioGpuAdapter::SynchronizeInterruptsForClose(void)
@@ -2989,12 +3372,14 @@ void VioGpuAdapter::SynchronizeInterruptsForClose(void)
                                                                       &callbackRet);
         if (!NT_SUCCESS(status) || !callbackRet)
         {
-            DbgPrint(TRACE_LEVEL_FATAL,
-                     ("%s failed message=%lu status=0x%x callback=%u -> bugcheck\n",
-                      __FUNCTION__,
-                      messageNumber,
-                      status,
-                      callbackRet));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: %s failed message=%lu status=0x%x callback=%u -> bugcheck\n",
+                         __FUNCTION__,
+                         messageNumber,
+                         status,
+                         callbackRet);
+            }
             KeBugCheckEx(0x000000E2,
                          static_cast<ULONG_PTR>('SIVg'),
                          static_cast<ULONG_PTR>(messageNumber),
@@ -3045,13 +3430,19 @@ VOID VioGpuAdapter::CreateResolutionEvent(VOID)
                                              DeviceNumber.Buffer);
     if (!NT_SUCCESS(status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("RtlUnicodeStringPrintf failed 0x%x\n", status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: RtlUnicodeStringPrintf failed 0x%x\n", status);
+        }
         return;
     }
     m_ResolutionEvent = IoCreateNotificationEvent(&EventName, &m_ResolutionEventHandle);
     if (m_ResolutionEvent == NULL)
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("<--> %s\n", __FUNCTION__));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: <--> %s\n", __FUNCTION__);
+        }
         return;
     }
     KeClearEvent(m_ResolutionEvent);
@@ -3064,7 +3455,10 @@ VOID VioGpuAdapter::NotifyResolutionEvent(VOID)
 
     if (m_ResolutionEvent != NULL)
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("NotifyResolutionEvent\n"));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: NotifyResolutionEvent\n");
+        }
         KeSetEvent(m_ResolutionEvent, IO_NO_INCREMENT, FALSE);
         KeClearEvent(m_ResolutionEvent);
     }
@@ -3108,7 +3502,10 @@ NTSTATUS VioGpuAdapter::StartWorkThread(void)
                                            this);
     if (!NT_SUCCESS(status))
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("%s failed to create system thread, status 0x%x\n", __FUNCTION__, status));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: %s failed to create system thread, status 0x%x\n", __FUNCTION__, status);
+        }
         return status;
     }
 
@@ -3121,8 +3518,10 @@ NTSTATUS VioGpuAdapter::StartWorkThread(void)
                                        NULL);
     if (!NT_SUCCESS(status))
     {
-        DbgPrint(TRACE_LEVEL_FATAL,
-                 ("%s failed to reference system thread, status 0x%x -> bugcheck\n", __FUNCTION__, status));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: %s failed to reference system thread, status 0x%x -> bugcheck\n", __FUNCTION__, status);
+        }
         KeBugCheckEx(0x000000E2,
                      static_cast<ULONG_PTR>('RIVg'),
                      reinterpret_cast<ULONG_PTR>(threadHandle),
@@ -3162,22 +3561,26 @@ void VioGpuAdapter::StopWorkThread(void)
         if (status == STATUS_TIMEOUT)
         {
             timeoutCount++;
-            DbgPrint(TRACE_LEVEL_WARNING,
-                     ("%s worker still stopping after %lu x %u ms thread=%p\n",
-                      __FUNCTION__,
-                      timeoutCount,
-                      VIOGPU_WORK_THREAD_WAIT_LOG_INTERVAL_MS,
-                      workThread));
+            if (nDebugLevel >= TRACE_LEVEL_WARNING)
+            {
+                DbgPrint("VioGpu: %s worker still stopping after %lu x %u ms thread=%p\n",
+                         __FUNCTION__,
+                         timeoutCount,
+                         VIOGPU_WORK_THREAD_WAIT_LOG_INTERVAL_MS,
+                         workThread);
+            }
             continue;
         }
 
         if (status != STATUS_SUCCESS)
         {
-            DbgPrint(TRACE_LEVEL_FATAL,
-                     ("%s permanent worker wait failure status=0x%x thread=%p -> bugcheck\n",
-                      __FUNCTION__,
-                      status,
-                      workThread));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: %s permanent worker wait failure status=0x%x thread=%p -> bugcheck\n",
+                         __FUNCTION__,
+                         status,
+                         workThread);
+            }
             KeBugCheckEx(0x000000E2,
                          static_cast<ULONG_PTR>('TIVg'),
                          reinterpret_cast<ULONG_PTR>(workThread),
@@ -3196,13 +3599,19 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
     PAGED_CODE();
 
     NTSTATUS status = STATUS_SUCCESS;
-    DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     UINT size = 0;
     do
     {
         if (!m_PciResources.Init(GetDxgkInterface(), pResList))
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("Incomplete resources\n"));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: Incomplete resources\n");
+            }
             status = STATUS_INSUFFICIENT_RESOURCES;
             VioGpuDbgBreak();
             break;
@@ -3211,18 +3620,27 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
         status = VioGpuAdapterInit();
         if (!NT_SUCCESS(status))
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("%s Failed initialize adapter %x\n", __FUNCTION__, status));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: %s Failed initialize adapter %x\n", __FUNCTION__, status);
+            }
             VioGpuDbgBreak();
             break;
         }
 
         size = ctrlQueue.QueryAllocation() + m_CursorQueue.QueryAllocation();
-        DbgPrint(TRACE_LEVEL_FATAL, ("%s size %d\n", __FUNCTION__, size));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: %s size %d\n", __FUNCTION__, size);
+        }
         ASSERT(size);
 
         if (!m_GpuBuf.Init(size))
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("Failed to initialize buffers\n"));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: Failed to initialize buffers\n");
+            }
             status = STATUS_INSUFFICIENT_RESOURCES;
             VioGpuDbgBreak();
             break;
@@ -3233,7 +3651,10 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
 
         if (!resourceIdr.Init(1))
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("Failed to initialize id generator\n"));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: Failed to initialize id generator\n");
+            }
             status = STATUS_INSUFFICIENT_RESOURCES;
             VioGpuDbgBreak();
             break;
@@ -3241,7 +3662,10 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
 
         if (!ctxIdr.Init(1))
         {
-            DbgPrint(TRACE_LEVEL_FATAL, ("Failed to initialize id generator\n"));
+            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+            {
+                DbgPrint("VioGpu: Failed to initialize id generator\n");
+            }
             status = STATUS_INSUFFICIENT_RESOURCES;
             VioGpuDbgBreak();
             break;
@@ -3276,7 +3700,10 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
 
     if (!frameSegment.Init(fb_size, &fb_pa))
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("%s failed to allocate FB memory segment\n", __FUNCTION__));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: %s failed to allocate FB memory segment\n", __FUNCTION__);
+        }
         status = STATUS_INSUFFICIENT_RESOURCES;
         VioGpuDbgBreak();
         VioGpuAdapterClose();
@@ -3285,7 +3712,10 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
 
     if (!m_CursorSegment.Init(POINTER_SIZE * POINTER_SIZE * 4, NULL))
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("%s failed to allocate the cursor memory segment\n", __FUNCTION__));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: %s failed to allocate the cursor memory segment\n", __FUNCTION__);
+        }
         frameSegment.Close();
         VioGpuAdapterClose();
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -3306,13 +3736,19 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
 NTSTATUS VioGpuAdapter::HWClose(void)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     StopWorkThread();
 
     m_CursorSegment.Close();
     frameSegment.Close();
 
-    DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 
     return STATUS_SUCCESS;
 }
@@ -3395,8 +3831,10 @@ NTSTATUS VioGpuAdapter::UpdateChildStatus(BOOLEAN connect)
     Status = pDXGKInterface->DxgkCbIndicateChildStatus(pDXGKInterface->DeviceHandle, &ChildStatus);
     if (Status != STATUS_SUCCESS)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("<--- %s DxgkCbIndicateChildStatus failed with status %x\n ", __FUNCTION__, Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: <--- %s DxgkCbIndicateChildStatus failed with status %x\n ", __FUNCTION__, Status);
+        }
     }
     return Status;
 }
@@ -3410,7 +3848,10 @@ BOOLEAN VioGpuAdapter::InterruptRoutine(_In_ ULONG MessageNumber)
         return FALSE;
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s MessageNumber = %d\n", __FUNCTION__, MessageNumber));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s MessageNumber = %d\n", __FUNCTION__, MessageNumber);
+    }
     BOOLEAN serviced = TRUE;
     ULONG intReason = 0;
     // return FALSE;
@@ -3429,8 +3870,10 @@ BOOLEAN VioGpuAdapter::InterruptRoutine(_In_ ULONG MessageNumber)
                 break;
             default:
                 serviced = FALSE;
-                DbgPrint(TRACE_LEVEL_FATAL,
-                         ("---> %s Unknown Interrupt Reason MessageNumber%d\n", __FUNCTION__, MessageNumber));
+                if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                {
+                    DbgPrint("VioGpu: ---> %s Unknown Interrupt Reason MessageNumber%d\n", __FUNCTION__, MessageNumber);
+                }
         }
     }
     else
@@ -3475,10 +3918,12 @@ BOOLEAN VioGpuAdapter::InterruptRoutine(_In_ ULONG MessageNumber)
                         // DMA and later engine retirements for the scheduler's
                         // existing timeout/reset path; never signal success.
                         cmd->Retirement.Failed = 1;
-                        DbgPrint(TRACE_LEVEL_ERROR,
-                                 ("%s GPU timeline response failed owner=viogpu3d fence=%u len=%u response=%#x; DMA retained for timeout/reset\n",
-                                  __FUNCTION__, cmd->GetSubmissionFenceId(), len,
-                                  response && len >= sizeof(*response) ? response->type : 0));
+                        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                        {
+                            DbgPrint("VioGpu: %s GPU timeline response failed owner=viogpu3d fence=%u len=%u response=%#x; DMA retained for timeout/reset\n",
+                                     __FUNCTION__, cmd->GetSubmissionFenceId(), len,
+                                     response && len >= sizeof(*response) ? response->type : 0);
+                        }
                     }
                     UINT fenceId = 0;
                     UINT nodeOrdinal = 0;
@@ -3524,7 +3969,10 @@ BOOLEAN VioGpuAdapter::InterruptRoutine(_In_ ULONG MessageNumber)
         m_DxgkInterface.DxgkCbQueueDpc(m_DxgkInterface.DeviceHandle);
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 
     return serviced;
 }
@@ -3562,12 +4010,17 @@ void VioGpuAdapter::NegotiateCapsets(void)
     {
         PGPU_VBUFFER vbuf = NULL;
 
-        DbgPrint(TRACE_LEVEL_VERBOSE,
-                 ("%s querying capset info index=%d/%d\n", __FUNCTION__, i, m_u32NumCapsets));
+        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+        {
+            DbgPrint("VioGpu: %s querying capset info index=%d/%d\n", __FUNCTION__, i, m_u32NumCapsets);
+        }
 
         if (!ctrlQueue.AskCapsetInfo(&vbuf, i))
         {
-            DbgPrint(TRACE_LEVEL_ERROR, ("%s AskCapsetInfo failed for index %d\n", __FUNCTION__, i));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: %s AskCapsetInfo failed for index %d\n", __FUNCTION__, i);
+            }
             continue;
         }
 
@@ -3575,12 +4028,14 @@ void VioGpuAdapter::NegotiateCapsets(void)
         ULONG capset_id = resp->capset_id;
         if (capset_id == 0 || capset_id > VIRTIO_GPU_MAX_CAPSET_ID)
         {
-            DbgPrint(TRACE_LEVEL_WARNING,
-                     ("%s invalid capset response index=%d id=%d resp_type=0x%x\n",
-                      __FUNCTION__,
-                      i,
-                      capset_id,
-                      resp->hdr.type));
+            if (nDebugLevel >= TRACE_LEVEL_WARNING)
+            {
+                DbgPrint("VioGpu: %s invalid capset response index=%d id=%d resp_type=0x%x\n",
+                         __FUNCTION__,
+                         i,
+                         capset_id,
+                         resp->hdr.type);
+            }
             ctrlQueue.ReleaseBuffer(vbuf);
             continue; // Invalid capset id, capsets ids are in range from 1 to 63 per specification
         }
@@ -3588,27 +4043,34 @@ void VioGpuAdapter::NegotiateCapsets(void)
         m_capsetInfos[capset_id].max_size = resp->capset_max_size;
         m_capsetInfos[capset_id].max_version = resp->capset_max_version;
         m_supportedCapsetIDs |= 1ull << capset_id;
-        DbgPrint(TRACE_LEVEL_FATAL,
-                 ("CAPSET INFO %d    id: %d; version: %d; size: %d\n",
-                  i,
-                  capset_id,
-                  resp->capset_max_size,
-                  resp->capset_max_version));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: CAPSET INFO %d    id: %d; version: %d; size: %d\n",
+                     i,
+                     capset_id,
+                     resp->capset_max_size,
+                     resp->capset_max_version);
+        }
         ctrlQueue.ReleaseBuffer(vbuf);
     }
 
     if (m_supportedCapsetIDs == 0)
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s no capsets negotiated (num_capsets=%d), continuing with limited functionality\n",
-                  __FUNCTION__,
-                  m_u32NumCapsets));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: %s no capsets negotiated (num_capsets=%d), continuing with limited functionality\n",
+                     __FUNCTION__,
+                     m_u32NumCapsets);
+        }
     }
 }
 
 void VioGpuAdapter::ConfigChanged(void)
 {
-    DbgPrint(TRACE_LEVEL_FATAL, ("<--> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+    {
+        DbgPrint("VioGpu: <--> %s\n", __FUNCTION__);
+    }
     UINT32 events_read, events_clear = 0;
     virtio_get_config(&m_VioDev, FIELD_OFFSET(GPU_CONFIG, events_read), &events_read, sizeof(m_u32NumScanouts));
     if (events_read & VIRTIO_GPU_EVENT_DISPLAY)
@@ -3663,9 +4125,11 @@ VioGpuAllocationReference::VioGpuAllocationReference(VioGpuAdapter *adapter, D3D
     // WDDM 2.0 requires the reference-taking callback for allocation data.
     if (!dxgkInterface->DxgkCbAcquireHandleData || !dxgkInterface->DxgkCbReleaseHandleData)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s missing WDDM 2.0 allocation reference callbacks adapter=%p handle=0x%x\n",
-                  __FUNCTION__, adapter, handle));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s missing WDDM 2.0 allocation reference callbacks adapter=%p handle=0x%x\n",
+                     __FUNCTION__, adapter, handle);
+        }
         return;
     }
     m_allocation = reinterpret_cast<VioGpuAllocation *>(

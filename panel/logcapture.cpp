@@ -3,10 +3,9 @@
 //  - user mode: the UMDs (and Mesa's Venus ICD) log with OutputDebugString, which hands each string to whoever owns
 //    the DBWIN_BUFFER section and its two events. This session's are open to any user; the Global\ ones (session 0:
 //    services) need administrator rights.
-//  - kernel: the KMD logs with DbgPrintEx. The kernel passes DbgPrint calls to ETW sessions that ask for them
+//  - kernel: the KMD logs with DbgPrint. The kernel passes enabled prints to ETW sessions that ask for them
 //    (EVENT_TRACE_FLAG_DBGPRINT); a session of the system logger kind does not take the one NT Kernel Logger, so it
-//    runs beside WPR or xperf. Starting one needs administrator rights. The KMD's prints carry the error bit in their
-//    level mask, so the default Debug Print Filter lets them through.
+//    runs beside WPR or xperf. Starting one needs administrator rights.
 #include "panel.h"
 
 #include <evntcons.h>

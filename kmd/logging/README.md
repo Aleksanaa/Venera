@@ -9,7 +9,7 @@ The Venera kernel provider is `6c5a2378-22b9-4c10-a91f-69e34c280b81`. Its versio
 | 3 | Display driver registration | `DxgkInitialize` result |
 | 4 | Kernel unload | Zero |
 
-The common diagnostic entry carries the original function, source line, severity and message. The existing boot marker uses the legacy kernel debug stream. Initialization, registration, unload, Fatal and Error messages also enter the 64 KiB Recorder log with their original severity.
+Initialization, registration and unload have explicit structured events. Ordinary display-driver diagnostics use `DbgPrint` with the `VioGpu: ` prefix. The driver checks its trace level before evaluating each message's arguments. Windows applies the DEFAULT component's INFO bit (`0x8`) to these prints; the boot marker uses its existing error-inclusive mask.
 
 ## Event layout
 

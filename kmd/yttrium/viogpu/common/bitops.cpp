@@ -77,7 +77,10 @@ VOID CopyBitsGeneric(_In_ BLT_INFO *pDst, _In_ CONST BLT_INFO *pSrc, _In_ CONST 
     LONG SrcPixelPitch = 0;
     LONG SrcRowPitch = 0;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s Dst = %p Src = %p\n", __FUNCTION__, pDst->pBits, pSrc->pBits));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s Dst = %p Src = %p\n", __FUNCTION__, pDst->pBits, pSrc->pBits);
+    }
 
     GetPitches(pDst, &DstPixelPitch, &DstRowPitch);
     GetPitches(pSrc, &SrcPixelPitch, &SrcRowPitch);
@@ -127,7 +130,10 @@ VOID CopyBits32_32(_In_ BLT_INFO *pDst, _In_ CONST BLT_INFO *pSrc, _In_ CONST RE
     VIOGPU_ASSERT((pDst->BitsPerPel == 32) && (pSrc->BitsPerPel == 32));
     VIOGPU_ASSERT((pDst->Rotation == D3DKMDT_VPPR_IDENTITY) && (pSrc->Rotation == D3DKMDT_VPPR_IDENTITY));
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     VIOGPU_ASSERT(pRect->right >= pRect->left);
     VIOGPU_ASSERT(pRect->bottom >= pRect->top);
@@ -150,7 +156,10 @@ VOID CopyBits32_32(_In_ BLT_INFO *pDst, _In_ CONST BLT_INFO *pSrc, _In_ CONST RE
 
 VOID BltBits(_In_ BLT_INFO *pDst, _In_ CONST BLT_INFO *pSrc, _In_ CONST RECT *pRect)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     __try
     {
         if ((pDst->Rotation == D3DKMDT_VPPR_IDENTITY && pSrc->Rotation == D3DKMDT_VPPR_IDENTITY) &&
@@ -166,10 +175,12 @@ VOID BltBits(_In_ BLT_INFO *pDst, _In_ CONST BLT_INFO *pSrc, _In_ CONST RECT *pR
 #pragma prefast(suppress : __WARNING_EXCEPTIONEXECUTEHANDLER, "try/except is only able to protect against user-mode errors and these are the only errors we try to catch here");
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("Either dst (0x%p) or src (0x%p) bits encountered exception during access.\n",
-                  pDst->pBits,
-                  pSrc->pBits));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: Either dst (0x%p) or src (0x%p) bits encountered exception during access.\n",
+                     pDst->pBits,
+                     pSrc->pBits);
+        }
     }
 }
 

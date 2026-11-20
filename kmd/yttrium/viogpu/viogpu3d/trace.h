@@ -44,14 +44,6 @@
 #define WPP_LEVEL_FLAGS_ENABLED(lvl, flags)                            \
     (WPP_LEVEL_ENABLED(flags) && WPP_CONTROL(WPP_BIT_ ## flags).Level >= lvl)
 
-// begin_wpp config
-// USEPREFIX (DbgPrint, "%!STDPREFIX! %!FUNC!");
-// DbgPrint{FLAG = TRACE_ALL}(LEVEL, (MSG, ...));
-// USEPREFIX (IfrDbgPrint, "%!STDPREFIX! %!FUNC!");
-// IfrDbgPrint{FLAG = TRACE_ALL}(LEVEL, (MSG, ...));
-// end_wpp
-//
-
 #if DBG
 #define PRINT_DEBUG 1
 //#define COM_DEBUG 1
@@ -61,20 +53,11 @@
 
     void DebugPrintFuncSerial(const char *format, ...);
     void DebugPrintFuncKdPrint(const char *format, ...);
-#define DbgExpandArguments(...) __VA_ARGS__
-#define VIOGPU_DEBUG_PRINT(Level, MSG) \
-    if (Level <= nDebugLevel) VeneraLogPrintf((UCHAR)(Level), __FUNCTION__, __LINE__, DbgExpandArguments MSG);
-#define DbgPrint(Level, MSG) VIOGPU_DEBUG_PRINT(Level, MSG)
-#define IfrDbgPrint(Level, MSG) VIOGPU_DEBUG_PRINT(Level, MSG)
 #define VioGpuDbgBreak()\
     if (KD_DEBUGGER_ENABLED && !KD_DEBUGGER_NOT_PRESENT && bBreakAlways) DbgBreakPoint();
 #define VIOGPU_TRACE_INIT(driver, regpath) InitializeDebugPrints(driver, regpath)
 #define VIOGPU_TRACE_CLEANUP(driver) do { UNREFERENCED_PARAMETER(driver); } while (0)
 #else
-// When DBG is not enabled, keep call sites buildable without relying on WPP-generated aliases.
-#define DbgExpandArguments(...) __VA_ARGS__
-#define DbgPrint(Level, MSG) do { UNREFERENCED_PARAMETER(Level); __noop(DbgExpandArguments MSG); } while (0)
-#define IfrDbgPrint(Level, MSG) do { UNREFERENCED_PARAMETER(Level); __noop(DbgExpandArguments MSG); } while (0)
 #define VIOGPU_TRACE_INIT(driver, regpath) do { UNREFERENCED_PARAMETER(driver); UNREFERENCED_PARAMETER(regpath); } while (0)
 #define VIOGPU_TRACE_CLEANUP(driver) do { UNREFERENCED_PARAMETER(driver); } while (0)
 #define VioGpuDbgBreak() {}
