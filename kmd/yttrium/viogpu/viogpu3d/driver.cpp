@@ -86,8 +86,8 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     PAGED_CODE();
     g_VioGpu3DDriverObject = pDriverObject;
     VIOGPU_TRACE_INIT(pDriverObject, pRegistryPath);
-    WPP_INIT_TRACING(pDriverObject, pRegistryPath);
-    DbgPrint(TRACE_LEVEL_FATAL, ("---> VIOGPU FULL build on on %s %s\n", __DATE__, __TIME__));
+    VeneraLogInitialize(pDriverObject, pRegistryPath);
+    VirtioDebugPrintProc("---> VIOGPU FULL build on on %s %s\n", __DATE__, __TIME__);
     DRIVER_INITIALIZATION_DATA InitialData = {0};
 
     /*
@@ -190,6 +190,7 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     InitialData.DxgkDdiGetScanLine = VioGpu3DDdiGetScanLine;
 
     NTSTATUS Status = DxgkInitialize(pDriverObject, pRegistryPath, &InitialData);
+    VeneraLogResult(Status);
 
     if (!NT_SUCCESS(Status))
     {
@@ -197,6 +198,11 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (!NT_SUCCESS(Status))
+    {
+        VeneraLogCleanup(pDriverObject);
+        g_VioGpu3DDriverObject = NULL;
+    }
     return Status;
 }
 // END: Init Code
@@ -216,7 +222,7 @@ VOID VioGpu3DUnload(VOID)
     VIOGPU_TRACE_CLEANUP(NULL);
     if (g_VioGpu3DDriverObject)
     {
-        WPP_CLEANUP(g_VioGpu3DDriverObject);
+        VeneraLogCleanup(g_VioGpu3DDriverObject);
         g_VioGpu3DDriverObject = NULL;
     }
 }

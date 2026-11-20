@@ -3,11 +3,7 @@
 #
 #   cmake -S kmd -B build/kmd -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/clang-cl-kmd.cmake && ninja -C build/kmd
 #
-# Differences from yttrium's MSBuild project, all build-side:
-#   - WPP tracing is stubbed (its .tmh files come from a Windows-only preprocessor). The debug build logs through
-#     DbgPrint/kdebugprint as before; only the WPP recorder (IFR) is gone.
-#   - No version resource (yttrium's viogpu3d.rc needs MSBuild-generated vendor macros; not imported).
-#   - clang does not provide MSVC's port I/O intrinsics out of line; shim/portio.c does.
+# Structured kernel events and Recorder formatting data live in logging/.
 cmake_minimum_required(VERSION 3.24)
 project(venera-kmd LANGUAGES C CXX)
 
@@ -52,7 +48,7 @@ execute_process(COMMAND sh "${CMAKE_SOURCE_DIR}/casefix.sh" "${gen}/casefix" ${i
 
 # --- viogpu3d.sys --------------------------------------------------------------------------------------------------
 list(TRANSFORM sources PREPEND "${src}/")
-add_executable(viogpu3d ${sources} shim/portio.c)
+add_executable(viogpu3d ${sources} shim/portio.c logging/recorder.cpp)
 set_target_properties(viogpu3d PROPERTIES SUFFIX ".sys" MSVC_RUNTIME_LIBRARY "")
 # yttrium publishes debug builds (DBG=1: kdebugprint logging, assertions); we match that.
 target_compile_definitions(viogpu3d PRIVATE
@@ -60,10 +56,9 @@ target_compile_definitions(viogpu3d PRIVATE
     POOL_NX_OPTIN=1 DEPRECATE_DDK_FUNCTIONS=1 DBG=1 VIOGPU_3D=1)
 target_compile_options(viogpu3d PRIVATE
     -kernel /GS- /Gy /Z7 /O2 /W0 /Zc:wchar_t- -fms-compatibility -fms-extensions
-    -Wno-error=incompatible-function-pointer-types
-    "/FI${CMAKE_SOURCE_DIR}/shim/wpp_shim.h")
+    -Wno-error=incompatible-function-pointer-types)
 target_include_directories(viogpu3d PRIVATE "${gen}" "${src}/viogpu/common" "${src}/viogpu/shared" "${src}/VirtIO"
-    "${src}/viogpu/viogpu3d")
+    "${src}/viogpu/viogpu3d" "${CMAKE_SOURCE_DIR}/logging")
 foreach(d "${gen}/casefix" "${wdk_inc}/km/crt" "${wdk_inc}/km" "${wdk_inc}/shared" "${sdk_inc}/shared" "${sdk_inc}/um")
   target_compile_options(viogpu3d PRIVATE "SHELL:-imsvc ${d}")
 endforeach()
@@ -82,7 +77,7 @@ target_link_options(viogpu3d PRIVATE
     /SECTION:INIT,erd /SECTION:.text,erp /SECTION:.rdata,rp /SECTION:.data,rwp /SECTION:.pdata,rp)
 target_link_libraries(viogpu3d PRIVATE
     "${wdk_lib}/bufferoverflowfastfailk.lib" "${wdk_lib}/ntoskrnl.lib" "${wdk_lib}/hal.lib" "${wdk_lib}/wmilib.lib"
-    "${wdk_lib}/displib.lib")
+    "${wdk_lib}/displib.lib" "${wdk_lib}/wpprecorder.lib")
 
 # Test-signed copy, the file the guest loads.
 find_program(OSSLSIGNCODE osslsigncode REQUIRED)

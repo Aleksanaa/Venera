@@ -37,6 +37,7 @@ viogpu_wgl_32.dll      = 1
 vgpusrv.exe            = 1
 viogpuap.exe           = 1
 venera-debug-guest.exe = 1
+venera-recorder.tmf    = 1
 
 [DestinationDirs]
 DefaultDestDir = 13   ; DriverStore
@@ -68,6 +69,7 @@ viogpu_wgl_32.dll
 vgpusrv.exe
 viogpuap.exe
 venera-debug-guest.exe
+venera-recorder.tmf
 
 [VENERA_Inst.NT.Services]
 ; The service keeps yttrium's name, so installing over its package moves the device to our driver.

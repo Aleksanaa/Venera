@@ -1,5 +1,6 @@
 #pragma once
 #include "kdebugprint.h"
+#include "logging.h"
 
 #define DBG 1
 
@@ -62,9 +63,9 @@
     void DebugPrintFuncKdPrint(const char *format, ...);
 #define DbgExpandArguments(...) __VA_ARGS__
 #define VIOGPU_DEBUG_PRINT(Level, MSG) \
-    if (Level <= nDebugLevel) VirtioDebugPrintProc(DbgExpandArguments MSG);
+    if (Level <= nDebugLevel) VeneraLogPrintf((UCHAR)(Level), __FUNCTION__, __LINE__, DbgExpandArguments MSG);
 #define DbgPrint(Level, MSG) VIOGPU_DEBUG_PRINT(Level, MSG)
-#define IfrDbgPrint(Level, MSG) do { UNREFERENCED_PARAMETER(Level); __noop(DbgExpandArguments MSG); } while (0)
+#define IfrDbgPrint(Level, MSG) VIOGPU_DEBUG_PRINT(Level, MSG)
 #define VioGpuDbgBreak()\
     if (KD_DEBUGGER_ENABLED && !KD_DEBUGGER_NOT_PRESENT && bBreakAlways) DbgBreakPoint();
 #define VIOGPU_TRACE_INIT(driver, regpath) InitializeDebugPrints(driver, regpath)
