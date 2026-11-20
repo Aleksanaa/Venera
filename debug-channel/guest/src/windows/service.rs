@@ -138,9 +138,15 @@ unsafe extern "system" fn main(_: u32, _: *mut *mut u16) {
             break;
         }
         state.lock().unwrap().expire();
+        expire_native_captures(&state);
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    let code = match crate::history::finish(threads, &history_stop, history_worker) {
+    // Producers can finish submitting captures while history is still running.
+    for producer in threads {
+        let _ = producer.join();
+    }
+    finish_native_captures(&state);
+    let code = match crate::history::finish(Vec::new(), &history_stop, history_worker) {
         Ok(()) => 0,
         _ => ERROR_WRITE_FAULT,
     };

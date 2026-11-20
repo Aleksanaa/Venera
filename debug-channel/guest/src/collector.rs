@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -148,34 +148,102 @@ pub fn classify(text: &str, kernel: bool) -> Option<Classification> {
     })
 }
 
-type FragmentKey = (u32, Option<String>, String, u32, u32);
+type FragmentKey = (Option<u32>, Option<u64>, String, u32, u32);
 type ParsedFragment = (String, String, String, u32, u32, usize, usize, Vec<u8>);
+const FRAGMENT_IDLE: Duration = Duration::from_secs(5);
+const LATE_FRAGMENT_WINDOW: Duration = Duration::from_secs(30);
+const MAX_PENDING: usize = 128;
+const MAX_TRACKED: usize = 1024;
+const MAX_FRAGMENT_BYTES: usize = 1024 * 1024;
 struct Partial {
-    created: Instant,
+    last_progress: Instant,
     capture: Capture,
     level: String,
     channel: String,
     parts: Vec<Option<Vec<u8>>>,
     bytes: usize,
+    remaining: usize,
 }
 #[derive(Default)]
 pub struct Assembler {
     messages: HashMap<FragmentKey, Partial>,
     bytes: usize,
+    retired: BTreeSet<FragmentKey>,
+    retired_order: VecDeque<(Instant, FragmentKey)>,
+    saturated: bool,
+    untracked_loss: bool,
 }
 impl Assembler {
-    /// Returns complete captures and the number of observed assemblies lost.
-    pub fn ingest(&mut self, mut capture: Capture) -> (Option<Capture>, u64) {
-        let mut lost = 0;
-        self.messages.retain(|_, message| {
-            if message.created.elapsed() >= Duration::from_secs(5) {
+    /// Settles idle groups, including when the source delivers no new input.
+    pub fn expire(&mut self, now: Instant) -> u64 {
+        while self
+            .retired_order
+            .front()
+            .is_some_and(|(until, _)| now >= *until)
+        {
+            let (_, key) = self.retired_order.pop_front().unwrap();
+            self.retired.remove(&key);
+        }
+        let mut expired = Vec::new();
+        self.messages.retain(|key, message| {
+            if now.duration_since(message.last_progress) >= FRAGMENT_IDLE {
                 self.bytes -= message.bytes;
-                lost += 1;
+                expired.push(key.clone());
                 false
             } else {
                 true
             }
         });
+        let lost = expired.len() as u64;
+        for key in expired {
+            self.retire(key, now);
+        }
+        if self.tracked() < MAX_TRACKED {
+            self.saturated = false;
+        }
+        lost
+    }
+
+    /// Settles remaining groups after every producer has stopped.
+    pub fn finish(&mut self) -> u64 {
+        let lost = self.messages.len() as u64;
+        self.messages.clear();
+        self.bytes = 0;
+        self.retired.clear();
+        self.retired_order.clear();
+        self.saturated = false;
+        lost
+    }
+
+    /// Reports the start of a capacity episode whose exact loss count is unknown.
+    pub fn take_untracked_loss(&mut self) -> bool {
+        std::mem::take(&mut self.untracked_loss)
+    }
+
+    fn tracked(&self) -> usize {
+        self.messages.len() + self.retired.len()
+    }
+
+    fn retire(&mut self, key: FragmentKey, now: Instant) {
+        self.retired.insert(key.clone());
+        self.retired_order
+            .push_back((now + LATE_FRAGMENT_WINDOW, key));
+    }
+
+    fn discard(&mut self, key: FragmentKey, now: Instant) {
+        if let Some(message) = self.messages.remove(&key) {
+            self.bytes -= message.bytes;
+        }
+        self.retire(key, now);
+    }
+
+    /// Returns complete captures and the number of observed assemblies lost.
+    pub fn ingest(&mut self, capture: Capture) -> (Option<Capture>, u64) {
+        self.ingest_at(capture, Instant::now())
+    }
+
+    pub fn ingest_at(&mut self, mut capture: Capture, now: Instant) -> (Option<Capture>, u64) {
+        let lost = self.expire(now);
         if capture.structured.is_some() || !capture.text.starts_with("VDBG1|") {
             return (Some(capture), lost);
         }
@@ -240,51 +308,80 @@ impl Assembler {
             return (None, lost + 1);
         };
         let key = (
-            capture.pid.unwrap_or(0),
+            capture.pid,
             capture
                 .process
                 .as_ref()
-                .and_then(|p| p.start_time_filetime.clone()),
+                .and_then(|p| p.start_time_filetime.as_deref()?.parse().ok()),
             producer.clone(),
             tid,
             sequence,
         );
-        if (self.messages.len() >= 128 && !self.messages.contains_key(&key))
-            || self.bytes + bytes.len() > 1024 * 1024
-        {
-            return (None, lost + 1);
-        }
-        let message = self.messages.entry(key.clone()).or_insert_with(|| Partial {
-            created: Instant::now(),
-            capture: capture.clone(),
-            level: raw.clone(),
-            channel: channel.clone(),
-            parts: vec![None; parts],
-            bytes: 0,
-        });
-        if message.parts.len() != parts
-            || message.level != raw
-            || message.channel != channel
-            || message.parts[part - 1].is_some()
-        {
-            let previous = self.messages.remove(&key).unwrap();
-            self.bytes -= previous.bytes;
-            return (None, lost + 1);
-        }
-        message.bytes += bytes.len();
-        self.bytes += bytes.len();
-        message.parts[part - 1] = Some(bytes);
-        if message.parts.iter().any(Option::is_none) {
+        if self.retired.contains(&key) {
             return (None, lost);
         }
-        let message = self.messages.remove(&key).unwrap();
-        self.bytes -= message.bytes;
-        let payload: Vec<u8> = message.parts.into_iter().flatten().flatten().collect();
+        let pending = self.messages.get(&key);
+        if let Some(message) = pending {
+            let consistent =
+                message.parts.len() == parts && message.level == raw && message.channel == channel;
+            if consistent && message.parts[part - 1].as_ref() == Some(&bytes) {
+                return (None, lost);
+            }
+            if !consistent || message.parts[part - 1].is_some() {
+                self.discard(key, now);
+                return (None, lost + 1);
+            }
+        }
+        let payload = if parts == 1 {
+            bytes
+        } else {
+            // Pending groups reserve their slot when they transition to retired.
+            if pending.is_none() && self.tracked() == MAX_TRACKED {
+                self.untracked_loss |= !self.saturated;
+                self.saturated = true;
+                return (None, lost);
+            }
+            if (pending.is_none() && self.messages.len() == MAX_PENDING)
+                || self.bytes + bytes.len() > MAX_FRAGMENT_BYTES
+            {
+                self.discard(key, now);
+                return (None, lost + 1);
+            }
+            let message = self.messages.entry(key.clone()).or_insert_with(|| {
+                // The decoded payload is stored in parts, and the capture keeps metadata only.
+                capture.text = String::new();
+                Partial {
+                    last_progress: now,
+                    capture: capture.clone(),
+                    level: raw.clone(),
+                    channel: channel.clone(),
+                    parts: vec![None; parts],
+                    bytes: 0,
+                    remaining: parts,
+                }
+            });
+            message.bytes += bytes.len();
+            self.bytes += bytes.len();
+            message.parts[part - 1] = Some(bytes);
+            message.last_progress = now;
+            message.remaining -= 1;
+            if message.remaining != 0 {
+                return (None, lost);
+            }
+            let message = self.messages.remove(&key).unwrap();
+            self.bytes -= message.bytes;
+            capture = message.capture;
+            message.parts.into_iter().flatten().flatten().collect()
+        };
         let text = match String::from_utf8(payload) {
             Ok(text) => text,
-            Err(_) => return (None, lost + 1),
+            Err(_) => {
+                if parts > 1 {
+                    self.retire(key, now);
+                }
+                return (None, lost + 1);
+            }
         };
-        capture = message.capture;
         capture.text = text;
         capture.tid = Some(tid);
         capture.raw_level = Some(raw);
@@ -440,6 +537,134 @@ mod tests {
             process: None,
             component: None,
         }
+    }
+    #[test]
+    fn native_message_completes_across_multiple_inactivity_windows() {
+        let mut assembler = Assembler::default();
+        let now = Instant::now();
+        let first = event("VDBG1|dxvk|info|default|42|71|2|3|ad");
+        let second = event("VDBG1|dxvk|info|default|42|71|1|3|e4b8");
+        let third = event("VDBG1|dxvk|info|default|42|71|3|3|0a");
+        assert!(assembler.ingest_at(first, now).0.is_none());
+        assert!(assembler
+            .ingest_at(second, now + Duration::from_secs(4))
+            .0
+            .is_none());
+        assert_eq!(assembler.expire(now + Duration::from_secs(7)), 0);
+        let (capture, lost) = assembler.ingest_at(third, now + Duration::from_secs(8));
+        assert_eq!(lost, 0);
+        assert_eq!(capture.unwrap().text, "中\n");
+        assert_eq!(assembler.finish(), 0);
+    }
+    #[test]
+    fn native_idle_settlement_counts_message_once_with_duplicate_and_late_parts() {
+        let mut assembler = Assembler::default();
+        let now = Instant::now();
+        let first = "VDBG1|dxvk|info|default|42|71|2|3|62";
+        assert_eq!(assembler.ingest_at(event(first), now).1, 0);
+        assert_eq!(
+            assembler
+                .ingest_at(event(first), now + Duration::from_secs(4))
+                .1,
+            0
+        );
+        assert_eq!(assembler.expire(now + Duration::from_secs(5)), 1);
+        for part in [
+            "VDBG1|dxvk|info|default|42|71|1|3|61",
+            first,
+            "VDBG1|dxvk|info|default|42|71|3|3|63",
+        ] {
+            let (capture, lost) = assembler.ingest_at(event(part), now + Duration::from_secs(6));
+            assert_eq!((capture.map(|c| c.text), lost), (None, 0));
+        }
+        assert_eq!(assembler.expire(now + Duration::from_secs(12)), 0);
+        assert_eq!(assembler.finish(), 0);
+    }
+    #[test]
+    fn native_finish_settles_each_producer_message_identity_once() {
+        let mut assembler = Assembler::default();
+        let now = Instant::now();
+        let first = "VDBG1|dxvk|info|default|42|71|1|3|61";
+        assert_eq!(assembler.ingest_at(event(first), now).1, 0);
+        assert_eq!(
+            assembler
+                .ingest_at(event("VDBG1|dxvk|info|default|42|71|2|3|62"), now)
+                .1,
+            0
+        );
+        let mut other_pid = event(first);
+        other_pid.pid = Some(43);
+        assert_eq!(assembler.ingest_at(other_pid, now).1, 0);
+        assert_eq!(
+            assembler
+                .ingest_at(event("VDBG1|vkd3d-proton|info|api|42|71|1|3|61"), now)
+                .1,
+            0
+        );
+        assert_eq!(assembler.finish(), 3);
+        assert_eq!(assembler.finish(), 0);
+    }
+    #[test]
+    fn native_overload_counts_rejected_messages_and_serves_pending_groups() {
+        let mut assembler = Assembler::default();
+        let now = Instant::now();
+        for sequence in 0..128 {
+            let fragment = format!("VDBG1|dxvk|info|default|42|{sequence}|1|2|61");
+            assert_eq!(assembler.ingest_at(event(&fragment), now).1, 0);
+        }
+        assert_eq!(
+            assembler
+                .ingest_at(event("VDBG1|dxvk|info|default|42|128|1|3|61"), now)
+                .1,
+            1
+        );
+        let (capture, lost) =
+            assembler.ingest_at(event("VDBG1|dxvk|info|default|42|0|2|2|62"), now);
+        assert_eq!((capture.unwrap().text.as_str(), lost), ("ab", 0));
+        for part in [2, 3] {
+            let fragment = format!("VDBG1|dxvk|info|default|42|128|{part}|3|62");
+            assert_eq!(assembler.ingest_at(event(&fragment), now).1, 0);
+        }
+        assert_eq!(assembler.finish(), 127);
+    }
+    #[test]
+    fn native_identity_saturation_reports_a_single_unknown_loss_episode() {
+        let mut assembler = Assembler::default();
+        let now = Instant::now();
+        let mut lost = 0;
+        for sequence in 0..1025 {
+            let fragment = format!("VDBG1|dxvk|info|default|42|{sequence}|1|2|61");
+            lost += assembler.ingest_at(event(&fragment), now).1;
+        }
+        assert_eq!(lost, 896);
+        assert!(assembler.take_untracked_loss());
+        assert_eq!(
+            assembler
+                .ingest_at(event("VDBG1|dxvk|info|default|42|1024|2|2|62"), now)
+                .1,
+            0
+        );
+        assert!(!assembler.take_untracked_loss());
+        assert_eq!(assembler.expire(now + Duration::from_secs(5)), 128);
+        assert_eq!(assembler.finish(), 0);
+    }
+    #[test]
+    fn native_byte_overload_releases_a_rejected_messages_payload() {
+        let mut assembler = Assembler::default();
+        let now = Instant::now();
+        let hex = "61".repeat(1400);
+        let mut lost = 0;
+        for part in 1..=750 {
+            let fragment = format!("VDBG1|dxvk|info|default|42|71|{part}|751|{hex}");
+            lost += assembler.ingest_at(event(&fragment), now).1;
+        }
+        assert_eq!(lost, 1);
+        let first = event("VDBG1|dxvk|info|default|42|72|1|2|61");
+        let second = event("VDBG1|dxvk|info|default|42|72|2|2|62");
+        assert!(assembler.ingest_at(first, now).0.is_none());
+        let (capture, lost) = assembler.ingest_at(second, now);
+        assert_eq!((capture.unwrap().text.as_str(), lost), ("ab", 0));
+        assert_eq!(assembler.finish(), 0);
     }
     #[test]
     fn native_patch_literal_messages_retain_payloads_and_channels() {

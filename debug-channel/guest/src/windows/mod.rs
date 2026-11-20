@@ -16,6 +16,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Instant,
 };
 use venera_debug_protocol::{Envelope, Message};
 use windows_sys::Win32::{
@@ -79,23 +80,12 @@ pub fn accept(state: &Shared, capture: Capture) {
         capture.session_id = session.or(capture.session_id);
     }
     let (capture, lost) = state.assembler.ingest(capture);
-    let gap = (lost != 0).then(|| venera_debug_protocol::v1::HistoryEvent::Gap {
-        gap: venera_debug_protocol::v1::Gap {
-            stream_id: state.stream_id.clone(),
-            reason: "native_capture_incomplete".into(),
-            count: Some(venera_debug_protocol::v1::DecimalU64(lost)),
-            first_seq: None,
-            last_seq: None,
-        },
-    });
+    let untracked_loss = state.assembler.take_untracked_loss();
+    drop(state);
+    retain_native_losses(&shared, lost, untracked_loss);
     let Some(capture) = capture else {
-        drop(state);
-        if let Some(gap) = gap {
-            retain_event(&shared, gap);
-        }
         return;
     };
-    drop(state);
     let identity = capture
         .process
         .clone()
@@ -148,9 +138,6 @@ pub fn accept(state: &Shared, capture: Capture) {
         });
     let record = state.capture_record(capture, class);
     drop(state);
-    if let Some(gap) = gap {
-        retain_event(&shared, gap);
-    }
     if let Some(record) = record {
         retain_event_at(
             &shared,
@@ -158,6 +145,47 @@ pub fn accept(state: &Shared, capture: Capture) {
             startup,
         );
     }
+}
+
+fn retain_native_losses(state: &Shared, lost: u64, untracked_loss: bool) {
+    use venera_debug_protocol::v1::{DecimalU64, Gap, HistoryEvent};
+    if lost == 0 && !untracked_loss {
+        return;
+    }
+    let stream_id = state.lock().unwrap().stream_id.clone();
+    let retain_gap = |reason: &str, count| {
+        retain_event(
+            state,
+            HistoryEvent::Gap {
+                gap: Gap {
+                    stream_id: stream_id.clone(),
+                    reason: reason.into(),
+                    count,
+                    first_seq: None,
+                    last_seq: None,
+                },
+            },
+        );
+    };
+    if lost != 0 {
+        retain_gap("native_capture_incomplete", Some(DecimalU64(lost)));
+    }
+    if untracked_loss {
+        retain_gap("native_capture_overload", None);
+    }
+}
+
+fn expire_native_captures(state: &Shared) {
+    let lost = {
+        let mut state = state.lock().unwrap();
+        state.assembler.expire(Instant::now())
+    };
+    retain_native_losses(state, lost, false);
+}
+
+fn finish_native_captures(state: &Shared) {
+    let lost = state.lock().unwrap().assembler.finish();
+    retain_native_losses(state, lost, false);
 }
 
 pub fn retain_event(state: &Shared, event: venera_debug_protocol::v1::HistoryEvent) {
