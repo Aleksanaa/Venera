@@ -38,7 +38,7 @@ function json(body: unknown, status = 200) {
 
 const connection = {
   transport: 'VirtIO Serial',
-  channel: 'org.venera.debug.0',
+  channel: 'graphics.venera.debug.0',
   socket_path: '/run/venera/debug.sock',
   connected: true,
   last_received_at: null,
@@ -332,7 +332,7 @@ test('展示连接上下文、系统字段与诊断提示，刷新失败保留�
       if (url === '/api/connection')
         return json({
           transport: 'VirtIO Serial',
-          channel: 'org.venera.debug.0',
+          channel: 'graphics.venera.debug.0',
           socket_path: '/run/venera/debug.sock',
           connected: updated,
           last_received_at: updated ? '2026-11-11T10:02:00Z' : null,
@@ -413,7 +413,7 @@ test('系统报告保持本次采集直到用户刷新', async () => {
       if (url === '/api/connection')
         return json({
           transport: 'VirtIO Serial',
-          channel: 'org.venera.debug.0',
+          channel: 'graphics.venera.debug.0',
           socket_path: '/run/debug.sock',
           connected: true,
           last_received_at: null,
@@ -457,7 +457,7 @@ test('连接响应完成后采集系统报告，每次刷新依次完成两项�
     finishConnection(
       json({
         transport: 'VirtIO Serial',
-        channel: 'org.venera.debug.0',
+        channel: 'graphics.venera.debug.0',
         socket_path: '/run/debug.sock',
         connected: true,
         last_received_at: null,
@@ -496,7 +496,7 @@ test.each([200, 503])(
           return recovered
             ? json({
                 transport: 'VirtIO Serial',
-                channel: 'org.venera.debug.0',
+                channel: 'graphics.venera.debug.0',
                 socket_path: '/run/debug.sock',
                 connected: true,
                 last_received_at: null,
@@ -526,6 +526,6 @@ test.each([200, 503])(
     recovered = true;
     await user.click(screen.getByRole('button', { name: '刷新' }));
     expect(await screen.findByText('已连接')).toBeVisible();
-    expect(screen.getByText('org.venera.debug.0')).toBeVisible();
+    expect(screen.getByText('graphics.venera.debug.0')).toBeVisible();
   },
 );

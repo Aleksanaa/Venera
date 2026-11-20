@@ -22,7 +22,7 @@ build/debug-channel/release/venera-debug-host serve \
 
 Create the history directory in the example first, and replace the paths with actual paths for the current user. Open <http://127.0.0.1:8787> to browse history. `serve` continuously reconnects to the guest and can be managed by `systemd --user`. Each connection negotiates endpoint capabilities and retrieves the effective guest state. Use `--no-web` in place of `--assets` and `--listen` for a collection deployment.
 
-`--max-bytes` is the total capacity budget for the history database and SQLite workspace, with a minimum of 65536 bytes. Transaction workspace is reserved within it, and history data uses the remaining capacity. History is evicted in batches starting with the oldest records, and database pages are reclaimed on commit. Storage errors appear in background runtime diagnostics.
+`--max-bytes` is the total capacity budget for the history database and SQLite workspace, with a minimum of 73784 bytes. Transaction workspace is reserved within it, and history data uses the remaining capacity. History is evicted in batches starting with the oldest records, and database pages are reclaimed on commit. Archive reads adapt their page size to the available capacity and resume from committed progress. Connection status includes archive progress and diagnostic-write status.
 
 ## User Service Deployment
 

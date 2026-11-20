@@ -272,7 +272,7 @@ fn mixed_history_filters_projection_and_exports_rpc_notifications() {
     let db = Connection::open(server.dir.path().join("history.db")).unwrap();
     let raw = "{\n \"jsonrpc\": \"2.0\", \"method\": \"log\", \"params\": {\"stream_id\":\"stream\",\"seq\":\"18446744073709551615\",\"observed_at\":\"2026-11-10T08:00:01Z\",\"source\":\"driver\",\"component\":\"UMD\",\"level\":\"ERROR\",\"raw_level\":\"error\",\"counter\":18446744073709551615,\"text\":\"中文  🙂\\nnext\"} }";
     db.execute(
-        "INSERT INTO events VALUES(9007199254740996,'2026-11-10T08:00:03Z',?1,?2)",
+        "INSERT INTO events(id,received_at,message,raw_message) VALUES(9007199254740996,'2026-11-10T08:00:03Z',?1,?2)",
         params![
             r#"{"component":"UMD","level":"ERROR","process":{"pid":42},"text":"projection Hello"}"#,
             raw

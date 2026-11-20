@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
+#[path = "support/history.rs"]
+mod history;
 
 const BIN: &str = env!("CARGO_BIN_EXE_venera-debug-host");
 
@@ -67,6 +69,22 @@ fn serve_cli_validates_guest_addresses_before_initialization() {
     assert!(help.contains("--cid <CID>"), "{help}");
     assert!(help.contains("--port <PORT>"), "{help}");
     assert!(help.contains("[default: 49152]"), "{help}");
+}
+
+#[test]
+fn serve_cli_reports_minimum_archive_capacity() {
+    let dir = TempDir::new().unwrap();
+    let output = Command::new(BIN)
+        .args(["serve", "--cid", "42", "--database"])
+        .arg(dir.path().join("history.db"))
+        .args(["--max-bytes", "73783", "--control"])
+        .arg(dir.path().join("control.sock"))
+        .arg("--no-web")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(error.contains("73784"), "{error}");
 }
 
 #[cfg(not(feature = "web"))]
@@ -134,6 +152,7 @@ fn combined_service_captures_controls_reconnects_and_restarts() {
         result(initial["id"].as_str().unwrap(), status()),
     );
     let literal = r#"{ "jsonrpc":"2.0", "method":"log", "params":{"stream_id":"once","seq":"1","observed_at":"2026-11-10T08:00:01Z","source":"dbwin","component":"dxvk","level":"trace","raw_level":"trace","text":"combined 🙂","counter":18446744073709551615} }"#;
+    history::capture(&guest, &serde_json::from_str(literal).unwrap());
     writeln!(guest, "{literal}").unwrap();
     wait_for(dir.path(), |rows| {
         rows.iter().any(|r| r["message"]["text"] == "combined 🙂")
@@ -141,7 +160,9 @@ fn combined_service_captures_controls_reconnects_and_restarts() {
     assert_eq!(http(addr, "/api/health"), json!({"status":"ok"}));
     let history = http(addr, "/api/events?q=combined");
     assert_eq!(history["events"].as_array().unwrap().len(), 1);
-    assert_eq!(history["events"][0]["raw_message"], literal);
+    let raw: Value =
+        serde_json::from_str(history["events"][0]["raw_message"].as_str().unwrap()).unwrap();
+    assert_eq!(raw["event"]["record"]["text"], "combined 🙂");
     assert_eq!(http(addr, "/api/connection")["ready"], true);
     let web = std::thread::spawn(move || http(addr, "/api/system-info"));
     let request = read_request(&mut reader, "system.info.get");
@@ -309,7 +330,7 @@ fn startup_failures_release_owned_resources() {
 
 #[cfg(feature = "web")]
 #[test]
-fn collection_failure_stops_http_and_cleans_control() {
+fn collection_failure_remains_visible_while_http_serves_control() {
     use std::net::TcpListener;
     let dir = TempDir::new().unwrap();
     let listener = UnixListener::bind(dir.path().join("guest.sock")).unwrap();
@@ -324,30 +345,18 @@ fn collection_failure_stops_http_and_cleans_control() {
     send(&mut guest, log(1, "trigger failure"));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(status) = service.0.try_wait().unwrap() {
-            assert!(!status.success());
+        let connection = http(addr, "/api/connection");
+        if connection["history"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("collection fixture failure"))
+        {
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "service did not stop after collection failed"
-        );
+        assert!(Instant::now() < deadline, "archive error was not reported");
         sleep(Duration::from_millis(10));
     }
-    let mut diagnostic = String::new();
-    service
-        .0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut diagnostic)
-        .unwrap();
-    assert!(
-        diagnostic.contains("collection fixture failure"),
-        "{diagnostic}"
-    );
-    assert!(!dir.path().join("control.sock").exists());
-    let _released = TcpListener::bind(addr).unwrap();
+    assert!(service.0.try_wait().unwrap().is_none());
+    assert_eq!(http(addr, "/api/health"), json!({"status":"ok"}));
 }
 
 #[test]
@@ -446,6 +455,7 @@ fn status_changed() -> Value {
     )
 }
 fn send(stream: &mut UnixStream, value: Value) {
+    history::capture(stream, &value);
     writeln!(stream, "{value}").unwrap();
 }
 fn read_message(reader: &mut BufReader<UnixStream>) -> Value {
@@ -483,6 +493,7 @@ fn start(dir: &Path, budget: &str) -> Receiver {
 }
 
 fn mock_service(dir: &Path, budget: &str) -> Command {
+    history::start(dir);
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--ignored", "--exact", "injected_service", "--nocapture"])
@@ -494,7 +505,10 @@ fn mock_service(dir: &Path, budget: &str) -> Command {
 #[test]
 #[ignore]
 fn injected_service() {
-    struct UnixConnector(std::path::PathBuf);
+    struct UnixConnector {
+        path: std::path::PathBuf,
+        control_thread: Option<std::thread::ThreadId>,
+    }
     struct Chunked(UnixStream);
     impl Read for Chunked {
         fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
@@ -515,7 +529,14 @@ fn injected_service() {
             &mut self,
             _: Duration,
         ) -> std::io::Result<Box<dyn venera_debug_host::transport::Stream>> {
-            let stream = UnixStream::connect(&self.0)?;
+            let current = std::thread::current().id();
+            let control = *self.control_thread.get_or_insert(current) == current;
+            let path = if control {
+                self.path.clone()
+            } else {
+                self.path.with_file_name("archive.sock")
+            };
+            let stream = UnixStream::connect(path)?;
             stream.set_nonblocking(true)?;
             Ok(Box::new(Chunked(stream)))
         }
@@ -523,7 +544,10 @@ fn injected_service() {
     let dir = std::path::PathBuf::from(std::env::var_os("VENERA_TEST_DIR").unwrap());
     let web = std::env::var("VENERA_TEST_WEB").ok();
     if let Err(error) = venera_debug_host::serve(
-        UnixConnector(dir.join("guest.sock")),
+        UnixConnector {
+            path: dir.join("guest.sock"),
+            control_thread: None,
+        },
         dir.join("history.db"),
         std::env::var("VENERA_TEST_BUDGET")
             .unwrap()
@@ -776,7 +800,7 @@ fn receive_control_reconnect_and_export_through_cli() {
             && rows.iter().any(|r| r["message"]["type"] == "status")
     });
     let raw: Value = serde_json::from_str(&stored_raw(dir.path(), "中文")).unwrap();
-    assert_eq!(raw["method"], "log");
+    assert_eq!(raw["event"]["type"], "log");
     let child = Command::new(BIN)
         .arg("status")
         .arg("--control")
@@ -833,7 +857,7 @@ fn capacity_evicts_oldest_and_reclaims_physical_space() {
 fn insufficient_record_capacity_reports_storage_error() {
     let dir = TempDir::new().unwrap();
     let listener = UnixListener::bind(dir.path().join("guest.sock")).unwrap();
-    let mut receiver = start(dir.path(), "65536");
+    let mut receiver = start(dir.path(), "131072");
     let mut guest = accept(&listener);
     let mut reader = BufReader::new(guest.try_clone().unwrap());
     bootstrap(&mut guest, &mut reader);
@@ -848,22 +872,21 @@ fn insufficient_record_capacity_reports_storage_error() {
     send(&mut guest, log(1, &"x".repeat(50000)));
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(status) = receiver.0.try_wait().unwrap() {
-            assert_eq!(status.code(), Some(1));
+        let response = read_message(&mut control(
+            dir.path(),
+            "capacity",
+            "connection.get",
+            json!({}),
+        ));
+        if response["result"]["history"]["error"] == "storage budget cannot hold this history page"
+        {
+            assert_eq!(response["result"]["history"]["cursor"]["position"], "0");
             break;
         }
         assert!(Instant::now() < deadline, "expected storage error");
         sleep(Duration::from_millis(10))
     }
-    let mut error_text = String::new();
-    receiver
-        .0
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut error_text)
-        .unwrap();
-    assert_eq!(error_text, "storage budget cannot hold this record\n");
+    assert!(receiver.0.try_wait().unwrap().is_none());
 }
 
 #[test]
@@ -924,9 +947,6 @@ impl Session {
         let receiver = start(dir.path(), "1048576");
         let guest = accept(&listener);
         let mut reader = BufReader::new(guest.try_clone().unwrap());
-        let mut lf = String::new();
-        reader.read_line(&mut lf).unwrap();
-        assert_eq!(lf, "\n");
         let endpoint = read_request(&mut reader, "endpoint.info");
         let discover = read_request(&mut reader, "rpc.discover");
         Self {
@@ -1126,8 +1146,8 @@ fn guest_batches_aggregate_calls_and_keep_numeric_ids_and_notifications() {
         rows.iter().any(|r| r["message"]["text"] == "batch-a")
     });
     let raw: Value = serde_json::from_str(&stored_raw(s.dir.path(), "batch-a")).unwrap();
-    assert_eq!(raw["params"]["seq"], "18446744073709551615");
-    assert_eq!(raw["method"], "log");
+    assert_eq!(raw["event"]["record"]["seq"], "18446744073709551615");
+    assert_eq!(raw["event"]["type"], "log");
     send(&mut s.guest, json!([log(2, "batch-b"), status_changed()]));
     s.barrier();
     wait_for(s.dir.path(), |rows| {
@@ -1276,11 +1296,14 @@ fn discover_cli_returns_guest_artifact_and_single_notification_keeps_raw_text() 
     let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(reply["result"], discovery());
     let text = format!("  {}  ", log(77, "raw-text"));
+    history::capture(&s.guest, &serde_json::from_str(&text).unwrap());
     writeln!(s.guest, "{text}").unwrap();
     wait_for(s.dir.path(), |rows| {
         rows.iter().any(|r| r["message"]["text"] == "raw-text")
     });
-    assert_eq!(stored_raw(s.dir.path(), "raw-text"), text);
+    let raw: Value = serde_json::from_str(&stored_raw(s.dir.path(), "raw-text")).unwrap();
+    assert_eq!(raw["event"]["record"]["text"], "raw-text");
+    assert_eq!(raw["event"]["record"]["seq"], "77");
     let export = Command::new(BIN)
         .arg("export")
         .arg("--database")
@@ -1295,8 +1318,8 @@ fn discover_cli_returns_guest_artifact_and_single_notification_keeps_raw_text() 
         .collect();
     assert!(rows
         .iter()
-        .any(|row| row["message"]["method"] == "log"
-            && row["message"]["params"]["text"] == "raw-text"));
+        .any(|row| row["message"]["event"]["type"] == "log"
+            && row["message"]["event"]["record"]["text"] == "raw-text"));
 }
 
 #[test]

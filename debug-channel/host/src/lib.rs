@@ -1,3 +1,4 @@
+mod history_sync;
 mod store;
 pub mod transport;
 #[cfg(feature = "web")]
@@ -12,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 use store::{Result, Store};
+use venera_debug_protocol::client::Client;
 use venera_debug_protocol::{v1, Filter, DEFAULT_MAX_LINE_BYTES};
 
 #[derive(Parser)]
@@ -29,7 +31,7 @@ enum Command {
         port: u32,
         #[arg(long)]
         database: PathBuf,
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u64).range(store::MIN_STORAGE_BYTES..))]
         max_bytes: u64,
         #[arg(long)]
         control: PathBuf,
@@ -162,10 +164,6 @@ fn rpc_request(id: &str, method: &str, params: Value) -> Result<Vec<u8>> {
 fn host_endpoint() -> v1::EndpointInfo {
     v1::EndpointInfo::new(v1::EndpointRole::Host, env!("CARGO_PKG_VERSION"))
 }
-fn host_discovery() -> Value {
-    serde_json::from_str(include_str!("../../protocol/v1/host.openrpc.json"))
-        .expect("host discovery artifact")
-}
 fn outcome(message: &str, code: &str) -> v1::RpcError {
     v1::RpcError {
         code: -32000,
@@ -282,92 +280,13 @@ fn write_response(p: &mut Pending) -> bool {
         Err(e) => e.kind() != ErrorKind::WouldBlock,
     }
 }
-fn valid_result(method: v1::Method, value: &Value) -> v1::RpcResult<()> {
-    let valid = match method {
-        v1::Method::StatusGet | v1::Method::FilterSet | v1::Method::FilterReset => {
-            serde_json::from_value::<v1::Status>(value.clone()).is_ok()
-        }
-        v1::Method::SystemInfoGet => {
-            serde_json::from_value::<v1::SystemInfo>(value.clone()).is_ok()
-        }
-        v1::Method::Discover => serde_json::from_value::<v1::Discovery>(value.clone()).is_ok(),
-        v1::Method::EndpointInfo => {
-            serde_json::from_value::<v1::EndpointInfo>(value.clone()).is_ok()
-        }
-        _ => false,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(v1::RpcError::new(-32004, "Invalid guest result"))
-    }
-}
-struct Negotiation {
-    peer: v1::PeerProtocol,
-    calls: Vec<(String, v1::Method)>,
-    failure: Option<v1::RpcError>,
-    since: Instant,
-    status_sent: bool,
-}
-impl Negotiation {
-    fn new() -> Self {
-        Self {
-            peer: Default::default(),
-            calls: Vec::new(),
-            failure: None,
-            since: Instant::now(),
-            status_sent: false,
-        }
-    }
-    fn require(&self, method: v1::Method) -> v1::RpcResult<()> {
-        if let Some(error) = &self.failure {
-            return Err(error.clone());
-        }
-        self.peer.require(method)?;
-        if self
-            .peer
-            .endpoint()
-            .is_some_and(|info| info.role != v1::EndpointRole::Guest)
-        {
-            return Err(v1::RpcError::new(-32003, "incompatible_protocol"));
-        }
-        Ok(())
-    }
-    fn accept(&mut self, method: v1::Method, result: v1::RpcResult<Value>) {
-        let accepted = result.and_then(|value| {
-            valid_result(method, &value)?;
-            match method {
-                v1::Method::EndpointInfo => self
-                    .peer
-                    .accept_endpoint(serde_json::from_value(value).unwrap()),
-                v1::Method::Discover => self
-                    .peer
-                    .accept_discovery(serde_json::from_value(value).unwrap()),
-                _ => Ok(()),
-            }
-        });
-        if let Err(error) = accepted {
-            self.failure = Some(error);
-        }
-        if self
-            .peer
-            .endpoint()
-            .is_some_and(|info| info.role != v1::EndpointRole::Guest)
-        {
-            self.failure = Some(v1::RpcError::new(-32003, "incompatible_protocol"));
-        }
-    }
-}
 fn control_packet(
     p: &mut Pending,
     packet: v1::RpcPacket,
     local: bool,
     busy: bool,
     connection: &Value,
-    negotiation: &Negotiation,
-    serial: &mut u64,
-    run_id: &str,
-    output: &mut Vec<u8>,
+    client: &mut Client,
 ) -> Result<()> {
     p.batch = Some(packet.batch);
     for item in packet.items {
@@ -386,19 +305,26 @@ fn control_packet(
                     "busy",
                 )))
             } else {
-                negotiation.require(method).err().map(Err)
+                client.require(method).err().map(Err)
             };
             if let Some(result) = immediate {
                 let _ = p.batch.as_mut().unwrap().complete(slot, result);
                 continue;
             }
-            *serial += 1;
-            let id = format!("{run_id}-{serial}");
             let params = match request.incoming {
                 v1::Incoming::FilterSet { params, .. } => serde_json::to_value(params)?,
+                v1::Incoming::ForwardingSet { params, .. } => serde_json::to_value(params)?,
+                v1::Incoming::HistoryRead { params, .. } => serde_json::to_value(params)?,
+                v1::Incoming::HistoryAck { params, .. } => serde_json::to_value(params)?,
                 _ => json!({}),
             };
-            output.extend(rpc_request(&id, method.name(), params)?);
+            let id = match client.request(method, params) {
+                Ok(id) => id,
+                Err(error) => {
+                    let _ = p.batch.as_mut().unwrap().complete(slot, Err(error));
+                    continue;
+                }
+            };
             p.id = Some(id);
             p.method = Some(method);
             p.slot = Some(slot);
@@ -432,108 +358,30 @@ fn project(incoming: &v1::Incoming) -> Option<Value> {
     }
 }
 fn guest_packet(
-    text: &str,
-    store: &Store,
-    negotiation: &mut Negotiation,
+    bytes: &[u8],
+    diagnostics: &history_sync::Diagnostics,
+    client: &mut Client,
     mut pending: Option<&mut Pending>,
-    output: &mut Vec<u8>,
 ) -> Result<()> {
-    let original: Option<Value> = serde_json::from_str(text).ok();
-    let array = matches!(original, Some(Value::Array(_)));
-    let sources: Vec<String> = match &original {
-        Some(Value::Array(values)) if !values.is_empty() => {
-            values.iter().map(Value::to_string).collect()
-        }
-        _ => vec![text.to_owned()],
-    };
-    let mut accepted = Vec::new();
-    for source in &sources {
-        let value: Option<Value> = serde_json::from_str(source).ok();
-        let packet = v1::RpcPacket::decode(source.as_bytes(), v1::Receiver::Host);
-        let response_like = value.as_ref().is_some_and(|v| {
-            v.get("method").is_none() && (v.get("result").is_some() || v.get("error").is_some())
-        });
-        if response_like
-            && packet
-                .items
-                .iter()
-                .any(|item| matches!(item, v1::PacketItem::Rejected(_)))
-        {
-            store.append(
-                &json!({"major":1,"type":"host.protocol_error","error":"Invalid guest response"}),
-            )?;
-            continue;
-        }
-        for item in &packet.items {
-            if let v1::PacketItem::Request(request) = item {
-                if let Some(projected) = project(&request.incoming) {
-                    store.append_with_raw(&projected, Some(source))?;
-                }
-            }
-        }
-        accepted.push(source.as_str());
-    }
-    if accepted.is_empty() {
-        return Ok(());
-    }
-    let filtered;
-    let bytes = if array && matches!(original,Some(Value::Array(ref values)) if !values.is_empty())
-    {
-        filtered = format!("[{}]", accepted.join(","));
-        filtered.as_bytes()
-    } else {
-        text.as_bytes()
-    };
-    let mut packet = v1::RpcPacket::decode(bytes, v1::Receiver::Host);
-    for item in packet.items {
-        match item {
-            v1::PacketItem::Request(request) => {
-                let result = match request.incoming {
-                    v1::Incoming::EndpointInfo { .. } => Ok(serde_json::to_value(host_endpoint())?),
-                    v1::Incoming::Discover { .. } => Ok(host_discovery()),
-                    _ => Ok(Value::Null),
-                };
-                if let Some(slot) = request.correlation {
-                    let _ = packet.batch.complete(slot, result);
-                }
-            }
-            v1::PacketItem::Response(response) => {
-                let (id, result) = match response {
-                    v1::RpcResponse::Success { id, result, .. } => (id, Ok(result)),
-                    v1::RpcResponse::Error { id, error, .. } => (id, Err(error)),
-                };
-                if let Some(index) = negotiation
-                    .calls
-                    .iter()
-                    .position(|(known, _)| id == v1::RpcId::String(known.clone()))
-                {
-                    let (_, method) = negotiation.calls.remove(index);
-                    negotiation.accept(method, result);
-                } else if let Some(p) = pending.as_deref_mut() {
-                    if p.id
-                        .as_ref()
-                        .is_some_and(|known| id == v1::RpcId::String(known.clone()))
-                        && p.response.is_none()
-                    {
-                        let method = p.method.unwrap();
-                        let checked = result.and_then(|value| {
-                            valid_result(method, &value)?;
-                            Ok(value)
-                        });
-                        if matches!(method, v1::Method::EndpointInfo | v1::Method::Discover) {
-                            negotiation.accept(method, checked.clone());
-                        }
-                        p.finish(checked);
-                    }
-                }
-            }
-            v1::PacketItem::Rejected(error) => {
-                store.append(&json!({"major":1,"type":"host.protocol_error","error":error}))?
+    for reply in client.receive(bytes).map_err(|error| error.message)? {
+        if let Some(p) = pending.as_deref_mut() {
+            if p.id.as_ref() == Some(&reply.id) && p.response.is_none() {
+                p.finish(reply.result);
             }
         }
     }
-    if let Some(response) = packet.batch.take_response() {
-        output.extend(encode_value(&response));
+    for (event, source) in client.take_events() {
+        if let Some(projected) = project(&event) {
+            if projected["type"] == "status" {
+                diagnostics.append(projected, Some(source));
+            }
+        }
+    }
+    for error in client.take_errors() {
+        diagnostics.append(
+            json!({"major":1,"type":"host.protocol_error","error":error}),
+            None,
+        );
     }
     Ok(())
 }
@@ -544,7 +392,7 @@ impl Drop for Cleanup {
     }
 }
 struct Collector {
-    store: Store,
+    archive: Store,
     listener: UnixListener,
     _cleanup: Cleanup,
 }
@@ -580,7 +428,7 @@ async fn initialize(
     listener.set_nonblocking(true)?;
     store.append(&json!({"major":1,"type":"host.started"}))?;
     Ok(Collector {
-        store,
+        archive: store,
         listener,
         _cleanup: cleanup,
     })
@@ -684,200 +532,177 @@ fn collect(
     mut connector: impl transport::Connector,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()> {
+    use std::sync::{Arc, Mutex};
     let Collector {
-        store,
+        archive,
         listener,
         _cleanup,
     } = collector;
-    let mut guest: Option<Box<dyn transport::Stream>> = None;
-    let mut framer = v1::JsonlFramer::default();
-    let mut negotiation = Negotiation::new();
-    let mut pending: Option<Pending> = None;
-    let mut busy: Vec<Pending> = Vec::new();
-    let mut output = Vec::new();
-    let mut offset = 0;
-    let mut next_connect = Instant::now();
-    let mut serial = 0u64;
-    let run_id = store::now();
-    let mut last_received_at: Option<String> = None;
-    while !stop.load(std::sync::atomic::Ordering::Acquire) {
-        if guest.is_none() && Instant::now() >= next_connect {
-            next_connect = Instant::now() + Duration::from_millis(200);
-            if let Ok(stream) = connector.connect(Duration::from_millis(200)) {
-                framer.clear();
-                negotiation = Negotiation::new();
-                negotiation.peer.connect();
-                output = vec![b'\n'];
-                offset = 0;
-                for method in [v1::Method::EndpointInfo, v1::Method::Discover] {
-                    serial += 1;
-                    let id = format!("{run_id}-{serial}");
-                    output.extend(rpc_request(&id, method.name(), json!({}))?);
-                    negotiation.calls.push((id, method));
+    let mut initial_stream = connector.connect(Duration::from_millis(200)).ok();
+    let connector = Arc::new(Mutex::new(connector));
+    let history_status = Arc::new(Mutex::new(json!({"state":"connecting"})));
+    let archive_connector = connector.clone();
+    let archive_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_stop = archive_stop.clone();
+    let archive_status = history_status.clone();
+    let (diagnostics, diagnostic_writer) = history_sync::diagnostics();
+    let archive_worker = std::thread::Builder::new()
+        .name("history-archive".into())
+        .spawn(move || {
+            history_sync::run(
+                archive,
+                archive_connector,
+                worker_stop,
+                archive_status,
+                diagnostic_writer,
+            )
+            .map_err(|e| e.to_string())
+        })?;
+    let result: Result<()> = (|| {
+        let mut guest: Option<Box<dyn transport::Stream>> = None;
+        let mut client = Client::default();
+        let mut status_sent = false;
+        let mut pending: Option<Pending> = None;
+        let mut busy: Vec<Pending> = Vec::new();
+        let mut next_connect = Instant::now();
+        let mut last_received_at: Option<String> = None;
+        while !stop.load(std::sync::atomic::Ordering::Acquire) {
+            if guest.is_none() && Instant::now() >= next_connect {
+                next_connect = Instant::now() + Duration::from_millis(200);
+                if let Some(stream) = initial_stream.take().or_else(|| {
+                    connector
+                        .lock()
+                        .unwrap()
+                        .connect(Duration::from_millis(200))
+                        .ok()
+                }) {
+                    client.connect();
+                    status_sent = false;
+                    guest = Some(stream);
+                    diagnostics.append(
+                        json!({"major":1,"type":"host.connection","connected":true}),
+                        None,
+                    );
                 }
-                guest = Some(stream);
-                store.append(&json!({"major":1,"type":"host.connection","connected":true}))?;
             }
-        }
-        if guest.is_some() && !negotiation.status_sent && negotiation.failure.is_none() {
-            if negotiation.peer.endpoint().is_some() && negotiation.peer.discovery().is_some() {
-                negotiation.status_sent = true;
-                if negotiation.require(v1::Method::StatusGet).is_ok() {
-                    serial += 1;
-                    let id = format!("{run_id}-{serial}");
-                    output.extend(rpc_request(&id, "status.get", json!({}))?);
-                    negotiation.calls.push((id, v1::Method::StatusGet));
+            if guest.is_some() && !status_sent && client.negotiation().failure.is_none() {
+                if client.peer().endpoint().is_some() && client.peer().discovery().is_some() {
+                    status_sent = true;
+                    if client.require(v1::Method::StatusGet).is_ok() {
+                        client
+                            .request(v1::Method::StatusGet, json!({}))
+                            .map_err(|error| error.message)?;
+                    }
+                } else if client.negotiation().since.elapsed() > Duration::from_secs(5) {
+                    client.fail(v1::RpcError::new(-32001, "Handshake timed out"));
                 }
-            } else if negotiation.since.elapsed() > Duration::from_secs(5) {
-                negotiation.failure = Some(v1::RpcError::new(-32001, "Handshake timed out"));
-                negotiation.calls.clear();
             }
-        }
-        for _ in 0..16 {
-            match listener.accept() {
-                Ok((client, _)) => {
-                    client.set_nonblocking(true)?;
-                    let p = Pending::new(client);
-                    if pending.is_none() {
-                        pending = Some(p)
-                    } else if busy.len() < 32 {
-                        busy.push(p)
+            for _ in 0..16 {
+                match listener.accept() {
+                    Ok((client, _)) => {
+                        client.set_nonblocking(true)?;
+                        let p = Pending::new(client);
+                        if pending.is_none() {
+                            pending = Some(p)
+                        } else if busy.len() < 32 {
+                            busy.push(p)
+                        }
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            let endpoint = client.peer().endpoint();
+            let connection = json!({"transport":"VirtIO socket","connected":guest.is_some(),"last_received_at":last_received_at,
+            "history":history_status.lock().unwrap().clone(),
+            "archive_writes":diagnostics.status.lock().unwrap().clone(),
+            "protocol_version":endpoint.map(|v|&v.protocol_version),"software_version":endpoint.map(|v|&v.software_version),"role":endpoint.map(|v|v.role),
+            "discovered_methods":client.peer().discovery().map(|d|d.methods.iter().map(|m|m.name.clone()).collect::<Vec<_>>()),"ready":client.require(v1::Method::Discover).is_ok()});
+            for p in &mut busy {
+                if p.response.is_none() {
+                    if let Some((packet, local)) = read_control(p) {
+                        control_packet(p, packet, local, true, &connection, &mut client)?;
                     }
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(e) => return Err(e.into()),
             }
-        }
-        let endpoint = negotiation.peer.endpoint();
-        let connection = json!({"transport":"VirtIO socket","connected":guest.is_some(),"last_received_at":last_received_at,
-            "protocol_version":endpoint.map(|v|&v.protocol_version),"software_version":endpoint.map(|v|&v.software_version),"role":endpoint.map(|v|v.role),
-            "discovered_methods":negotiation.peer.discovery().map(|d|d.methods.iter().map(|m|m.name.clone()).collect::<Vec<_>>()),"ready":negotiation.require(v1::Method::Discover).is_ok()});
-        for p in &mut busy {
-            if p.response.is_none() {
-                if let Some((packet, local)) = read_control(p) {
-                    control_packet(
-                        p,
-                        packet,
-                        local,
-                        true,
-                        &connection,
-                        &negotiation,
-                        &mut serial,
-                        &run_id,
-                        &mut output,
-                    )?;
+            busy.retain_mut(|p| !write_response(p) && p.since.elapsed() < Duration::from_secs(7));
+            if let Some(p) = pending.as_mut() {
+                if p.id.is_none() && p.response.is_none() {
+                    if let Some((packet, local)) = read_control(p) {
+                        control_packet(p, packet, local, false, &connection, &mut client)?;
+                    }
                 }
             }
-        }
-        busy.retain_mut(|p| !write_response(p) && p.since.elapsed() < Duration::from_secs(7));
-        if let Some(p) = pending.as_mut() {
-            if p.id.is_none() && p.response.is_none() {
-                if let Some((packet, local)) = read_control(p) {
-                    control_packet(
-                        p,
-                        packet,
-                        local,
-                        false,
-                        &connection,
-                        &negotiation,
-                        &mut serial,
-                        &run_id,
-                        &mut output,
-                    )?;
+            let mut disconnected = false;
+            if let Some(stream) = guest.as_mut() {
+                if client.write(stream.as_mut()).is_err() {
+                    disconnected = true;
                 }
-            }
-        }
-        let mut disconnected = false;
-        if let Some(stream) = guest.as_mut() {
-            if offset < output.len() {
-                match stream.write(&output[offset..]) {
+                let mut bytes = [0; 65536];
+                match stream.read(&mut bytes) {
                     Ok(0) => disconnected = true,
-                    Ok(n) => offset += n,
+                    Ok(n) => {
+                        last_received_at = Some(store::now());
+                        guest_packet(&bytes[..n], &diagnostics, &mut client, pending.as_mut())?;
+                    }
                     Err(e) if e.kind() == ErrorKind::WouldBlock => (),
                     Err(_) => disconnected = true,
                 }
             }
-            if offset == output.len() {
-                output.clear();
-                offset = 0;
-            }
-            let mut bytes = [0; 65536];
-            match stream.read(&mut bytes) {
-                Ok(0) => disconnected = true,
-                Ok(n) => {
-                    last_received_at = Some(store::now());
-                    for frame in framer.push(&bytes[..n]) {
-                        match frame {
-                            Err(error) => {
-                                store.append(
-                                    &json!({"major":1,"type":"host.protocol_error","error":error}),
-                                )?;
-                                output.extend(encode_value(&error_value(v1::RpcId::Null, error)));
-                            }
-                            Ok(frame) => {
-                                guest_packet(
-                                    frame.text(),
-                                    &store,
-                                    &mut negotiation,
-                                    pending.as_mut(),
-                                    &mut output,
-                                )?;
-                            }
-                        }
+            if disconnected {
+                guest = None;
+                client.disconnect();
+                diagnostics.append(
+                    json!({"major":1,"type":"host.connection","connected":false}),
+                    None,
+                );
+                if let Some(p) = pending.as_mut() {
+                    if p.response.is_none() && p.id.is_some() {
+                        p.finish(Err(outcome(
+                            "Connection interrupted; query status after reconnection",
+                            "outcome_unknown",
+                        )));
                     }
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => (),
-                Err(_) => disconnected = true,
             }
-        }
-        if output.len().saturating_sub(offset) > 2 * v1::MAX_FRAME_BYTES {
-            disconnected = true;
-        }
-        if disconnected {
-            guest = None;
-            framer.clear();
-            negotiation.peer.disconnect();
-            negotiation.calls.clear();
-            negotiation.failure = None;
-            output.clear();
-            offset = 0;
-            store.append(&json!({"major":1,"type":"host.connection","connected":false}))?;
+            let mut done = false;
             if let Some(p) = pending.as_mut() {
-                if p.response.is_none() && p.id.is_some() {
-                    p.finish(Err(outcome(
-                        "Connection interrupted; query status after reconnection",
-                        "outcome_unknown",
-                    )));
-                }
-            }
-        }
-        let mut done = false;
-        if let Some(p) = pending.as_mut() {
-            let timeout = if p.method == Some(v1::Method::SystemInfoGet) {
-                45
-            } else {
-                5
-            };
-            if p.response.is_none() && p.since.elapsed() > Duration::from_secs(timeout) {
-                if p.slot.is_some() {
-                    p.finish(Err(outcome(
+                let timeout = if p.method == Some(v1::Method::SystemInfoGet) {
+                    45
+                } else {
+                    5
+                };
+                if p.response.is_none() && p.since.elapsed() > Duration::from_secs(timeout) {
+                    if p.slot.is_some() {
+                        p.finish(Err(outcome(
                         "Request timed out; query status to confirm the effective configuration",
                         "outcome_unknown",
                     )));
-                } else {
-                    p.response = Some(encode_value(&error_value(
-                        v1::RpcId::Null,
-                        v1::RpcError::new(-32600, "Incomplete request"),
-                    )));
+                    } else {
+                        p.response = Some(encode_value(&error_value(
+                            v1::RpcId::Null,
+                            v1::RpcError::new(-32600, "Incomplete request"),
+                        )));
+                    }
                 }
+                done = write_response(p) || p.since.elapsed() > Duration::from_secs(timeout + 2);
             }
-            done = write_response(p) || p.since.elapsed() > Duration::from_secs(timeout + 2);
+            if done {
+                if let Some(id) = pending.as_ref().and_then(|p| p.id.as_deref()) {
+                    client.cancel(id);
+                }
+                pending = None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
-        if done {
-            pending = None;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    // Dropping control clients completes waiting HTTP and CLI requests promptly.
-    Ok(())
+        // Dropping control clients completes waiting HTTP and CLI requests promptly.
+        Ok(())
+    })();
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    archive_stop.store(true, std::sync::atomic::Ordering::Release);
+    let archive_result = archive_worker
+        .join()
+        .map_err(|_| "History worker panicked")?;
+    result?;
+    archive_result.map_err(Into::into)
 }
