@@ -13,14 +13,23 @@ struct DebugStatus {
 };
 DebugStatus queryDebug(const std::vector<std::wstring>& args = {L"status", L"--json"});
 std::wstring debugQuote(const std::wstring& value);
+struct GuestLogUpdate {
+    // Position is a decimal string on the feed, paired with its journal identity.
+    std::pair<std::string, std::string> cursor;
+    LogLine line;
+    std::wstring source;
+    bool revision = false, visible = true;
+};
 class GuestLogs {
 public:
     ~GuestLogs() { stop(); }
     void start(std::function<void(LogLine&&)> sink);
+    void startRevisable(std::function<void(GuestLogUpdate&&)> sink);
     void stop();
     bool running() const { return running_; }
     std::wstring error() const { std::lock_guard<std::mutex> lock(mutex_); return error_.resolve(); }
 private:
+    void follow(bool revisable, std::function<void(GuestLogUpdate&&)> sink);
     std::thread thread_;
     HANDLE cancel_ = nullptr;
     std::atomic<bool> running_{false};

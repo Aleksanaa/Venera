@@ -7,6 +7,7 @@
 #include <shlobj.h>
 
 #include <deque>
+#include <map>
 
 namespace panel {
 
@@ -34,7 +35,7 @@ std::wstring clock(const SYSTEMTIME& t, bool ms)
     return buf;
 }
 
-struct Line : LogLine {
+struct Line : GuestLogUpdate {
     unsigned seq;
 };
 
@@ -54,7 +55,7 @@ private:
     void start();
     bool shown(const Line& l) const
     {
-        return filter_ == kAll || (!l.component.empty() && l.level >= filter_ - kDrivers);
+        return l.visible && (filter_ == kAll || (!l.line.component.empty() && l.line.level >= filter_ - kDrivers));
     }
     void exportLog();
 
@@ -63,19 +64,20 @@ private:
     SYSTEMTIME since_ = {};
     int filter_ = kAll;
     std::deque<Line> lines_;
+    std::map<decltype(GuestLogUpdate::cursor), unsigned> cursors_;
     unsigned seq_ = 0;
     std::mutex mutex_;
-    std::vector<LogLine> pending_;  // from the capture's threads
+    std::vector<GuestLogUpdate> pending_;
 };
 
 void Logs::start()
 {
     GetLocalTime(&since_);
-    capture_.start([this](LogLine&& l) {
+    capture_.startRevisable([this](GuestLogUpdate&& l) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (pending_.empty())
             PostMessageW(window_, kLines, 0, 0);
-        if (pending_.size() < kMaxLines)
+        if (pending_.size() < kMaxLines || l.revision)
             pending_.push_back(std::move(l));
     });
 }
@@ -86,15 +88,32 @@ bool Logs::message(UINT msg, WPARAM wp, LPARAM)
         return true;
     if (msg != kLines)
         return false;
-    std::vector<LogLine> got;
+    std::vector<GuestLogUpdate> got;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         got.swap(pending_);
     }
-    for (LogLine& l : got)
-        lines_.push_back({std::move(l), seq_++});
-    while (lines_.size() > kMaxLines)
-        lines_.pop_front();
+    for (auto& update : got) {
+        if (update.revision) {
+            auto found = cursors_.find(update.cursor);
+            if (found != cursors_.end()) {
+                auto& row = lines_[found->second - lines_.front().seq];
+                row.line.pid = update.line.pid;
+                row.line.process = update.line.process.empty() ? row.source : std::move(update.line.process);
+                row.visible = update.visible;
+            }
+            continue;
+        }
+        if (!update.cursor.first.empty()) {
+            if (!cursors_.emplace(update.cursor, seq_).second)
+                continue;
+        }
+        lines_.push_back({std::move(update), seq_++});
+        if (lines_.size() > kMaxLines) {
+            cursors_.erase(lines_.front().cursor);
+            lines_.pop_front();
+        }
+    }
     return true;
 }
 
@@ -154,7 +173,7 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
         size_t i = unsigned(id - kLineText) - lines_.front().seq % 100000000;
         if (i >= lines_.size() || !shown(lines_[i]))
             return false;
-        *s = lines_[i].text;
+        *s = lines_[i].line.text;
         return true;
     });
     // The lines fill the card down to the window's bottom and scroll in it.
@@ -168,14 +187,19 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
         float ry = y + 12 + i * kRowH;
         if (ry > bottom)
             break;
-        const Line* l = shownLines[i];
+        const LogLine* l = &shownLines[i]->line;
         if (l->level)
             ui.text(l->level == 2 ? L"" : L"", Ui::kIconSmall, {x + 12, ry, x + 30, ry + kRowH},
                     l->level == 2 ? kCritical : kCaution, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
         ui.text(clock(l->time, true), Ui::kMono, {x + 38, ry, x + 142, ry + kRowH}, kWhite, kTextTertiary);
-        ui.text(l->component.empty() ? l->process : l->component, Ui::kMono, {x + 146, ry, x + 230, ry + kRowH},
+        std::wstring projection = l->process.substr(l->process.find_last_of(L"\\/") + 1);
+        if (l->pid) projection += L"[" + std::to_wstring(l->pid) + L"]";
+        if (!l->component.empty() && l->component != l->process)
+            projection = l->component + (projection.empty() ? L"" : L" · " + projection);
+        float body = x + std::min(320.f, std::max(238.f, w * .44f));
+        ui.text(projection, Ui::kMono, {x + 146, ry, body - 8, ry + kRowH},
                 kWhite, kTextSecondary);
-        ui.selectable(kLineText + int(l->seq % 100000000), l->text, Ui::kMono, {x + 238, ry, x + w - 20, ry + kRowH},
+        ui.selectable(kLineText + int(shownLines[i]->seq % 100000000), l->text, Ui::kMono, {body, ry, x + w - 20, ry + kRowH},
                      kWhite, kTextPrimary, kLineRun);
     }
     ui.endScroll();
@@ -193,6 +217,7 @@ void Logs::click(int id)
             start();
     } else if (id == kClearId) {
         lines_.clear();
+        cursors_.clear();
     } else if (id == kExportId) {
         exportLog();
     }
@@ -223,7 +248,8 @@ void Logs::exportLog()
         return;
     std::wstring text;
     for (const Line& l : lines_)
-        text += formatLogLine(l) + L"\r\n";
+        if (l.visible)
+            text += formatLogLine(l.line) + L"\r\n";
     std::string utf8 = narrow(text);
     HANDLE f = CreateFileW(file, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE)

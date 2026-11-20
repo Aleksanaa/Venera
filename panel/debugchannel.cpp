@@ -165,27 +165,56 @@ DebugStatus queryDebug(const std::vector<std::wstring>& args) {
     return status(v);
 }
 void GuestLogs::start(std::function<void(LogLine&&)> sink) {
+    follow(false,[sink=std::move(sink)](GuestLogUpdate&& update) { sink(std::move(update.line)); });
+}
+void GuestLogs::startRevisable(std::function<void(GuestLogUpdate&&)> sink) {
+    follow(true,std::move(sink));
+}
+void GuestLogs::follow(bool revisable, std::function<void(GuestLogUpdate&&)> sink) {
     stop(); { std::lock_guard<std::mutex> lock(mutex_); error_={}; }
     cancel_=CreateEventW(nullptr,TRUE,FALSE,nullptr); running_=true;
-    thread_=std::thread([this,sink=std::move(sink)] {
+    thread_=std::thread([this,revisable,sink=std::move(sink)] {
         locale::Message parseError;
-        auto error=run({L"logs",L"--follow"},0,cancel_,[&](const std::string& line) {
+        bool received=false;
+        auto receive=[&](const std::string& line) {
             Value v;
             if(!debugjson::Parser(line).parse(v)) { parseError={IDS_DebugFailure, {widen(line.substr(0,2048))}}; return; }
             if(v["type"].text=="status") return;
-            LogLine l={}; GetLocalTime(&l.time);
+            GuestLogUpdate update={};
+            auto& l=update.line;
+            const auto& cursor=v[v["type"].text=="attribution_revision"?"target":"cursor"];
+            if(cursor["journal_id"].type==Value::String && cursor["position"].type==Value::String)
+                update.cursor={cursor["journal_id"].text,cursor["position"].text};
+            update.visible=v["visible"].type!=Value::Bool || v["visible"].boolean;
+            auto project=[&](const Value& process) {
+                l.pid=std::strtoul(process["pid"].text.c_str(),nullptr,10);
+                l.process=field(process["exe_path"]);
+            };
             if(v["type"].text=="log" && v["text"].type==Value::String) {
                 l.time=observedTime(v["observed_at"].text);
                 l.component=field(v["component"]); l.text=field(v["text"]);
                 l.level=v["level"].text=="error"?2:v["level"].text=="warn"||v["level"].text=="warning"?1:0;
-                l.pid=std::strtoul(v["process"]["pid"].text.c_str(),nullptr,10);
-                l.process=field(v["process"]["exe_path"]);
-                if(l.process.empty()) l.process=field(v["source"]);
+                project(v["process"]);
+                update.source=field(v["source"]);
+                if(l.process.empty()) l.process=update.source;
+            } else if(v["type"].text=="attribution_revision" && !update.cursor.first.empty() &&
+                      !update.cursor.second.empty() && v["attribution"]["process"].type==Value::Object &&
+                      v["visible"].type==Value::Bool) {
+                update.revision=true;
+                project(v["attribution"]["process"]);
             } else if(v["type"].text=="gap") {
+                update.cursor={}; GetLocalTime(&l.time);
                 l.component=L"service"; l.level=1; l.text=L"Log stream gap: "+field(v["reason"]);
             } else { parseError={IDS_DebugLogInvalid}; return; }
-            sink(std::move(l));
-        });
+            received=true;
+            sink(std::move(update));
+        };
+        locale::Message error;
+        if(revisable) error=run({L"logs",L"--follow",L"--panel"},0,cancel_,receive);
+        if(!revisable || (!received && !error.empty() && WaitForSingleObject(cancel_,0)!=WAIT_OBJECT_0)) {
+            parseError={};
+            error=run({L"logs",L"--follow"},0,cancel_,receive);
+        }
         { std::lock_guard<std::mutex> lock(mutex_);
           error_=parseError.empty()?error:parseError;
           if(error_.empty()&&WaitForSingleObject(cancel_,0)!=WAIT_OBJECT_0) error_={IDS_DebugSubscriptionEnded};
