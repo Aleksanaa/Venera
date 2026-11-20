@@ -26,6 +26,11 @@ int main(void)
 {
     api_messages();
     shader_messages();
+    if (GetEnvironmentVariableA("TEST_SHADER_TEXT", NULL, 0)) {
+        static char shader[8000 * 11 + 1];
+        for (unsigned i = 0; i < 8000; ++i) memcpy(shader + i * 11, "mov r0, r1\n", 11);
+        vkd3d_dbg_printf(VKD3D_DBG_CHANNEL_SHADER, VKD3D_DBG_LEVEL_WARN, "compile", "%s", shader);
+    }
     vkd3d_dbg_flush();
     source_runtime_vkd3d_json((unsigned long)GetCurrentProcessId(),
 #ifdef VKD3D_NO_TRACE_MESSAGES

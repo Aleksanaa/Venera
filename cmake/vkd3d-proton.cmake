@@ -8,9 +8,11 @@ set(VKD3D_BUILD "${CMAKE_BINARY_DIR}/vkd3d-proton-debug-output")
 
 find_program(VENERA_PATCH patch REQUIRED)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/patches/debug-output/engine_etw.h"
     "${CMAKE_SOURCE_DIR}/patches/debug-output/vkd3d-proton.patch")
 file(COPY "${VKD3D_SRC}/" DESTINATION "${VKD3D_BUILD}/source" PATTERN ".git" EXCLUDE)
 file(COPY_FILE "${VKD3D_SRC}/libs/vkd3d-common/debug.c" "${VKD3D_BUILD}/source/libs/vkd3d-common/debug.c")
+configure_file("${CMAKE_SOURCE_DIR}/patches/debug-output/engine_etw.h" "${VKD3D_BUILD}/source/libs/vkd3d-common/engine_etw.h" COPYONLY)
 execute_process(COMMAND "${VENERA_PATCH}" -p1 -i "${CMAKE_SOURCE_DIR}/patches/debug-output/vkd3d-proton.patch"
     WORKING_DIRECTORY "${VKD3D_BUILD}/source" COMMAND_ERROR_IS_FATAL ANY)
 set(VKD3D_SRC "${VKD3D_BUILD}/source")
