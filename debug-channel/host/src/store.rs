@@ -585,25 +585,53 @@ impl ExportRange {
     }
 }
 
-pub fn export(path: &Path, out: &mut impl Write, range: &ExportRange) -> Result<()> {
-    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    db.busy_timeout(std::time::Duration::from_secs(2))?;
-    let has_raw = has_raw(&db)?;
-    let upper: i64 = db.query_row("SELECT COALESCE(MAX(id),0) FROM events", [], |r| r.get(0))?;
-    let mut last = 0i64;
-    loop {
-        let row: Option<(i64, String, String)> = db.query_row(
-            if has_raw {
-                "SELECT id,received_at,COALESCE(raw_message,message) FROM events WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1"
-            } else {
-                "SELECT id,received_at,message FROM events WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1"
-            },
-            params![last, upper], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).optional()?;
-        let Some((id, received, message)) = row else {
-            break;
+pub(super) struct ExportCursor {
+    db: Connection,
+    sql: String,
+    last: i64,
+    upper: i64,
+}
+
+impl ExportCursor {
+    pub(super) fn open(path: &Path) -> Result<Self> {
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(std::time::Duration::from_secs(2))?;
+        let raw = if has_raw(&db)? {
+            "COALESCE(raw_message,message)"
+        } else {
+            "message"
         };
-        last = id;
+        let upper: i64 =
+            db.query_row("SELECT COALESCE(MAX(id),0) FROM events", [], |r| r.get(0))?;
+        let sql = format!(
+            "SELECT id,received_at,message,{raw} FROM events WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1"
+        );
+        Ok(Self {
+            db,
+            sql,
+            last: 0,
+            upper,
+        })
+    }
+
+    pub(super) fn next_row(&mut self) -> Result<Option<(String, String, String)>> {
+        let row = self
+            .db
+            .prepare_cached(&self.sql)?
+            .query_row(params![self.last, self.upper], |r| {
+                Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
+            })
+            .optional()?;
+        Ok(row.map(|(id, data)| {
+            self.last = id;
+            data
+        }))
+    }
+}
+
+pub fn export(path: &Path, out: &mut impl Write, range: &ExportRange) -> Result<()> {
+    let mut cursor = ExportCursor::open(path)?;
+    while let Some((received, _, message)) = cursor.next_row()? {
         if !range.contains(&received)? {
             continue;
         }

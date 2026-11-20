@@ -236,35 +236,20 @@ async fn export(
     let Query(filters) = query.map_err(bad)?;
     let range = filters.range()?;
     let instance = filters.instance()?;
-    let (db, upper) = tokio::task::spawn_blocking(move || {
-        let db = open(&path).map_err(internal)?;
-        let upper: i64 = db
-            .query_row("SELECT COALESCE(MAX(id),0) FROM events", [], |r| r.get(0))
-            .map_err(internal)?;
-        Ok::<_, ApiError>((db, upper))
+    let mut cursor = tokio::task::spawn_blocking(move || {
+        crate::store::ExportCursor::open(&path).map_err(internal)
     })
     .await
     .map_err(internal)??;
     let (sender, receiver) = tokio::sync::mpsc::channel(8);
     tokio::task::spawn_blocking(move || {
         let result = (|| -> Result<()> {
-            let has_raw = has_raw(&db)?;
-            let mut last = 0i64;
-            loop {
-                let row: Option<(i64, String, String, Option<String>)> = db.query_row(if has_raw {
-                    "SELECT id,received_at,message,raw_message FROM events WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1"
-                } else {
-                    "SELECT id,received_at,message,NULL FROM events WHERE id>?1 AND id<=?2 ORDER BY id LIMIT 1"
-                }, params![last, upper], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional()?;
-                let Some((id, received, projection, raw)) = row else {
-                    break;
-                };
-                last = id;
+            while let Some((received, projection, raw)) = cursor.next_row()? {
                 let message: Value = serde_json::from_str(&projection)?;
                 if !range.contains(&received)? || !filters.matches(&message, instance.as_ref()) {
                     continue;
                 }
-                let raw = export_message(raw.as_deref().unwrap_or(&projection))?;
+                let raw = export_message(&raw)?;
                 let line = format!(
                     "{{\"received_at\":{},\"message\":{}}}\n",
                     serde_json::to_string(&received)?,
