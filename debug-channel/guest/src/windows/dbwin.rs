@@ -109,6 +109,7 @@ pub fn collect(
             let session_id = (ProcessIdToSessionId(pid, &mut session) != 0).then_some(session);
             let text = decode_ansi(&payload);
             emit(Capture {
+                structured: None,
                 pid: Some(pid),
                 tid: None,
                 session_id,

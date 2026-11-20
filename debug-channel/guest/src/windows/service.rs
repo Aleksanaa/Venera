@@ -6,6 +6,27 @@ use windows_sys::Win32::{
 };
 
 pub const NAME: &str = "VeneraDebugGuest";
+
+fn history_root() -> io::Result<std::path::PathBuf> {
+    Ok(std::path::PathBuf::from(
+        std::env::var_os("ProgramData")
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "ProgramData is unavailable"))?,
+    )
+    .join("Venera")
+    .join("DebugHistory"))
+}
+
+pub fn prepare_history() -> io::Result<()> {
+    crate::journal::Journal::open(
+        history_root()?,
+        format!("{}-{}", clock::filetime(), unsafe { GetCurrentProcessId() }),
+        crate::journal::RetentionPolicy {
+            max_bytes: crate::capture_storage::JOURNAL_BYTES,
+            ..Default::default()
+        },
+    )?
+    .close()
+}
 static STATUS: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 unsafe fn report(current: u32, code: u32) {
     let status = SERVICE_STATUS {
@@ -50,6 +71,30 @@ unsafe extern "system" fn main(_: u32, _: *mut *mut u16) {
     let stream_id = format!("{}-{}", timestamp_after(0), GetCurrentProcessId());
     let configured = forwarding();
     let mut initial = State::new(stream_id, configured.as_ref().copied().unwrap_or(false));
+    let history_stop = Arc::new(AtomicBool::new(false));
+    let history = (|| -> io::Result<_> {
+        let boot_id = clock::boot_id()?;
+        let root = history_root()?;
+        let journal = crate::journal::Journal::open(
+            root,
+            initial.stream_id.clone(),
+            crate::journal::RetentionPolicy {
+                max_bytes: crate::capture_storage::JOURNAL_BYTES,
+                ..Default::default()
+            },
+        )?;
+        let (history, worker) = crate::history::History::start(journal, history_stop.clone())?;
+        initial.boot_id = boot_id;
+        initial.history = Some(history);
+        Ok(worker)
+    })();
+    let history_worker = match history {
+        Ok(worker) => worker,
+        Err(_) => {
+            report(SERVICE_STOPPED, ERROR_WRITE_FAULT);
+            return;
+        }
+    };
     if let Err(e) = configured {
         initial.status.health["configuration"] = serde_json::json!({"error":e.to_string()});
     }
@@ -63,6 +108,8 @@ unsafe extern "system" fn main(_: u32, _: *mut *mut u16) {
     threads.push(std::thread::spawn(move || transport::serve(shared)));
     let shared = state.clone();
     threads.push(std::thread::spawn(move || etw::collect(shared)));
+    let shared = state.clone();
+    threads.push(std::thread::spawn(move || capture::collect(shared)));
     let shared = state.clone();
     threads.push(std::thread::spawn(move || {
         while !stopped() {
@@ -86,54 +133,18 @@ unsafe extern "system" fn main(_: u32, _: *mut *mut u16) {
     }));
     report(SERVICE_RUNNING, 0);
     while !stopped() {
-        let ready = {
-            let mut shared = state.lock().unwrap();
-            shared.expire();
-            let mut ready = Vec::new();
-            let mut retained = std::collections::VecDeque::new();
-            while let Some((at, mut capture)) = shared.pending_captures.pop_front() {
-                let observed = capture
-                    .pid
-                    .and_then(|pid| shared.processes.observed(pid, capture.observed_filetime));
-                capture.process = crate::collector::merge_identity(
-                    capture.process.take(),
-                    observed.map(|(identity, _)| identity),
-                );
-                let tracked = capture
-                    .process
-                    .as_ref()
-                    .is_some_and(|identity| shared.processes.contains(identity));
-                if !crate::collector::needs_identity(
-                    &shared.status.effective_filter,
-                    &capture,
-                    tracked,
-                ) {
-                    ready.push(capture);
-                } else if at.elapsed() >= std::time::Duration::from_secs(5) {
-                    let stream_id = shared.stream_id.clone();
-                    shared.queue_control(&Envelope::new(Message::Gap {
-                        stream_id,
-                        reason: "process_identity_unavailable".into(),
-                        count: Some(1),
-                        first_seq: None,
-                        last_seq: None,
-                    }));
-                } else {
-                    retained.push_back((at, capture));
-                }
-            }
-            shared.pending_captures = retained;
-            ready
-        };
-        for capture in ready {
-            accept(&state, capture);
+        if history_worker.is_finished() {
+            STOP.store(true, Ordering::Release);
+            break;
         }
+        state.lock().unwrap().expire();
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    for thread in threads {
-        let _ = thread.join();
-    }
-    report(SERVICE_STOPPED, 0);
+    let code = match crate::history::finish(threads, &history_stop, history_worker) {
+        Ok(()) => 0,
+        _ => ERROR_WRITE_FAULT,
+    };
+    report(SERVICE_STOPPED, code);
 }
 pub fn dispatch() -> io::Result<()> {
     let mut name = wide(NAME);

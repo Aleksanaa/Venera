@@ -19,6 +19,8 @@ pub struct Capture {
     pub process: Option<venera_debug_protocol::ProcessIdentity>,
     #[serde(default)]
     pub component: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<venera_debug_protocol::v1::StructuredEvent>,
 }
 
 /// Enriches an observed instance with fields from a later authoritative query.
@@ -35,11 +37,17 @@ pub fn merge_identity(
     if captured.pid != candidate.pid {
         return Some(candidate);
     }
+    if captured.boot_time_filetime.as_ref().zip(candidate.boot_time_filetime.as_ref()).is_some_and(|(left, right)| left != right)
+        || captured.start_key.as_ref().zip(candidate.start_key.as_ref()).is_some_and(|(left, right)| left != right) {
+        return Some(captured);
+    }
     match (
         &captured.start_time_filetime,
         &candidate.start_time_filetime,
     ) {
         (Some(left), Some(right)) if left == right => {
+            if captured.boot_time_filetime.is_none() { captured.boot_time_filetime = candidate.boot_time_filetime.take(); }
+            if captured.start_key.is_none() { captured.start_key = candidate.start_key.take(); }
             if captured.exe_path.is_none() {
                 captured.exe_path = candidate.exe_path.take();
             }
@@ -168,7 +176,7 @@ impl Assembler {
                 true
             }
         });
-        if !capture.text.starts_with("VDBG1|") {
+        if capture.structured.is_some() || !capture.text.starts_with("VDBG1|") {
             return (Some(capture), lost);
         }
         let fields: Vec<_> = capture.text.splitn(9, '|').collect();
@@ -321,6 +329,7 @@ mod tests {
             pid,
             start_time_filetime: start.map(str::to_owned),
             exe_path: path.map(str::to_owned),
+            ..Default::default()
         }
     }
     #[test]
@@ -395,6 +404,8 @@ mod tests {
         );
         assert!(!needs_identity(&filter, &capture, true));
         let record = venera_debug_protocol::LogRecord {
+            structured: None,
+            ancestors: Vec::new(),
             stream_id: "run-1".into(),
             seq: 1,
             observed_at: capture.observed_at,
@@ -416,6 +427,7 @@ mod tests {
     }
     fn event(text: &str) -> Capture {
         Capture {
+            structured: None,
             pid: Some(42),
             tid: None,
             session_id: Some(1),
@@ -542,6 +554,7 @@ mod tests {
     fn engine_fragments_reassemble_utf8_and_preserve_thread_and_level() {
         let mut assembler = Assembler::default();
         let event = |text: &str| Capture {
+            structured: None,
             pid: Some(42),
             tid: None,
             session_id: Some(1),
@@ -574,4 +587,21 @@ mod tests {
             }
         );
     }
+}
+pub fn etw_loss(
+    stream_id: &str,
+    previous: &mut u32,
+    total: u32,
+) -> Option<venera_debug_protocol::v1::HistoryEvent> {
+    let count = total.wrapping_sub(*previous);
+    *previous = total;
+    (count != 0).then(|| venera_debug_protocol::v1::HistoryEvent::Gap {
+        gap: venera_debug_protocol::v1::Gap {
+            stream_id: stream_id.into(),
+            reason: "etw_events_lost".into(),
+            count: Some(venera_debug_protocol::v1::DecimalU64(u64::from(count))),
+            first_seq: None,
+            last_seq: None,
+        },
+    })
 }

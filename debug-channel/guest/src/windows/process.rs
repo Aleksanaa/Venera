@@ -41,6 +41,8 @@ pub fn identity(pid: u32) -> ProcessIdentity {
         pid,
         start_time_filetime: None,
         exe_path: None,
+        boot_time_filetime: clock::boot_id().ok(),
+        ..Default::default()
     };
     unsafe {
         let process = Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid));
@@ -82,8 +84,16 @@ pub fn update_ancestry(state: &Shared) {
             );
             ok = Process32NextW(snapshot.0, &mut entry);
         }
+        let mut processes: Vec<_> = processes.into_values().collect();
+        processes.sort_by_key(|(identity, _)| {
+            identity
+                .start_time_filetime
+                .as_ref()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+        });
         let mut state = state.lock().unwrap();
-        for (identity, parent_pid) in processes.values() {
+        for (identity, parent_pid) in &processes {
             if identity.start_time_filetime.is_none() {
                 continue;
             }

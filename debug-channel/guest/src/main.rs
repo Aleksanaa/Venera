@@ -1,9 +1,15 @@
-#[cfg(any(windows, test))]
 mod ancestry;
+mod user_events;
 #[cfg(any(windows, test))]
 mod collector;
 #[cfg(any(windows, test))]
 mod connection;
+#[cfg(any(windows, test))]
+mod history;
+mod journal;
+#[cfg(any(windows, test))]
+mod capture_storage;
+mod kernel_events;
 #[cfg(any(windows, test))]
 mod state;
 #[cfg(all(test, not(windows)))]

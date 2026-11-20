@@ -4,6 +4,9 @@ use crate::{
     state::wire,
 };
 use std::time::{Duration, Instant};
+#[path = "transport_write.rs"]
+mod transport_write;
+use transport_write::{send_error, PendingWrite, WriteStep};
 use windows_sys::Win32::Networking::WinSock::accept;
 use windows_sys::Win32::System::Services::*;
 use windows_sys::Win32::{
@@ -262,7 +265,7 @@ unsafe fn serve_peer(
     for request in connection.connect() {
         queue_reply(state, peer, &request)?;
     }
-    let mut pending: Option<(Option<u64>, Vec<u8>, usize, Instant)> = None;
+    let mut pending: Option<(Option<u64>, PendingWrite)> = None;
     health(state, "host", serde_json::json!("connected"));
     state.lock().unwrap().notify();
     let mut buffer = [0u8; 16384];
@@ -283,19 +286,35 @@ unsafe fn serve_peer(
                     return Err(socket_error());
                 }
             } else {
-                let received = connection.receive(&buffer[..count as usize], |message| {
-                    let expires = match &message {
-                        Message::FilterSet {
-                            duration_ms: Some(ms),
-                            ..
-                        } => Some(timestamp_after(*ms)),
-                        _ => None,
-                    };
-                    state.lock().unwrap().control(message, expires)
-                });
+                let generation = state.lock().unwrap().history_generation();
+                let received = connection.receive_with(
+                    &buffer[..count as usize],
+                    |message| {
+                        let expires = match &message {
+                            Message::FilterSet {
+                                duration_ms: Some(ms),
+                                ..
+                            } => Some(timestamp_after(*ms)),
+                            _ => None,
+                        };
+                        state.lock().unwrap().control(message, expires)
+                    },
+                    |request, local| history_request(state, request, local),
+                );
                 state.lock().unwrap().parse_errors += received.parse_errors;
                 for response in received.output {
-                    queue_reply(state, peer, &response)?;
+                    if connection::history_response(&response) {
+                        let bytes = connection::line(&response)?;
+                        if !state
+                            .lock()
+                            .unwrap()
+                            .queue_reply(peer, Some(generation), bytes)
+                        {
+                            return Err(io::ErrorKind::OutOfMemory.into());
+                        }
+                    } else {
+                        queue_reply(state, peer, &response)?;
+                    }
                 }
                 for request in received.reports {
                     if let Some(response) = system_info::request(state.clone(), peer, request) {
@@ -308,8 +327,8 @@ unsafe fn serve_peer(
         }
         if pending.is_none() {
             let reply = state.lock().unwrap().next_reply(peer);
-            if let Some(bytes) = reply {
-                pending = Some((None, bytes, 0, Instant::now()));
+            if let Some((generation, bytes)) = reply {
+                pending = Some((generation, PendingWrite::new(bytes, Instant::now())));
             } else {
                 let next = state.lock().unwrap().next_line(peer);
                 if let Some((generation, bytes)) = next {
@@ -324,41 +343,27 @@ unsafe fn serve_peer(
                         Some(wire::encode(&envelope)?)
                     };
                     if let Some(bytes) = bytes {
-                        pending = Some((generation, bytes, 0, Instant::now()));
+                        pending = Some((generation, PendingWrite::new(bytes, Instant::now())));
                     }
                 }
             }
         }
-        if let Some((generation, bytes, offset, started)) = pending.as_mut() {
-            if !state.lock().unwrap().write_allowed(*generation) {
-                // Closing a partially written frame gives the next connection a fresh framer.
-                if *offset != 0 {
-                    return Err(io::ErrorKind::Interrupted.into());
+        if let Some((generation, write)) = pending.as_mut() {
+            let allowed = state.lock().unwrap().write_allowed(*generation);
+            match write.write(Instant::now(), allowed, |bytes| {
+                let count = send(socket.0, bytes.as_ptr(), bytes.len() as i32, 0);
+                if count == SOCKET_ERROR {
+                    Err(send_error(WSAGetLastError()))
+                } else {
+                    Ok(count as usize)
                 }
-                pending = None;
-                continue;
-            }
-            let count = send(
-                socket.0,
-                bytes[*offset..].as_ptr(),
-                (bytes.len() - *offset) as i32,
-                0,
-            );
-            if count == SOCKET_ERROR {
-                if !would_block() {
-                    return Err(socket_error());
-                }
-                if started.elapsed() >= Duration::from_secs(2) {
-                    return Err(io::ErrorKind::TimedOut.into());
-                }
-            } else if count == 0 {
-                return Err(io::ErrorKind::WriteZero.into());
-            } else {
-                *offset += count as usize;
-                if *offset == bytes.len() {
+            })? {
+                WriteStep::Complete => {
                     pending = None;
+                    continue;
                 }
-                continue;
+                WriteStep::Progress => continue,
+                WriteStep::Blocked => (),
             }
         }
         std::thread::sleep(Duration::from_millis(10));

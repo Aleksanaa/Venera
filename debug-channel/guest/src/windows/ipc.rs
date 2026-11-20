@@ -4,8 +4,9 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle},
     sync::mpsc,
+    time::{Duration, Instant},
 };
-use venera_debug_protocol::{Envelope, Filter, Message};
+use venera_debug_protocol::{Filter, Message};
 use windows_sys::Win32::{
     Security::{Authorization::*, *},
     Storage::FileSystem::*,
@@ -13,6 +14,7 @@ use windows_sys::Win32::{
     System::IO::*,
 };
 const PIPE: &str = "\\\\.\\pipe\\VeneraDebugGuest.v1";
+const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const LIMIT: usize = venera_debug_protocol::DEFAULT_MAX_LINE_BYTES;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -40,10 +42,7 @@ fn line<R: Read>(reader: &mut BufReader<R>) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
-fn connect() -> io::Result<File> {
-    connect_file(0)
-}
-fn connect_file(flags: u32) -> io::Result<File> {
+fn connect_file() -> io::Result<File> {
     unsafe {
         if WaitNamedPipeW(wide(PIPE).as_ptr(), 5000) == 0 {
             return Err(error());
@@ -54,7 +53,7 @@ fn connect_file(flags: u32) -> io::Result<File> {
             0,
             std::ptr::null(),
             OPEN_EXISTING,
-            SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION | flags,
+            SECURITY_SQOS_PRESENT | SECURITY_IMPERSONATION | FILE_FLAG_OVERLAPPED,
             std::ptr::null_mut(),
         );
         if handle == INVALID_HANDLE_VALUE {
@@ -73,59 +72,85 @@ fn connect_file(flags: u32) -> io::Result<File> {
 }
 
 #[derive(Clone)]
-struct HelperPipe {
+struct ClientPipe {
     handle: Arc<Handle>,
+    deadline: Option<Instant>,
     stop: Arc<AtomicBool>,
     #[cfg(test)]
     io_pending: Option<Arc<AtomicBool>>,
 }
 
-fn connect_helper() -> io::Result<HelperPipe> {
-    let file = connect_file(FILE_FLAG_OVERLAPPED)?;
-    Ok(HelperPipe {
+fn connect_pipe() -> io::Result<ClientPipe> {
+    let file = connect_file()?;
+    Ok(ClientPipe {
         handle: Arc::new(Handle(file.into_raw_handle())),
+        deadline: None,
         stop: Arc::new(AtomicBool::new(false)),
         #[cfg(test)]
         io_pending: None,
     })
 }
 
-impl HelperPipe {
-    unsafe fn complete(&self, overlapped: &OVERLAPPED) -> io::Result<usize> {
+impl ClientPipe {
+    fn check_io(&self) -> io::Result<()> {
+        if self.stop.load(Ordering::Acquire) || stopped() {
+            return Err(io::ErrorKind::ConnectionAborted.into());
+        }
+        if self.deadline.is_some_and(|end| Instant::now() >= end) {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        Ok(())
+    }
+
+    unsafe fn complete(&self, overlapped: *mut OVERLAPPED, event: HANDLE) -> io::Result<usize> {
         #[cfg(test)]
         if let Some(pending) = &self.io_pending {
             pending.store(true, Ordering::Release);
         }
         let mut transferred = 0;
         loop {
-            let wait = WaitForSingleObject(overlapped.hEvent, 50);
-            if wait == WAIT_OBJECT_0 {
-                return if GetOverlappedResult(self.handle.0, overlapped, &mut transferred, 0) != 0 {
-                    Ok(transferred as usize)
-                } else {
-                    Err(error())
-                };
+            let issue = match self.check_io() {
+                Err(issue) => issue,
+                Ok(()) => {
+                    let wait_ms = self.deadline.map_or(50, |end| {
+                        end.saturating_duration_since(Instant::now())
+                            .as_millis()
+                            .clamp(1, 50) as u32
+                    });
+                    match WaitForSingleObject(event, wait_ms) {
+                        WAIT_OBJECT_0 => {
+                            if GetOverlappedResult(self.handle.0, overlapped, &mut transferred, 0)
+                                == 0
+                            {
+                                return Err(error());
+                            }
+                            return Ok(transferred as usize);
+                        }
+                        WAIT_TIMEOUT => continue,
+                        _ => error(),
+                    }
+                }
+            };
+            CancelIoEx(self.handle.0, overlapped);
+            // Cancellation races completion. Reap either outcome before releasing the buffer and event.
+            if GetOverlappedResult(self.handle.0, overlapped, &mut transferred, 1) != 0 {
+                return Ok(transferred as usize);
             }
-            if wait != WAIT_TIMEOUT || self.stop.load(Ordering::Acquire) || stopped() {
-                let issue = if wait != WAIT_TIMEOUT {
-                    error()
+            let completion = error();
+            return Err(
+                if completion.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) {
+                    issue
                 } else {
-                    io::ErrorKind::ConnectionAborted.into()
-                };
-                CancelIoEx(self.handle.0, overlapped);
-                // Keep the operation and caller's buffer alive through cancellation completion.
-                GetOverlappedResult(self.handle.0, overlapped, &mut transferred, 1);
-                return Err(issue);
-            }
+                    completion
+                },
+            );
         }
     }
 }
 
-impl Read for HelperPipe {
+impl Read for ClientPipe {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if self.stop.load(Ordering::Acquire) {
-            return Err(io::ErrorKind::ConnectionAborted.into());
-        }
+        self.check_io()?;
         unsafe {
             let event = Handle(CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()));
             if event.0.is_null() {
@@ -139,25 +164,23 @@ impl Read for HelperPipe {
                 buffer.as_mut_ptr().cast(),
                 buffer.len().min(u32::MAX as usize) as u32,
                 &mut transferred,
-                &mut overlapped,
+                &raw mut overlapped,
             );
             if submitted == 0 {
                 let issue = error();
                 if issue.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
                     return Err(issue);
                 }
-                return self.complete(&overlapped);
+                return self.complete(&raw mut overlapped, event.0);
             }
             Ok(transferred as usize)
         }
     }
 }
 
-impl Write for HelperPipe {
+impl Write for ClientPipe {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.stop.load(Ordering::Acquire) {
-            return Err(io::ErrorKind::ConnectionAborted.into());
-        }
+        self.check_io()?;
         unsafe {
             let event = Handle(CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()));
             if event.0.is_null() {
@@ -171,14 +194,14 @@ impl Write for HelperPipe {
                 bytes.as_ptr().cast(),
                 bytes.len().min(u32::MAX as usize) as u32,
                 &mut transferred,
-                &mut overlapped,
+                &raw mut overlapped,
             ) == 0
             {
                 let issue = error();
                 if issue.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
                     return Err(issue);
                 }
-                return self.complete(&overlapped);
+                return self.complete(&raw mut overlapped, event.0);
             }
             Ok(transferred as usize)
         }
@@ -217,12 +240,18 @@ fn client(file: File, state: Shared, finite: &mut bool, local_stop: &AtomicBool)
     let pipe = file.as_raw_handle();
     let mut reader = BufReader::new(file.try_clone()?);
     let mut file = file;
-    let first = line(&mut reader)?;
-    let value: serde_json::Value = serde_json::from_slice(&first)?;
-    *finite = !matches!(
-        value["type"].as_str(),
-        Some("local.capture" | "local.subscribe")
-    );
+    let mut first = Vec::new();
+    if reader
+        .by_ref()
+        .take((LIMIT + 1) as u64)
+        .read_until(b'\n', &mut first)?
+        == 0
+    {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&first).unwrap_or(serde_json::Value::Null);
+    *finite = false;
     match value["type"].as_str() {
         Some("local.capture") => {
             let mut pid = 0;
@@ -271,15 +300,37 @@ fn client(file: File, state: Shared, finite: &mut bool, local_stop: &AtomicBool)
                 if let Some(result) = frame.system_info.take() {
                     system_info::helper_result(session, result);
                 }
-                {
+                let (lost, stream_id) = {
                     let mut state = state.lock().unwrap();
                     let key = session.to_string();
+                    let previous = &state.status.health["session_helper_loss"][&key];
+                    let before = if previous["pid"] == pid {
+                        previous["dropped_total"].as_u64().unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let lost = frame.dropped.saturating_sub(before);
                     let mut changed = state.status.health["session_capture"][&key] != frame.health;
                     state.status.health["session_capture"][&key] = frame.health;
                     changed |= state.observe_helper_drops(session, pid, frame.dropped);
                     if changed {
                         state.notify();
                     }
+                    (lost, state.stream_id.clone())
+                };
+                if lost != 0 {
+                    retain_event(
+                        &state,
+                        venera_debug_protocol::v1::HistoryEvent::Gap {
+                            gap: venera_debug_protocol::v1::Gap {
+                                stream_id,
+                                reason: "session_capture_overflow".into(),
+                                count: Some(venera_debug_protocol::v1::DecimalU64(lost)),
+                                first_seq: None,
+                                last_seq: None,
+                            },
+                        },
+                    );
                 }
                 if let Some(request_id) = system_info::helper_command(session) {
                     reply(
@@ -325,75 +376,100 @@ fn client(file: File, state: Shared, finite: &mut bool, local_stop: &AtomicBool)
             }
             Ok(())
         }
-        Some("local.subscribe") => {
-            let (tx, rx) = mpsc::sync_channel(crate::state::LOG_RECORDS);
-            let bytes = {
-                let mut state = state.lock().unwrap();
-                state.subscribers.push(tx);
-                let current = state.current();
-                venera_debug_protocol::encode(&Envelope::new(Message::Status { status: current }))?
-            };
-            file.write_all(&bytes)?;
-            while !client_stopped(local_stop) {
-                match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                    Ok(bytes) => file.write_all(&bytes)?,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(_) => return Ok(()),
-                }
-            }
-            Ok(())
-        }
-        Some("local.forwarding") => {
-            if !unsafe { admin(pipe) } {
-                return reply(
-                    &mut file,
-                    &serde_json::json!({"ok":false,"error":{"code":"permission_denied","message":"Administrator approval is required"}}),
-                );
-            }
-            let enabled = value["enabled"]
-                .as_bool()
-                .ok_or(io::ErrorKind::InvalidInput)?;
-            let mut state = state.lock().unwrap();
-            service::persist_forwarding(enabled)?;
-            state.set_forwarding(enabled);
-            let response = serde_json::json!({"ok":true,"status":state.current()});
-            drop(state);
-            reply(&mut file, &response)
-        }
-        _ => {
-            let envelope = venera_debug_protocol::decode(&first)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
-            if !matches!(envelope.body, Message::StatusGet { .. }) && !unsafe { admin(pipe) } {
-                let (request_id, operation) = match envelope.body {
-                    Message::FilterSet { request_id, .. } => (request_id, "filter.set"),
-                    Message::FilterReset { request_id } => (request_id, "filter.reset"),
-                    _ => return Err(io::ErrorKind::InvalidInput.into()),
-                };
-                let mut response = state.lock().unwrap().result(request_id, operation);
-                if let Message::RequestResult { result } = &mut response.body {
-                    result.ok = false;
-                    result.error = Some(venera_debug_protocol::RequestError {
-                        code: "permission_denied".into(),
-                        message: "Administrator approval is required".into(),
-                    });
-                }
-                return file.write_all(&venera_debug_protocol::encode(&response)?);
-            }
-            let expires = match &envelope.body {
-                Message::FilterSet {
-                    duration_ms: Some(ms),
-                    ..
-                } => Some(timestamp_after(*ms)),
-                _ => None,
-            };
-            let result = state
-                .lock()
-                .unwrap()
-                .control(envelope.body, expires)
-                .ok_or(io::ErrorKind::InvalidInput)?;
-            file.write_all(&venera_debug_protocol::encode(&result)?)
-        }
+        _ => rpc_client(file, reader, state, &first, local_stop),
     }
+}
+
+fn rpc_client(
+    mut file: File,
+    mut reader: BufReader<File>,
+    state: Shared,
+    first: &[u8],
+    local_stop: &AtomicBool,
+) -> io::Result<()> {
+    use crate::connection::Connection;
+    let peer = state.lock().unwrap().add_local_peer();
+    let mut connection = Connection::local(peer, unsafe { admin(file.as_raw_handle()) });
+    let result = (|| {
+        for request in connection.connect() {
+            reply(&mut file, &request)?;
+        }
+        let mut bytes = first.to_vec();
+        while !client_stopped(local_stop) {
+            let received = connection.receive_with(
+                &bytes,
+                |message| {
+                    let expires = match &message {
+                        Message::FilterSet {
+                            duration_ms: Some(ms),
+                            ..
+                        } => Some(timestamp_after(*ms)),
+                        _ => None,
+                    };
+                    state.lock().unwrap().control(message, expires)
+                },
+                |request, local| history_request(&state, request, local),
+            );
+            for value in received.output {
+                reply(&mut file, &value)?;
+            }
+            for request in received.reports {
+                if let Some(result) = system_info::request(state.clone(), peer, request) {
+                    if let Some(value) = connection.report(&result) {
+                        reply(&mut file, &value)?;
+                    }
+                }
+            }
+            bytes.clear();
+            loop {
+                if client_stopped(local_stop) {
+                    return Ok(());
+                }
+                if state.lock().unwrap().peer_closed(peer) {
+                    return Err(io::ErrorKind::ConnectionAborted.into());
+                }
+                let next = state.lock().unwrap().next_line(peer);
+                if let Some((_, bytes)) = next {
+                    let envelope = venera_debug_protocol::decode(&bytes)
+                        .map_err(|_| io::ErrorKind::InvalidData)?;
+                    if matches!(envelope.body, Message::SystemInfoResult { .. }) {
+                        if let Some(value) = connection.report(&envelope) {
+                            reply(&mut file, &value)?;
+                        }
+                    } else {
+                        file.write_all(&crate::state::wire::encode(&envelope)?)?;
+                    }
+                }
+                let mut available = 0;
+                if unsafe {
+                    PeekNamedPipe(
+                        file.as_raw_handle(),
+                        std::ptr::null_mut(),
+                        0,
+                        std::ptr::null_mut(),
+                        &mut available,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    return Err(error());
+                }
+                if available > 0 || !reader.buffer().is_empty() {
+                    let mut chunk = [0; 16384];
+                    let count = reader.read(&mut chunk)?;
+                    if count == 0 {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        Ok(())
+    })();
+    state.lock().unwrap().remove_peer(peer);
+    result
 }
 
 pub fn serve(state: Shared) {
@@ -577,7 +653,7 @@ fn cancel_workers(workers: Vec<std::thread::JoinHandle<()>>) {
 }
 
 fn helper_commands(
-    reader: BufReader<HelperPipe>,
+    reader: BufReader<ClientPipe>,
     session: u32,
     stop: Arc<AtomicBool>,
     reports: mpsc::SyncSender<venera_debug_protocol::SystemInfoResult>,
@@ -586,7 +662,7 @@ fn helper_commands(
 }
 
 fn helper_commands_with(
-    mut reader: BufReader<HelperPipe>,
+    mut reader: BufReader<ClientPipe>,
     session: u32,
     stop: Arc<AtomicBool>,
     reports: mpsc::SyncSender<venera_debug_protocol::SystemInfoResult>,
@@ -595,10 +671,22 @@ fn helper_commands_with(
     while !stop.load(Ordering::Acquire) {
         let bytes = match line(&mut reader) {
             Ok(bytes) => bytes,
-            Err(_) => break,
+            Err(_error) => {
+                #[cfg(test)]
+                eprintln!("helper command frame read: {_error:?}");
+                break;
+            }
         };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            break;
+        let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) => value,
+            Err(_error) => {
+                #[cfg(test)]
+                eprintln!(
+                    "helper command JSON decode ({} bytes): {_error}",
+                    bytes.len()
+                );
+                break;
+            }
         };
         if value["type"] != "local.system.info.get" {
             continue;
@@ -615,6 +703,74 @@ fn helper_commands_with(
         }
     }
     stop.store(true, Ordering::Release);
+}
+
+fn capture_handshake(
+    file: &mut ClientPipe,
+    deadline: Instant,
+) -> io::Result<BufReader<ClientPipe>> {
+    file.deadline = Some(deadline);
+    file.write_all(b"{\"type\":\"local.capture\"}\n")?;
+    let mut reader = BufReader::new(file.clone());
+    let ack: serde_json::Value = serde_json::from_slice(&line(&mut reader)?)?;
+    if ack["ok"] != true {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    file.check_io()?;
+    file.deadline = None;
+    reader.get_mut().deadline = None;
+    Ok(reader)
+}
+
+struct HelperOutput {
+    captures: mpsc::Receiver<Capture>,
+    pending: Option<Capture>,
+    status: Arc<Mutex<serde_json::Value>>,
+    dropped: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl HelperOutput {
+    fn send_frames(
+        &mut self,
+        file: &mut impl Write,
+        reports: mpsc::Receiver<venera_debug_protocol::SystemInfoResult>,
+        commands_finished: impl Fn() -> bool,
+    ) -> io::Result<()> {
+        loop {
+            if self.pending.is_none() {
+                self.pending = match self.captures.recv_timeout(Duration::from_secs(1)) {
+                    Ok(capture) => Some(capture),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                };
+            }
+            if commands_finished() {
+                return Ok(());
+            }
+            let frame = HelperFrame {
+                capture: self.pending.take(),
+                health: self.status.lock().unwrap().clone(),
+                dropped: self.dropped.load(Ordering::Relaxed),
+                system_info: reports.try_recv().ok(),
+            };
+            let encoded = serde_json::to_vec(&frame);
+            self.pending = frame.capture;
+            let mut bytes = encoded?;
+            bytes.push(b'\n');
+            let first = file.write(&bytes)?;
+            if first == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            // Only an untouched capture can move to the next connection.
+            let had_capture = self.pending.take().is_some();
+            if let Err(issue) = file.write_all(&bytes[first..]) {
+                if had_capture {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                return Err(issue);
+            }
+        }
+    }
 }
 
 pub fn helper() -> io::Result<()> {
@@ -645,41 +801,24 @@ pub fn helper() -> io::Result<()> {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     });
+    let mut output = HelperOutput {
+        captures: rx,
+        pending: None,
+        status,
+        dropped,
+    };
     loop {
-        if let Ok(mut file) = connect_helper() {
+        if let Ok(mut file) = connect_pipe() {
             let connection_stop = file.stop.clone();
-            if file.write_all(b"{\"type\":\"local.capture\"}\n").is_ok() {
-                let mut reader = BufReader::new(file.clone());
-                if line(&mut reader).is_ok() {
-                    let reader_stop = connection_stop.clone();
-                    let (report_tx, report_rx) = mpsc::sync_channel(1);
-                    let commands = std::thread::Builder::new()
-                        .name("system-info-commands".into())
-                        .spawn(move || helper_commands(reader, session, reader_stop, report_tx))?;
-                    loop {
-                        let capture = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
-                            Ok(capture) => Some(capture),
-                            Err(mpsc::RecvTimeoutError::Timeout) => None,
-                            Err(_) => break,
-                        };
-                        if commands.is_finished() {
-                            break;
-                        }
-                        let frame = HelperFrame {
-                            capture,
-                            health: status.lock().unwrap().clone(),
-                            dropped: dropped.load(Ordering::Relaxed),
-                            system_info: report_rx.try_recv().ok(),
-                        };
-                        if serde_json::to_writer(&mut file, &frame).is_err()
-                            || file.write_all(b"\n").is_err()
-                        {
-                            break;
-                        }
-                    }
-                    connection_stop.store(true, Ordering::Release);
-                    let _ = commands.join();
-                }
+            if let Ok(reader) = capture_handshake(&mut file, Instant::now() + RPC_TIMEOUT) {
+                let reader_stop = connection_stop.clone();
+                let (report_tx, report_rx) = mpsc::sync_channel(1);
+                let commands = std::thread::Builder::new()
+                    .name("system-info-commands".into())
+                    .spawn(move || helper_commands(reader, session, reader_stop, report_tx))?;
+                let _ = output.send_frames(&mut file, report_rx, || commands.is_finished());
+                connection_stop.store(true, Ordering::Release);
+                let _ = commands.join();
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -687,45 +826,151 @@ pub fn helper() -> io::Result<()> {
 }
 
 pub fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let request = match args {
-        [command, flag] if command == "status" && flag == "--json" => serde_json::to_value(Envelope::new(Message::StatusGet { request_id:"local-cli".into() }))?,
-        [command, state] if command == "forwarding" && ["on", "off"].contains(&state.as_str()) => serde_json::json!({"type":"local.forwarding","enabled":state == "on"}),
+    use venera_debug_protocol::v1::Method;
+    let (method, params) = match args {
+        [command, flag] if command == "status" && flag == "--json" => (Method::StatusGet, serde_json::json!({})),
+        [command, state] if command == "forwarding" && ["on", "off"].contains(&state.as_str()) => (Method::ForwardingSet, serde_json::json!({"enabled":state == "on"})),
         [command, flag, path] if command == "filter-set" && flag == "--json" => {
             let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
             let filter: Filter = serde_json::from_value(value.get("filter").cloned().unwrap_or(value.clone()))?;
             let duration_ms = value.get("duration_ms").and_then(serde_json::Value::as_u64);
-            serde_json::to_value(Envelope::new(Message::FilterSet { request_id:"local-cli".into(), filter, duration_ms }))?
+            (Method::FilterSet, serde_json::json!({"filter":crate::state::wire::filter_v1(&filter)?,"duration_ms":duration_ms.map(|value| value.to_string())}))
         },
-        [command] if command == "filter-reset" => serde_json::to_value(Envelope::new(Message::FilterReset { request_id:"local-cli".into() }))?,
-        [command, flag] if command == "logs" && flag == "--follow" => serde_json::json!({"type":"local.subscribe"}),
+        [command] if command == "filter-reset" => (Method::FilterReset, serde_json::json!({})),
+        [command, flag] if command == "logs" && flag == "--follow" => return follow(),
         _ => return Err("Commands: status --json; forwarding on|off; filter-set --json FILE; filter-reset; logs --follow; install-service; uninstall-service; service; session-helper".into()),
     };
-    let mut file = connect()
-        .map_err(|error| io::Error::new(error.kind(), format!("Connect to service: {error}")))?;
-    reply(&mut file, &request)
-        .map_err(|error| io::Error::new(error.kind(), format!("Write service request: {error}")))?;
-    let mut reader = BufReader::new(file);
-    let following = request["type"] == "local.subscribe";
+    let (mut client, mut file) = rpc_connect()?;
+    let value = rpc_call(&mut client, &mut file, method, params)?;
+    let value = if method == Method::StatusGet {
+        value
+    } else {
+        serde_json::json!({"ok":true,"status":value})
+    };
+    serde_json::to_writer(io::stdout().lock(), &value)?;
+    println!();
+    Ok(())
+}
+
+fn rpc_connect() -> io::Result<(venera_debug_protocol::client::Client, ClientPipe)> {
+    let mut file = connect_pipe()?;
+    let client = rpc_negotiate(&mut file)?;
+    Ok((client, file))
+}
+
+fn rpc_negotiate(file: &mut ClientPipe) -> io::Result<venera_debug_protocol::client::Client> {
+    let mut client = venera_debug_protocol::client::Client::default();
+    client.connect();
+    file.deadline = Some(Instant::now() + RPC_TIMEOUT);
+    while client
+        .require(venera_debug_protocol::v1::Method::Discover)
+        .is_err()
+    {
+        while client.has_output() {
+            client.write(file)?;
+        }
+        for reply in client.read(file)? {
+            reply
+                .result
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.message))?;
+        }
+        if let Some(error) = &client.negotiation().failure {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                error.message.clone(),
+            ));
+        }
+    }
+    Ok(client)
+}
+
+fn rpc_call(
+    client: &mut venera_debug_protocol::client::Client,
+    file: &mut ClientPipe,
+    method: venera_debug_protocol::v1::Method,
+    params: serde_json::Value,
+) -> io::Result<serde_json::Value> {
+    file.deadline = Some(Instant::now() + RPC_TIMEOUT);
+    let id = client
+        .request(method, params)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.message))?;
     loop {
-        let bytes = line(&mut reader).map_err(|error| {
-            io::Error::new(error.kind(), format!("Read service response: {error}"))
-        })?;
-        let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if value["ok"] == false && request["type"] == "status.get" {
-            serde_json::to_writer(io::stdout().lock(), &value)?;
-            println!();
-            return Err("Service request failed".into());
+        while client.has_output() {
+            client.write(file)?;
         }
-        if request["type"] == "status.get" {
-            value = value["status"].clone();
-        }
-        serde_json::to_writer(io::stdout().lock(), &value)?;
-        println!();
-        if !following {
-            if value["ok"] == false {
-                return Err("Service request failed".into());
+        for reply in client.read(file)? {
+            if reply.id == id {
+                return reply.result.map_err(|error| {
+                    io::Error::new(
+                        if error.code == -32005 {
+                            io::ErrorKind::WouldBlock
+                        } else {
+                            io::ErrorKind::Other
+                        },
+                        error.message,
+                    )
+                });
             }
-            return Ok(());
+        }
+    }
+}
+
+fn follow() -> Result<(), Box<dyn std::error::Error>> {
+    use venera_debug_protocol::{
+        client::{HistoryConsumer, Start},
+        v1::*,
+    };
+    let mut consumer = HistoryConsumer::new(Start::Now);
+    let mut connection = None;
+    loop {
+        let page = (|| -> io::Result<(HistoryPage, venera_debug_protocol::Filter)> {
+            if connection.is_none() {
+                connection = Some(rpc_connect()?);
+            }
+            let (client, file) = connection.as_mut().unwrap();
+            let status: Status = serde_json::from_value(rpc_call(
+                client,
+                file,
+                Method::StatusGet,
+                serde_json::json!({}),
+            )?)?;
+            let range = serde_json::from_value(rpc_call(
+                client,
+                file,
+                Method::HistoryRange,
+                serde_json::json!({}),
+            )?)?;
+            consumer
+                .range(range, None)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.message))?;
+            let page: HistoryPage = serde_json::from_value(rpc_call(
+                client,
+                file,
+                Method::HistoryRead,
+                serde_json::to_value(consumer.read_request())?,
+            )?)?;
+            consumer
+                .page(&page)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.message))?;
+            Ok((
+                page,
+                crate::state::wire::filter_legacy(status.effective_filter),
+            ))
+        })();
+        let (page, filter) = match page {
+            Ok(page) => page,
+            Err(error) => {
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    connection = None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            }
+        };
+        let mut output = io::stdout().lock();
+        consumer.display(&page, &filter, &mut output)?;
+        if consumer.caught_up() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
 }
@@ -739,33 +984,172 @@ mod tests {
     const RESPONSE: &[u8] = b"{\"ok\":true,\"status\":{\"forwarding_enabled\":true}}\n";
 
     #[test]
+    fn pipe_completion_reports_bytes_or_pending_cancellation() {
+        for complete_first in [true, false] {
+            for timeout in [true, false] {
+                let (mut server, mut pipe) = helper_pair();
+                let mut bytes = [0u8; 8];
+                unsafe {
+                    let event = Handle(CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()));
+                    assert!(!event.0.is_null(), "{}", error());
+                    let mut op: OVERLAPPED = std::mem::zeroed();
+                    op.hEvent = event.0;
+                    let submitted = ReadFile(
+                        pipe.handle.0,
+                        bytes.as_mut_ptr(),
+                        8,
+                        std::ptr::null_mut(),
+                        &raw mut op,
+                    );
+                    let status = GetLastError();
+                    assert_eq!(submitted, 0);
+                    assert_eq!(status, ERROR_IO_PENDING);
+
+                    // Keep all fallible assertions until the borrowed buffer is reaped.
+                    let wait = if complete_first {
+                        server
+                            .write_all(b"abc")
+                            .map(|()| WaitForSingleObject(event.0, 2000))
+                    } else {
+                        Ok(WaitForSingleObject(event.0, 0))
+                    };
+                    let reason = if timeout {
+                        pipe.deadline = Some(Instant::now());
+                        io::ErrorKind::TimedOut
+                    } else {
+                        pipe.stop.store(true, Ordering::Release);
+                        io::ErrorKind::ConnectionAborted
+                    };
+                    let result = pipe.complete(&raw mut op, event.0).map_err(|e| e.kind());
+                    if complete_first {
+                        assert_eq!(wait.unwrap(), WAIT_OBJECT_0);
+                        assert_eq!(result, Ok(3));
+                        assert_eq!(&bytes[..3], b"abc");
+                    } else {
+                        assert_eq!(wait.unwrap(), WAIT_TIMEOUT);
+                        assert_eq!(result, Err(reason));
+                    }
+                    assert_eq!(pipe.read(&mut bytes).unwrap_err().kind(), reason);
+                    assert_eq!(pipe.write(b"next").unwrap_err().kind(), reason);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn helper_reconnects_after_partial_ack() {
+        let (mut stalled, mut first) = helper_pair();
+        let (mut service, mut second) = helper_pair();
+        stalled.write_all(b"{\"ok\":true}").unwrap();
+        service.write_all(b"{\"ok\":true}\n").unwrap();
+        let (done, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let failure =
+                capture_handshake(&mut first, Instant::now() + Duration::from_millis(250))
+                    .err()
+                    .unwrap();
+            assert_eq!(failure.kind(), io::ErrorKind::TimedOut);
+            capture_handshake(&mut second, Instant::now() + RPC_TIMEOUT).unwrap();
+            done.send(()).unwrap();
+        });
+        result.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            line(&mut BufReader::new(service)).unwrap(),
+            b"{\"type\":\"local.capture\"}\n"
+        );
+        worker.join().unwrap();
+    }
+
+    fn helper_output() -> (mpsc::Sender<Capture>, HelperOutput) {
+        let (tx, captures) = mpsc::channel();
+        (
+            tx,
+            HelperOutput {
+                captures,
+                pending: None,
+                status: Arc::new(Mutex::new(serde_json::json!("collecting"))),
+                dropped: Arc::default(),
+            },
+        )
+    }
+
+    #[test]
+    fn helper_reconnect_delivers_captures_in_order() {
+        for (finished, capacity, expected, drops) in [
+            (true, 0, vec!["first", "second"], 0),
+            (false, 0, vec!["first", "second"], 0),
+            (false, 4, vec!["second"], 1),
+        ] {
+            let (tx, mut output) = helper_output();
+            for text in ["first", "second"] {
+                tx.send(serde_json::from_value(serde_json::json!({"text":text,"source":"dbwin","observed_at":"now","observed_filetime":0})).unwrap()).unwrap();
+            }
+            drop(tx);
+            let mut prefix = [0u8; 4];
+            let mut old = &mut prefix[..capacity];
+            let outcome = output.send_frames(&mut old, mpsc::channel().1, || finished);
+            assert_eq!(outcome.is_ok(), finished);
+            let (service, mut helper) = helper_pair();
+            output
+                .send_frames(&mut helper, mpsc::channel().1, || false)
+                .unwrap();
+            helper.write_all(b"\n").unwrap();
+            let frames: Vec<HelperFrame> = BufReader::new(service)
+                .lines()
+                .map(Result::unwrap)
+                .take_while(|s| !s.is_empty())
+                .map(|s| serde_json::from_str(&s).unwrap())
+                .collect();
+            assert_eq!(
+                frames
+                    .iter()
+                    .map(|f| f.capture.as_ref().unwrap().text.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(frames[0].dropped, drops);
+        }
+    }
+
+    #[test]
     fn helper_duplex_delivers_health_before_report_command() {
         let (mut service, mut helper) = helper_pair();
         let pending_read = Arc::new(AtomicBool::new(false));
-        let mut helper_reader = BufReader::new(helper.clone());
         let stop = helper.stop.clone();
         let (observed, received) = mpsc::channel();
-        let server = std::thread::spawn(move || -> io::Result<()> {
-            let mut reader = BufReader::new(service.try_clone()?);
-            assert_eq!(line(&mut reader)?, b"{\"type\":\"local.capture\"}\n");
-            service.write_all(b"{\"ok\":true}\n")?;
+        let server = std::thread::spawn(move || {
+            let mut reader = BufReader::new(service.try_clone().expect("service reader"));
             assert_eq!(
-                line(&mut reader)?,
+                line(&mut reader).expect("capture handshake"),
+                b"{\"type\":\"local.capture\"}\n"
+            );
+            service
+                .write_all(b"{\"ok\":true}\n")
+                .expect("service acknowledgement");
+            assert_eq!(
+                line(&mut reader).expect("service health frame"),
                 b"{\"capture\":null,\"health\":\"collecting\",\"dropped\":0}\n"
             );
             observed.send("health").unwrap();
             service
-                .write_all(b"{\"type\":\"local.system.info.get\",\"request_id\":\"duplex-2\"}\n")?;
-            let result: serde_json::Value = serde_json::from_slice(&line(&mut reader)?)?;
+                .write_all(b"{\"type\":\"local.system.info.get\",\"request_id\":\"duplex-2\"}\n")
+                .expect("service command write");
+            let result = loop {
+                let bytes = line(&mut reader).expect("service report frame");
+                let frame: serde_json::Value =
+                    serde_json::from_slice(&bytes).expect("service report JSON");
+                if !frame["system_info"].is_null() {
+                    break frame;
+                }
+            };
             assert_eq!(
                 result,
                 serde_json::json!({"capture":null,"health":"collecting","dropped":0,"system_info":{"request_id":"duplex-2","ok":true,"collected_at":"2026-11-11T00:00:00Z","session_id":2,"sections":[{"title":"Graphics","rows":[{"key":"Adapter","value":"Venera","bad":false,"warning":""}]}]}})
             );
             observed.send("result").unwrap();
-            Ok(())
         });
-        helper.write_all(b"{\"type\":\"local.capture\"}\n").unwrap();
-        assert_eq!(line(&mut helper_reader).unwrap(), b"{\"ok\":true}\n");
+        let mut helper_reader =
+            capture_handshake(&mut helper, Instant::now() + Duration::from_millis(750)).unwrap();
         helper_reader.get_mut().io_pending = Some(pending_read.clone());
         let (reports, report_rx) = mpsc::sync_channel(1);
         let reader_stop = stop.clone();
@@ -794,25 +1178,18 @@ mod tests {
         };
         let connection = helper.clone();
         let (written, completion) = mpsc::channel();
-        let writer = std::thread::spawn(move || -> io::Result<()> {
-            helper.write_all(b"{\"capture\":null,\"health\":\"collecting\",\"dropped\":0}\n")?;
-            let result = report_rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .map_err(|_| io::ErrorKind::TimedOut)?;
-            let frame = HelperFrame {
-                capture: None,
-                health: serde_json::json!("collecting"),
-                dropped: 0,
-                system_info: Some(result),
-            };
-            serde_json::to_writer(&mut helper, &frame)?;
-            helper.write_all(b"\n")?;
+        let (captures, mut output) = helper_output();
+        let writer_stop = stop.clone();
+        let writer = std::thread::spawn(move || {
+            let _ = output.send_frames(&mut helper, report_rx, || {
+                writer_stop.load(Ordering::Acquire)
+            });
             written.send(()).unwrap();
-            Ok(())
         });
         let health = received.recv_timeout(std::time::Duration::from_secs(2));
-        let completed = completion.recv_timeout(std::time::Duration::from_secs(3));
         let result = received.recv_timeout(std::time::Duration::from_secs(3));
+        drop(captures);
+        let completed = completion.recv_timeout(std::time::Duration::from_secs(3));
         stop.store(true, Ordering::Release);
         for _ in 0..100 {
             if server.is_finished() && writer.is_finished() && commands.is_finished() {
@@ -835,14 +1212,18 @@ mod tests {
             Ok("health"),
             "health must reach the service while command read is pending"
         );
-        assert_eq!(completed, Ok(()), "helper report must reach the service");
+        assert_eq!(
+            completed,
+            Ok(()),
+            "helper report must reach the service; service observation: {result:?}"
+        );
         assert_eq!(result, Ok("result"));
         assert!(
             server.is_finished() && writer.is_finished() && commands.is_finished(),
             "pipe workers must finish after cancellation"
         );
-        writer.join().unwrap().unwrap();
-        server.join().unwrap().unwrap();
+        writer.join().unwrap();
+        server.join().unwrap();
         commands.join().unwrap();
         drop(connection);
     }
@@ -948,12 +1329,33 @@ mod tests {
         pipe_pair_flags(0)
     }
 
-    fn helper_pair() -> (File, HelperPipe) {
+    #[test]
+    fn rpc_backpressure_expires_pending_write() {
+        let (_server, mut pipe) = helper_pair();
+        let pending = Arc::new(AtomicBool::new(false));
+        pipe.io_pending = Some(pending.clone());
+        let (done, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let payload = vec![b'x'; 1024 * 1024];
+            pipe.deadline = Some(Instant::now() + Duration::from_millis(250));
+            done.send(pipe.write_all(&payload).map_err(|err| err.kind()))
+                .unwrap();
+        });
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(2)),
+            Ok(Err(io::ErrorKind::TimedOut))
+        );
+        assert!(pending.load(Ordering::Acquire));
+        worker.join().unwrap();
+    }
+
+    fn helper_pair() -> (File, ClientPipe) {
         let (server, client) = pipe_pair_flags(FILE_FLAG_OVERLAPPED);
         (
             server,
-            HelperPipe {
+            ClientPipe {
                 handle: Arc::new(Handle(client.into_raw_handle())),
+                deadline: None,
                 stop: Arc::new(AtomicBool::new(false)),
                 io_pending: None,
             },
@@ -1043,38 +1445,37 @@ mod tests {
     }
 
     #[test]
-    fn local_log_subscription_projects_ordinary_program_capture() {
-        let (server, mut pipe_client) = pipe_pair();
-        let state = Arc::new(Mutex::new(State::new("pipe-test".into(), true)));
+    fn local_history_reads_ordinary_program_capture() {
+        let (server, mut pipe_client) = helper_pair();
+        let state = Arc::new(Mutex::new(State::new("pipe-test".into(), false)));
         state.lock().unwrap().status.effective_filter.components = vec!["venus".into()];
+        let root = std::env::temp_dir().join(format!(
+            "venera-pipe-history-{}-{}",
+            unsafe { GetCurrentProcessId() },
+            NEXT_PIPE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let journal = crate::journal::Journal::open(
+            &root,
+            "pipe-journal",
+            crate::journal::RetentionPolicy::default(),
+        )
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (history, worker) = crate::history::History::start(journal, stop.clone()).unwrap();
+        state.lock().unwrap().history = Some(history);
+        state.lock().unwrap().boot_id = "boot".into();
         let mut owner = PipeWorkers::new();
         let local_stop = owner.local_stop.clone();
         let shared = state.clone();
         owner.threads.push(std::thread::spawn(move || {
             let mut finite = false;
-            client(server, shared, &mut finite, &local_stop).unwrap();
+            let _ = client(server, shared, &mut finite, &local_stop);
         }));
-        pipe_client
-            .write_all(b"{\"type\":\"local.subscribe\"}\n")
-            .unwrap();
-        let (observed, received) = mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            let mut reader = BufReader::new(pipe_client);
-            for _ in 0..2 {
-                let value: serde_json::Value =
-                    serde_json::from_slice(&line(&mut reader).unwrap()).unwrap();
-                observed.send(value).unwrap();
-            }
-        });
-        assert_eq!(
-            received
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap()["type"],
-            "status"
-        );
+        let mut rpc = rpc_negotiate(&mut pipe_client).unwrap();
         accept(
             &state,
             Capture {
+                structured: None,
                 pid: Some(42),
                 tid: None,
                 session_id: Some(2),
@@ -1088,22 +1489,39 @@ mod tests {
                     pid: 42,
                     start_time_filetime: Some("100".into()),
                     exe_path: Some("C:\\Tools\\ordinary.exe".into()),
+                    ..Default::default()
                 }),
                 component: None,
             },
         );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let page = loop {
+            let page = rpc_call(
+                &mut rpc,
+                &mut pipe_client,
+                venera_debug_protocol::v1::Method::HistoryRead,
+                serde_json::json!({"after":null,"through":null,"limit":256}),
+            )
+            .unwrap();
+            if page["records"].as_array().unwrap().len() == 1 {
+                break page;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         assert_eq!(
-            received
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap(),
-            serde_json::json!({"major":1,"type":"log","stream_id":"pipe-test","seq":1,
+            page["records"][0]["event"]["record"],
+            serde_json::json!({"stream_id":"pipe-test","seq":"1",
                 "observed_at":"2026-11-12T00:00:00Z","source_time":null,"source":"dbwin",
                 "component":"","level":"unknown","raw_level":"unknown","session_id":2,
                 "process":{"pid":42,"start_time_filetime":"100","exe_path":"C:\\Tools\\ordinary.exe"},
                 "tid":null,"text":"ordinary program: hello 中文"})
         );
-        reader.join().unwrap();
+        drop(pipe_client);
         drop(owner);
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn drop_listener_owner(subscribe: bool) {
@@ -1127,7 +1545,7 @@ mod tests {
             .unwrap();
         if subscribe {
             pipe_client
-                .write_all(b"{\"type\":\"local.subscribe\"}\n")
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"first\",\"method\":\"endpoint.info\",\"params\":{}}\n")
                 .unwrap();
             let (observed, response) = mpsc::channel();
             std::thread::spawn(move || {
@@ -1139,8 +1557,8 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
             assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["type"],
-                "status"
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["method"],
+                "endpoint.info"
             );
             pipe_client = reader.into_inner();
         } else {
@@ -1174,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn listener_owner_drop_joins_idle_log_subscription() {
+    fn listener_owner_drop_joins_idle_rpc_connection() {
         drop_listener_owner(true);
     }
 }

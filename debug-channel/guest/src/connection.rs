@@ -16,6 +16,7 @@ pub struct Connection {
     batches: BTreeMap<u64, RpcBatch>,
     reports: BTreeMap<String, (u64, Option<Correlation>)>,
     wrong_role: bool,
+    local_admin: Option<bool>,
 }
 
 #[derive(Default)]
@@ -29,6 +30,13 @@ pub fn line(value: &Value) -> Result<Vec<u8>, serde_json::Error> {
     let mut bytes = serde_json::to_vec(value)?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+pub fn history_response(value: &Value) -> bool {
+    value["result"].get("records").is_some()
+        || value
+            .as_array()
+            .is_some_and(|items| items.iter().any(history_response))
 }
 
 fn discovery() -> RpcResult<Discovery> {
@@ -51,6 +59,12 @@ impl Connection {
         Self {
             peer_id,
             ..Self::default()
+        }
+    }
+    pub fn local(peer_id: u64, admin: bool) -> Self {
+        Self {
+            local_admin: Some(admin),
+            ..Self::new(peer_id)
         }
     }
     fn id(&mut self) -> u64 {
@@ -112,7 +126,17 @@ impl Connection {
     pub fn receive(
         &mut self,
         bytes: &[u8],
+        control: impl FnMut(Message) -> Option<Envelope>,
+    ) -> Received {
+        self.receive_with(bytes, control, |_, _| {
+            Err(RpcError::new(-32601, "Method not found"))
+        })
+    }
+    pub fn receive_with(
+        &mut self,
+        bytes: &[u8],
         mut control: impl FnMut(Message) -> Option<Envelope>,
+        mut history: impl FnMut(Incoming, bool) -> RpcResult<Value>,
     ) -> Received {
         let mut received = Received::default();
         for frame in self.framer.push(bytes) {
@@ -129,6 +153,14 @@ impl Connection {
                 }
             };
             let RpcPacket { items, mut batch } = RpcPacket::decode(frame.bytes(), Receiver::Guest);
+            if !batch.fits_response_budget(MAX_FRAME_BYTES) {
+                received.output.push(json!(RpcResponse::Error {
+                    jsonrpc: Version::V2,
+                    id: RpcId::Null,
+                    error: RpcError::new(-32600, "Request correlation exceeds frame budget"),
+                }));
+                continue;
+            }
             let batch_id = self.id();
             let mut pending = false;
             for item in items {
@@ -153,9 +185,33 @@ impl Connection {
                         serde_json::to_value(doc).map_err(|e| RpcError::new(-32603, e.to_string()))
                     }),
                     incoming => {
-                        let allowed = self.ready();
+                        let permitted = match (&incoming, self.local_admin) {
+                            (Incoming::ForwardingSet { .. }, None | Some(false)) => false,
+                            (
+                                Incoming::FilterSet { .. }
+                                | Incoming::FilterReset { .. }
+                                | Incoming::SystemInfoGet { .. },
+                                Some(false),
+                            ) => false,
+                            _ => true,
+                        };
+                        let allowed = self.ready().and_then(|_| {
+                            if permitted {
+                                Ok(())
+                            } else {
+                                Err(RpcError::new(-32006, "Administrator approval is required"))
+                            }
+                        });
                         if let Err(error) = allowed {
                             Err(error)
+                        } else if matches!(
+                            incoming,
+                            Incoming::HistoryRange { .. }
+                                | Incoming::HistoryRead { .. }
+                                | Incoming::HistoryAck { .. }
+                                | Incoming::ForwardingSet { .. }
+                        ) {
+                            history(incoming, self.local_admin.is_some())
                         } else if self.reports.len() >= CAPACITY {
                             Err(RpcError::new(
                                 -32000,
@@ -180,12 +236,13 @@ impl Connection {
                                 Incoming::SystemInfoGet { .. } => {
                                     if !pending && self.batches.len() >= CAPACITY {
                                         if let Some(slot) = correlation {
-                                            let _ = batch.complete(
+                                            let _ = batch.complete_bounded(
                                                 slot,
                                                 Err(RpcError::new(
                                                     -32000,
                                                     "Control queue is busy; retry the request",
                                                 )),
+                                                MAX_FRAME_BYTES,
                                             );
                                         }
                                         continue;
@@ -205,7 +262,7 @@ impl Connection {
                     }
                 };
                 if let Some(slot) = correlation {
-                    let _ = batch.complete(slot, value);
+                    let _ = batch.complete_bounded(slot, value, MAX_FRAME_BYTES);
                 }
             }
             if pending {
@@ -224,7 +281,7 @@ impl Connection {
         let (batch_id, correlation) = self.reports.remove(&report.request_id)?;
         let batch = self.batches.get_mut(&batch_id)?;
         if let Some(slot) = correlation {
-            let _ = batch.complete(slot, result(envelope));
+            let _ = batch.complete_bounded(slot, result(envelope), MAX_FRAME_BYTES);
         }
         if !self.reports.values().any(|(id, _)| *id == batch_id) {
             let value = batch.take_response();
@@ -273,6 +330,167 @@ mod tests {
                 error: None,
             },
         })
+    }
+
+    #[test]
+    fn history_batches_and_async_reports_fit_the_receiving_framer() {
+        for asynchronous in [false, true] {
+            let mut connection = Connection::new(1);
+            let mut state = State::new("run".into(), true);
+            negotiate(&mut connection, &mut state, "1.0.0");
+            let read = |id| json!({"jsonrpc":"2.0","id":id,"method":"history.read","params":{"after":null,"through":null,"limit":256}});
+            let second = if asynchronous {
+                json!({"jsonrpc":"2.0","id":"second","method":"system.info.get","params":{}})
+            } else {
+                read("second")
+            };
+            let received = connection.receive_with(
+                &line(&json!([read("first"), second])).unwrap(),
+                |_| None,
+                |_, _| Ok(json!({"records":[{"text":"x".repeat(600 * 1024)}]})),
+            );
+            let response = if asynchronous {
+                assert_eq!(received.reports.len(), 1);
+                assert_eq!(received.output, Vec::<Value>::new());
+                let mut envelope = report(received.reports[0].clone());
+                let Message::SystemInfoResult { result } = &mut envelope.body else {
+                    panic!("report")
+                };
+                result
+                    .sections
+                    .push(venera_debug_protocol::SystemInfoSection {
+                        title: "y".repeat(600 * 1024),
+                        title_message: None,
+                        rows: Vec::new(),
+                    });
+                connection.report(&envelope).unwrap()
+            } else {
+                received.output[0].clone()
+            };
+            let wire = line(&response).unwrap();
+            let frames = JsonlFramer::default().push(&wire);
+            assert_eq!(frames.len(), 1);
+            let decoded: Value =
+                serde_json::from_slice(frames[0].as_ref().unwrap().bytes()).unwrap();
+            assert_eq!(decoded[0]["id"], "first");
+            assert_eq!(
+                decoded[0]["result"]["records"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .len(),
+                600 * 1024
+            );
+            assert_eq!(
+                decoded[1],
+                json!({"jsonrpc":"2.0","id":"second","error":{"code":-32008,"message":"Request processed; response exceeds frame budget"}})
+            );
+        }
+    }
+
+    #[test]
+    fn local_history_continues_while_remote_history_waits_for_forwarding() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "venera-forwarding-authority-{}",
+            std::process::id()
+        ));
+        let journal = crate::journal::Journal::open(
+            &root,
+            "authority",
+            crate::journal::RetentionPolicy::default(),
+        )
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (history, worker) = crate::history::History::start(journal, stop.clone()).unwrap();
+        history.append(crate::journal::JournalInput {
+            boot_id: "boot".into(), recorded_at_ms: 1, startup: true,
+            event: serde_json::from_value(json!({"type":"log","record":{"stream_id":"s","seq":"1","observed_at":"original","source":"dbwin","component":"app","level":"info","raw_level":"info","text":"captured while paused"}})).unwrap(),
+        }).unwrap();
+        while history.range().unwrap().high_water.0 == 0 {
+            std::thread::yield_now();
+        }
+        let request = line(&json!({"jsonrpc":"2.0","id":"read","local":true,"method":"history.read","params":{"after":null,"through":null,"limit":256}})).unwrap();
+        for (mut connection, local) in [
+            (Connection::new(1), false),
+            (Connection::local(2, false), true),
+            (Connection::local(3, true), true),
+        ] {
+            let mut state = State::new("run".into(), false);
+            negotiate(&mut connection, &mut state, "1.0.0");
+            let reply = connection.receive_with(
+                &request,
+                |_| None,
+                |incoming, authenticated_local| history.rpc(incoming, authenticated_local),
+            );
+            if local {
+                assert_eq!(
+                    reply.output[0]["result"]["records"][0]["event"]["record"]["text"],
+                    "captured while paused"
+                );
+                assert_eq!(reply.output[0]["result"]["next"]["position"], "1");
+            } else {
+                assert_eq!(
+                    reply.output[0]["error"],
+                    json!({"code":-32005,"message":"Log forwarding is paused"})
+                );
+            }
+            let resumed = connection.receive_with(
+                &request,
+                |_| None,
+                |incoming, _| history.rpc(incoming, true),
+            );
+            assert_eq!(
+                resumed.output[0]["result"]["records"][0]["event"]["record"]["text"],
+                "captured while paused"
+            );
+        }
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transport_peers_share_history_methods_and_local_authority_controls_forwarding() {
+        for (mut connection, allowed) in [
+            (Connection::new(1), false),
+            (Connection::local(2, false), false),
+            (Connection::local(3, true), true),
+        ] {
+            let mut state = State::new("run".into(), true);
+            negotiate(&mut connection, &mut state, "1.0.0");
+            let reply = connection.receive_with(
+                &line(&json!({"jsonrpc":"2.0","id":"range","method":"history.range","params":{}}))
+                    .unwrap(),
+                |_| None,
+                |request, _local| match request {
+                    Incoming::HistoryRange { .. } => {
+                        Ok(json!({"journal_id":"j","oldest":"1","high_water":"12"}))
+                    }
+                    _ => panic!("history method"),
+                },
+            );
+            assert_eq!(
+                reply.output,
+                vec![
+                    json!({"jsonrpc":"2.0","id":"range","result":{"journal_id":"j","oldest":"1","high_water":"12"}})
+                ]
+            );
+            let reply = connection.receive_with(&line(&json!({"jsonrpc":"2.0","id":"set","method":"forwarding.set","params":{"enabled":false}})).unwrap(), |_| None, |request, _local| match request {
+                Incoming::ForwardingSet { params, .. } => Ok(json!({"forwarding_enabled":params.enabled})),
+                _ => panic!("forwarding method"),
+            });
+            assert_eq!(
+                reply.output,
+                vec![if allowed {
+                    json!({"jsonrpc":"2.0","id":"set","result":{"forwarding_enabled":false}})
+                } else {
+                    json!({"jsonrpc":"2.0","id":"set","error":{"code":-32006,"message":"Administrator approval is required"}})
+                }]
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod clock;
+mod capture;
 mod dbwin;
 mod etw;
 mod ipc;
@@ -67,6 +68,7 @@ pub fn timestamp_after(ms: u64) -> String {
     }
 }
 pub fn accept(state: &Shared, capture: Capture) {
+    let shared = state.clone();
     let mut state = state.lock().unwrap();
     let cached = capture
         .pid
@@ -76,39 +78,24 @@ pub fn accept(state: &Shared, capture: Capture) {
         capture.process = crate::collector::merge_identity(capture.process.take(), Some(identity));
         capture.session_id = session.or(capture.session_id);
     }
-    let tracked = capture
-        .process
-        .as_ref()
-        .is_some_and(|identity| state.processes.contains(identity));
-    if crate::collector::needs_identity(&state.status.effective_filter, &capture, tracked) {
-        if state.pending_captures.len() < 256 && capture.text.len() <= 4092 {
-            state
-                .pending_captures
-                .push_back((std::time::Instant::now(), capture));
-        } else {
-            state.status.loss["process_capture_queue_dropped"] = serde_json::json!(
-                state.status.loss["process_capture_queue_dropped"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    + 1
-            );
-        }
-        return;
-    }
     let (capture, lost) = state.assembler.ingest(capture);
-    if lost != 0 {
-        let stream_id = state.stream_id.clone();
-        state.queue_control(&Envelope::new(Message::Gap {
-            stream_id,
+    let gap = (lost != 0).then(|| venera_debug_protocol::v1::HistoryEvent::Gap {
+        gap: venera_debug_protocol::v1::Gap {
+            stream_id: state.stream_id.clone(),
             reason: "native_capture_incomplete".into(),
-            count: Some(lost),
+            count: Some(venera_debug_protocol::v1::DecimalU64(lost)),
             first_seq: None,
             last_seq: None,
-        }));
-    }
+        },
+    });
     let Some(capture) = capture else {
+        drop(state);
+        if let Some(gap) = gap {
+            retain_event(&shared, gap);
+        }
         return;
     };
+    drop(state);
     let identity = capture
         .process
         .clone()
@@ -135,6 +122,7 @@ pub fn accept(state: &Shared, capture: Capture) {
             tid: None,
         })
     });
+    let mut state = shared.lock().unwrap();
     state.expire();
     let observed = capture
         .pid
@@ -146,14 +134,60 @@ pub fn accept(state: &Shared, capture: Capture) {
     let session_id = observed
         .and_then(|(_, session)| session)
         .or(capture.session_id);
-    let ancestors = identity
-        .as_ref()
-        .map(|p| state.processes.ancestors(p, state.filter_started_filetime))
-        .unwrap_or_default();
     let mut capture = capture;
     capture.process = identity;
     capture.session_id = session_id;
-    state.publish_capture(capture, class, &ancestors);
+    let startup = state
+        .boot_id
+        .parse::<u64>()
+        .ok()
+        .map(|boot| {
+            let source = capture.structured.as_ref()
+                .map_or(capture.observed_filetime, |event| event.source_time_filetime.0);
+            source >= boot && source - boot < 120 * 10_000_000
+        });
+    let record = state.capture_record(capture, class);
+    drop(state);
+    if let Some(gap) = gap {
+        retain_event(&shared, gap);
+    }
+    if let Some(record) = record {
+        retain_event_at(
+            &shared,
+            venera_debug_protocol::v1::HistoryEvent::Log { record },
+            startup,
+        );
+    }
+}
+
+pub fn retain_event(state: &Shared, event: venera_debug_protocol::v1::HistoryEvent) {
+    retain_event_at(state, event, None);
+}
+
+fn retain_event_at(
+    state: &Shared,
+    event: venera_debug_protocol::v1::HistoryEvent,
+    startup: Option<bool>,
+) {
+    let (history, boot_id) = {
+        let state = state.lock().unwrap();
+        (state.history.clone(), state.boot_id.clone())
+    };
+    if let Some(history) = history {
+        let entry = crate::journal::JournalInput {
+            boot_id,
+            recorded_at_ms: clock::filetime().saturating_sub(116444736000000000) / 10000,
+            startup: startup.unwrap_or_else(|| unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() } < 120_000),
+            event,
+        };
+        if let Err(error) = history.append(entry) {
+            transport::health(
+                state,
+                "history",
+                serde_json::json!({"error":error.to_string()}),
+            );
+        }
+    }
 }
 pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
@@ -161,7 +195,32 @@ pub fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         Some("session-helper") => ipc::helper()?,
         Some("install-service") => service::install()?,
         Some("uninstall-service") => service::uninstall()?,
+        Some("trace") => etw::diagnostic(&args[1..])?,
+        Some("prepare-history") => service::prepare_history()?,
         _ => ipc::cli(&args)?,
     }
     Ok(())
+}
+
+pub fn history_request(
+    state: &Shared,
+    request: venera_debug_protocol::v1::Incoming,
+    local: bool,
+) -> venera_debug_protocol::v1::RpcResult<serde_json::Value> {
+    use venera_debug_protocol::v1::{Incoming, RpcError};
+    let failure = |error: io::Error| RpcError::new(-32007, error.to_string());
+    let (history, forwarding) = {
+        let state = state.lock().unwrap();
+        (state.history.clone(), state.status.forwarding_enabled)
+    };
+    let history = history.ok_or_else(|| RpcError::new(-32007, "History is starting"))?;
+    if let Incoming::ForwardingSet { params, .. } = request {
+        let status = history
+            .forwarding(params.enabled, state.clone(), service::persist_forwarding)
+            .map_err(failure)?;
+        return crate::state::wire::status_v1(&status)
+            .and_then(serde_json::to_value)
+            .map_err(|error| RpcError::new(-32603, error.to_string()));
+    }
+    history.rpc(request, local || forwarding)
 }

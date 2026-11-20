@@ -1,0 +1,88 @@
+#![allow(dead_code)]
+use std::{io, path::{Path, PathBuf}, sync::{Arc, Mutex}};
+const ERROR_WMI_INSTANCE_NOT_FOUND: u32 = 4201;
+type Shared = Arc<Mutex<State>>;
+struct State { boot_id: String, stream_id: String, status: Status }
+struct Status { health: serde_json::Value }
+mod venera_debug_protocol { pub mod v1 {
+    pub struct Gap { pub stream_id: String, pub reason: String, pub count: Option<u64>, pub first_seq: Option<u64>, pub last_seq: Option<u64> }
+    pub enum HistoryEvent { Gap { gap: Gap } }
+} }
+mod journal { pub struct JournalInput { pub boot_id: String, pub recorded_at_ms: u64, pub startup: bool, pub event: crate::venera_debug_protocol::v1::HistoryEvent } }
+mod history {
+    pub struct History;
+    impl History {
+        pub fn process_capture(&self, _:u64, _:u64, _:Option<u64>) -> std::io::Result<()> { Ok(()) }
+        pub fn append_durable(&self, _:crate::journal::JournalInput) -> std::io::Result<()> { Ok(()) }
+    }
+}
+mod etw { pub const KERNEL_PROVIDER: u32 = 1; pub const PROCESS_PROVIDER: u32 = 2; }
+static ACTUAL: Mutex<Option<PathBuf>> = Mutex::new(None);
+static IMPORTED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+struct Session { fail_confirmation: bool }
+impl Session {
+    fn running(&self) -> io::Result<bool> { Ok(true) }
+    fn rotate(&mut self, path:&Path) -> io::Result<PathBuf> {
+        let actual = path.with_extension("etl.001");
+        *ACTUAL.lock().unwrap() = Some(actual.clone());
+        if self.fail_confirmation { Err(io::Error::from_raw_os_error(8)) } else { Ok(actual) }
+    }
+    fn attach() -> (Self, PathBuf) {
+        (Self { fail_confirmation: false }, ACTUAL.lock().unwrap().clone().unwrap())
+    }
+    fn restart(self, _: &Path) -> io::Result<Self> { Ok(self) }
+    fn enable(&self, _: &u32, _:u8, _:u64) -> io::Result<()> { Ok(()) }
+}
+struct CaptureSession { session: Session, active: PathBuf, prefix: &'static str }
+fn now_ms() -> u64 { 100 }
+fn captured_through(_: &Path, _:u64) -> io::Result<u64> { Ok(100) }
+fn resume_primary(_: &history::History, _:u64, _: &Path) -> io::Result<()> { Ok(()) }
+fn new_path(path:&Path, prefix:&str) -> io::Result<PathBuf> { Ok(path.join(format!("{prefix}new.etl"))) }
+fn import_sealed(_: &Shared, _: &history::History, _: &Path, sessions:&[CaptureSession]) -> io::Result<()> {
+    let files = [PathBuf::from("/capture/old.etl.001"), ACTUAL.lock().unwrap().clone().unwrap()];
+    for path in files {
+        if !sessions.iter().any(|session| session.active == path) { IMPORTED.lock().unwrap().push(path); }
+    }
+    Ok(())
+}
+
+// PRODUCT_ROTATION_FUNCTION
+
+#[test]
+fn confirmation_failure_recovers_actual_output_before_import() {
+    for prefix in ["kernel-live-", "legacy-live-"] {
+        IMPORTED.lock().unwrap().clear();
+        let state = Arc::new(Mutex::new(State {
+            boot_id: "100".into(), stream_id: "test".into(), status: Status { health: serde_json::json!({}) },
+        }));
+        let mut sessions = vec![CaptureSession { session: Session { fail_confirmation: true },
+            active: PathBuf::from("/capture/old.etl.001"), prefix }];
+        let error = rotate_sessions(&state, &history::History, Path::new("/capture"), &mut sessions).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(8));
+        assert_eq!(*IMPORTED.lock().unwrap(), Vec::<PathBuf>::new(), "{prefix}");
+        if prefix == "legacy-live-" {
+            assert!(state.lock().unwrap().status.health["legacy_capture"]["error"].as_str().unwrap().contains("os error 8"));
+        }
+        let (session, active) = Session::attach();
+        assert_eq!(active, PathBuf::from(format!("/capture/{prefix}new.etl.001")));
+        let recovered = vec![CaptureSession { session, active, prefix }];
+        import_sealed(&state, &history::History, Path::new("/capture"), &recovered).unwrap();
+        assert_eq!(*IMPORTED.lock().unwrap(), [PathBuf::from("/capture/old.etl.001")]);
+        println!("{prefix}: confirmation failure returned error 8; reattach preserved numbered active and imported old sealed file");
+    }
+}
+
+#[test]
+fn confirmed_rotation_imports_the_previous_file() {
+    for prefix in ["kernel-live-", "legacy-live-"] {
+        IMPORTED.lock().unwrap().clear();
+        let state = Arc::new(Mutex::new(State {
+            boot_id: "100".into(), stream_id: "test".into(), status: Status { health: serde_json::json!({}) },
+        }));
+        let mut sessions = vec![CaptureSession { session: Session { fail_confirmation: false },
+            active: PathBuf::from("/capture/old.etl.001"), prefix }];
+        rotate_sessions(&state, &history::History, Path::new("/capture"), &mut sessions).unwrap();
+        assert_eq!(sessions[0].active, PathBuf::from(format!("/capture/{prefix}new.etl.001")));
+        assert_eq!(*IMPORTED.lock().unwrap(), [PathBuf::from("/capture/old.etl.001")]);
+    }
+}
