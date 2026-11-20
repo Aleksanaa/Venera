@@ -114,9 +114,9 @@ int main(int argc, char** argv)
         process_time_ok = std::strcmp(argv[1], "process-time") != 0;
         log_init("venera_d3d11");
         logf(LogLevel::error, "fallback %d", 7);
-        check(ods == std::vector<std::string>{"12:34:56.789 venera_d3d11[123:456] E fallback 7\n"},
-              "initialization fallback content");
-        check(files == ods && events.empty(), "fallback file and ETW results");
+        check(files == std::vector<std::string>{"12:34:56.789 venera_d3d11[123:456] E fallback 7\n"},
+              "file content on initialization failure");
+        check(ods.empty() && events.empty(), "initialization failure output");
         return 0;
     }
     check(argc == 3, "component and ID required");
@@ -153,10 +153,10 @@ int main(int argc, char** argv)
     enabled = false;
     logf(LogLevel::warn, "fallback %d", 7);
     const std::string expected = std::string("12:34:56.789 ") + component + "[123:456] W fallback 7\n";
-    check(ods == std::vector<std::string>{expected} && files.back() == expected, "disabled capture ODS and file");
+    check(ods.empty() && files.size() == 66 && files.back() == expected, "file with capture disabled");
     enabled = true; write_result = 8;
     logf(LogLevel::warn, "fallback %d", 7);
-    check(ods.size() == 2 && ods.back() == expected && files.back() == expected, "EventWrite error fallback");
+    check(ods.empty() && files.size() == 67 && files.back() == expected, "file after EventWrite error");
     write_result = 0;
     logf(LogLevel::info, "%s", std::string(2000, 'x').c_str());
     const auto& last = events.back();

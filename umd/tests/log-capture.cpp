@@ -136,12 +136,12 @@ int main(int argc, char** argv)
     EventUnregister(registration);
     const bool capture_only = argc == 2 && std::strcmp(argv[1], "capture") == 0;
     if (active && !capture_only) {
-        std::fprintf(stderr, "Run the fallback phase on a test machine with the product capture stopped.\n");
+        std::fprintf(stderr, "Run the file-only phase on a test machine with the product capture stopped.\n");
         return 2;
     }
     if (!capture_only) {
         auto fallback = run_child();
-        check(fallback.debug_lines == 64, "fallback ODS count mismatch");
+        check(fallback.debug_lines == 0, "fallback ODS count mismatch");
     }
 
     struct Properties { EVENT_TRACE_PROPERTIES p; char name[96]; char file[MAX_PATH]; } properties{};

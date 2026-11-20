@@ -162,8 +162,7 @@ void logf(LogLevel level, const char* fmt, ...)
     std::snprintf(line, sizeof(line), "%02u:%02u:%02u.%03u %s[%lu:%lu] %s %s\n", t.wHour, t.wMinute, t.wSecond,
                   t.wMilliseconds, g_component, GetCurrentProcessId(), GetCurrentThreadId(),
                   names[static_cast<int>(level)], body);
-    if (!emit(level, filetime_value(timestamp), body))
-        OutputDebugStringA(line);
+    emit(level, filetime_value(timestamp), body);
     if (g_file != INVALID_HANDLE_VALUE) {
         DWORD written;
         WriteFile(g_file, line, static_cast<DWORD>(std::strlen(line)), &written, nullptr);
