@@ -101,7 +101,7 @@ impl Store {
                 |r| r.get::<_, u64>(0),
             )? > pages
             {
-                if tx.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT MAX(1,(SELECT COUNT(*)/10 FROM events)))", [])? == 0 {
+                if trim_detached_gaps(&tx, 0)? == 0 && tx.execute("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT MAX(1,(SELECT COUNT(*)/10 FROM events)))", [])? == 0 {
                     return Err("storage budget cannot hold the database metadata".into());
                 }
             }
@@ -152,7 +152,7 @@ impl Store {
         let text = serde_json::to_string(message)?;
         let received = now();
         let result = self.with_eviction(|tx, count| {
-            evict(tx, count)?;
+            self.evict(tx, count)?;
             tx.execute(DIAGNOSTIC, params![received, text, raw])?;
             Ok(())
         });
@@ -228,10 +228,14 @@ impl Store {
                     let rows: i64 = self
                         .db
                         .query_row("SELECT count(*) FROM events", [], |r| r.get(0))?;
-                    if count >= rows {
+                    if count == i64::MAX {
                         return Err(HistoryCapacity.into());
                     }
-                    count = (count + (rows / 10).max(1)).min(rows);
+                    count = if count >= rows {
+                        i64::MAX
+                    } else {
+                        (count + (rows / 10).max(1)).min(rows)
+                    };
                 }
                 other => return other,
             }
@@ -354,7 +358,7 @@ impl Store {
                 }
             }
         }
-        evict(tx, evict_count)?;
+        self.evict(tx, evict_count)?;
         for id in replaced {
             tx.execute("DELETE FROM events WHERE id=?1", [id])?;
             tx.execute("DELETE FROM history_missing WHERE id=?1", [id])?;
@@ -413,6 +417,24 @@ impl Store {
             position: DecimalU64(next),
         })
     }
+
+    fn evict(&self, db: &Connection, count: i64) -> Result<()> {
+        if count > 0 {
+            db.execute(
+                "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT ?1)",
+                [count],
+            )?;
+            // Keep recent backfill evidence after its display row expires. At the
+            // final retry, make the entire data budget available to the new page.
+            let keep = if count == i64::MAX {
+                0
+            } else {
+                self.pages.unwrap_or(0) / 8
+            };
+            trim_detached_gaps(db, keep)?;
+        }
+        Ok(())
+    }
 }
 
 fn apply_attribution(
@@ -456,14 +478,13 @@ pub(super) fn compatibility_page(page: HistoryPage) -> AttributionHistoryPage {
     }
 }
 
-fn evict(db: &Connection, count: i64) -> Result<()> {
-    if count > 0 {
-        db.execute(
-            "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY id LIMIT ?1)",
-            [count],
-        )?;
-    }
-    Ok(())
+fn trim_detached_gaps(db: &Connection, keep: u64) -> Result<usize> {
+    Ok(db.execute(
+        "DELETE FROM history_missing WHERE id IN (
+        SELECT g.id FROM history_missing g WHERE NOT EXISTS (SELECT 1 FROM events e WHERE e.id=g.id)
+        ORDER BY g.id DESC LIMIT -1 OFFSET ?1)",
+        [keep],
+    )?)
 }
 
 fn insert_missing(

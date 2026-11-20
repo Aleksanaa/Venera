@@ -588,6 +588,26 @@ fn diagnostic_capacity_failure_preserves_fifty_committed_rows() {
 }
 
 #[test]
+fn bounded_archive_continues_after_repeated_retention_gaps() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive.db");
+    let store = Store::open(&path, 131072).unwrap();
+    for n in 1..=700 {
+        let end = n * 2;
+        store
+            .append_history_page(&page("a", &[end], &[(end - 1, end - 1)], end))
+            .unwrap();
+    }
+    drop(store);
+    let store = Store::open(&path, 131072).unwrap();
+    assert_eq!(store.history_cursor("a").unwrap().unwrap().position.0, 1400);
+    store
+        .append_history_page(&page("a", &[1399], &[], 1399))
+        .unwrap();
+    assert_eq!(projections(&path).last().unwrap()["text"], "captured");
+}
+
+#[test]
 fn backfill_survives_display_eviction_by_another_writer() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("archive.db");
