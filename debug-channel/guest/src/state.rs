@@ -446,6 +446,12 @@ pub(crate) mod wire {
 
 const CONTROL_RECORDS: usize = 64;
 
+#[cfg(windows)]
+pub struct RegisteredHelper {
+    pub identity: venera_debug_protocol::ProcessIdentity,
+    pub delivered: std::sync::Arc<std::sync::Mutex<u64>>,
+}
+
 pub struct State {
     pub status: Status,
     forwarding_generation: u64,
@@ -459,7 +465,7 @@ pub struct State {
     pub dropped: u64,
     pub parse_errors: u64,
     #[cfg(windows)]
-    pub helpers: std::collections::BTreeMap<u32, venera_debug_protocol::ProcessIdentity>,
+    pub helpers: std::collections::BTreeMap<u32, RegisteredHelper>,
     pub processes: crate::ancestry::Processes,
     #[cfg(windows)]
     pub assembler: crate::collector::Assembler,

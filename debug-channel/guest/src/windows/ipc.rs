@@ -15,10 +15,14 @@ use windows_sys::Win32::{
 };
 const PIPE: &str = "\\\\.\\pipe\\VeneraDebugGuest.v1";
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+// The command reader may be collecting a system report (30 s) before it reads a receipt.
+const CAPTURE_ACK_TIMEOUT: Duration = Duration::from_secs(35);
 const LIMIT: usize = venera_debug_protocol::DEFAULT_MAX_LINE_BYTES;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct HelperFrame {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery: Option<u64>,
     capture: Option<Capture>,
     health: serde_json::Value,
     dropped: u64,
@@ -262,23 +266,26 @@ fn client(file: File, state: Shared, finite: &mut bool, local_stop: &AtomicBool)
                 return Err(error());
             }
             let identity = process::identity(pid);
-            if !state
+            let cursor = state
                 .lock()
                 .unwrap()
                 .helpers
                 .get(&session)
-                .is_some_and(|expected| {
-                    expected.pid == pid
-                        && expected.start_time_filetime.is_some()
-                        && expected.start_time_filetime == identity.start_time_filetime
+                .filter(|helper| {
+                    helper.identity.pid == pid
+                        && identity.start_time_filetime.is_some()
+                        && helper.identity.start_time_filetime == identity.start_time_filetime
                 })
-            {
-                return Err(io::ErrorKind::PermissionDenied.into());
-            }
-            reply(&mut file, &serde_json::json!({"ok":true}))?;
+                .map(|helper| helper.delivered.clone())
+                .ok_or(io::ErrorKind::PermissionDenied)?;
+            let reliable = value["capture_ack"] == true;
+            reply(
+                &mut file,
+                &serde_json::json!({"ok":true,"capture_ack":reliable}),
+            )?;
             while !client_stopped(local_stop) {
                 let bytes = line(&mut reader)?;
-                let mut frame: HelperFrame = serde_json::from_slice(&bytes)?;
+                let frame: HelperFrame = serde_json::from_slice(&bytes)?;
                 let live_helper = process::identity(pid);
                 if live_helper.start_time_filetime.is_none()
                     || live_helper.start_time_filetime != identity.start_time_filetime
@@ -291,46 +298,20 @@ fn client(file: File, state: Shared, finite: &mut bool, local_stop: &AtomicBool)
                     .helpers
                     .get(&session)
                     .is_some_and(|expected| {
-                        expected.pid == pid
-                            && expected.start_time_filetime == identity.start_time_filetime
+                        expected.identity.pid == pid
+                            && expected.identity.start_time_filetime == identity.start_time_filetime
                     })
                 {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
-                if let Some(result) = frame.system_info.take() {
-                    system_info::helper_result(session, result);
-                }
-                let (lost, stream_id) = {
-                    let mut state = state.lock().unwrap();
-                    let key = session.to_string();
-                    let previous = &state.status.health["session_helper_loss"][&key];
-                    let before = if previous["pid"] == pid {
-                        previous["dropped_total"].as_u64().unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    let lost = frame.dropped.saturating_sub(before);
-                    let mut changed = state.status.health["session_capture"][&key] != frame.health;
-                    state.status.health["session_capture"][&key] = frame.health;
-                    changed |= state.observe_helper_drops(session, pid, frame.dropped);
-                    if changed {
-                        state.notify();
-                    }
-                    (lost, state.stream_id.clone())
-                };
-                if lost != 0 {
-                    retain_event(
-                        &state,
-                        venera_debug_protocol::v1::HistoryEvent::Gap {
-                            gap: venera_debug_protocol::v1::Gap {
-                                stream_id,
-                                reason: "session_capture_overflow".into(),
-                                count: Some(venera_debug_protocol::v1::DecimalU64(lost)),
-                                first_seq: None,
-                                last_seq: None,
-                            },
-                        },
-                    );
+                if reliable {
+                    let id = frame.delivery.ok_or(io::ErrorKind::InvalidData)?;
+                    receive_once(&cursor, id, || {
+                        receive_helper_frame(&state, session, pid, frame)
+                    })?;
+                    write_capture_ack(&mut file, id)?;
+                } else {
+                    receive_helper_frame(&state, session, pid, frame);
                 }
                 if let Some(request_id) = system_info::helper_command(session) {
                     reply(
@@ -338,46 +319,99 @@ fn client(file: File, state: Shared, finite: &mut bool, local_stop: &AtomicBool)
                         &serde_json::json!({"type":"local.system.info.get","request_id":request_id}),
                     )?;
                 }
-                let Some(mut capture) = frame.capture else {
-                    continue;
-                };
-                if let Some(source_pid) = capture.pid {
-                    let mut actual = 0;
-                    let cached = state
-                        .lock()
-                        .unwrap()
-                        .processes
-                        .observed(source_pid, capture.observed_filetime);
-                    let verified = cached
-                        .as_ref()
-                        .is_some_and(|(_, actual)| *actual == Some(session))
-                        || (unsafe { ProcessIdToSessionId(source_pid, &mut actual) } != 0
-                            && actual == session);
-                    if !verified {
-                        continue;
-                    }
-                    let captured = capture
-                        .process
-                        .take()
-                        .filter(|identity| identity.pid == source_pid);
-                    capture.process = crate::collector::merge_identity(
-                        captured,
-                        cached
-                            .map(|(identity, _)| identity)
-                            .or_else(|| Some(process::identity(source_pid))),
-                    );
-                }
-                capture.session_id = Some(session);
-                capture.source = "dbwin".into();
-                capture.tid = None;
-                capture.raw_level = None;
-                capture.component = None;
-                accept(&state, capture);
             }
             Ok(())
         }
         _ => rpc_client(file, reader, state, &first, local_stop),
     }
+}
+
+fn write_capture_ack(file: &mut File, id: u64) -> io::Result<()> {
+    writeln!(file, "{{\"type\":\"local.capture.ack\",\"delivery\":{id}}}")
+}
+
+fn receive_once(cursor: &Mutex<u64>, id: u64, receive: impl FnOnce()) -> io::Result<()> {
+    let mut last = cursor.lock().unwrap();
+    if id == 0 || id > last.saturating_add(1) {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    if id > *last {
+        receive();
+        *last = id;
+    }
+    Ok(())
+}
+
+fn receive_helper_frame(state: &Shared, session: u32, pid: u32, mut frame: HelperFrame) {
+    if let Some(result) = frame.system_info.take() {
+        system_info::helper_result(session, result);
+    }
+    let (lost, stream_id) = {
+        let mut state = state.lock().unwrap();
+        let key = session.to_string();
+        let previous = &state.status.health["session_helper_loss"][&key];
+        let before = if previous["pid"] == pid {
+            previous["dropped_total"].as_u64().unwrap_or(0)
+        } else {
+            0
+        };
+        let lost = frame.dropped.saturating_sub(before);
+        let mut changed = state.status.health["session_capture"][&key] != frame.health;
+        state.status.health["session_capture"][&key] = frame.health;
+        changed |= state.observe_helper_drops(session, pid, frame.dropped);
+        if changed {
+            state.notify();
+        }
+        (lost, state.stream_id.clone())
+    };
+    if lost != 0 {
+        retain_event(
+            state,
+            venera_debug_protocol::v1::HistoryEvent::Gap {
+                gap: venera_debug_protocol::v1::Gap {
+                    stream_id,
+                    reason: "session_capture_overflow".into(),
+                    count: Some(venera_debug_protocol::v1::DecimalU64(lost)),
+                    first_seq: None,
+                    last_seq: None,
+                },
+            },
+        );
+    }
+    let Some(mut capture) = frame.capture else {
+        return;
+    };
+    if let Some(source_pid) = capture.pid {
+        let mut actual = 0;
+        let cached = state
+            .lock()
+            .unwrap()
+            .processes
+            .observed(source_pid, capture.observed_filetime);
+        let verified = cached
+            .as_ref()
+            .is_some_and(|(_, actual)| *actual == Some(session))
+            || (unsafe { ProcessIdToSessionId(source_pid, &mut actual) } != 0 && actual == session);
+        if !verified {
+            return;
+        }
+        let captured = capture
+            .process
+            .take()
+            .filter(|identity| identity.pid == source_pid);
+        capture.process = crate::collector::merge_identity(
+            captured,
+            cached
+                .map(|(identity, _)| identity)
+                .or_else(|| Some(process::identity(source_pid))),
+        );
+    }
+    capture.session_id = Some(session);
+    capture.source = "dbwin".into();
+    capture.tid = None;
+    capture.raw_level = None;
+    capture.component = None;
+    accept(state, capture);
 }
 
 fn rpc_client(
@@ -657,8 +691,16 @@ fn helper_commands(
     session: u32,
     stop: Arc<AtomicBool>,
     reports: mpsc::SyncSender<venera_debug_protocol::SystemInfoResult>,
+    acks: Option<mpsc::SyncSender<u64>>,
 ) {
-    helper_commands_with(reader, session, stop, reports, system_info::collect_local);
+    helper_commands_with(
+        reader,
+        session,
+        stop,
+        reports,
+        acks,
+        system_info::collect_local,
+    );
 }
 
 fn helper_commands_with(
@@ -666,6 +708,7 @@ fn helper_commands_with(
     session: u32,
     stop: Arc<AtomicBool>,
     reports: mpsc::SyncSender<venera_debug_protocol::SystemInfoResult>,
+    acks: Option<mpsc::SyncSender<u64>>,
     collect: impl Fn(String, u32, &AtomicBool) -> venera_debug_protocol::SystemInfoResult,
 ) {
     while !stop.load(Ordering::Acquire) {
@@ -688,6 +731,14 @@ fn helper_commands_with(
                 break;
             }
         };
+        if value["type"] == "local.capture.ack" {
+            if let (Some(acks), Some(id)) = (&acks, value["delivery"].as_u64()) {
+                if acks.try_send(id).is_err() {
+                    break;
+                }
+            }
+            continue;
+        }
         if value["type"] != "local.system.info.get" {
             continue;
         }
@@ -708,9 +759,9 @@ fn helper_commands_with(
 fn capture_handshake(
     file: &mut ClientPipe,
     deadline: Instant,
-) -> io::Result<BufReader<ClientPipe>> {
+) -> io::Result<(BufReader<ClientPipe>, bool)> {
     file.deadline = Some(deadline);
-    file.write_all(b"{\"type\":\"local.capture\"}\n")?;
+    file.write_all(b"{\"type\":\"local.capture\",\"capture_ack\":true}\n")?;
     let mut reader = BufReader::new(file.clone());
     let ack: serde_json::Value = serde_json::from_slice(&line(&mut reader)?)?;
     if ack["ok"] != true {
@@ -719,10 +770,12 @@ fn capture_handshake(
     file.check_io()?;
     file.deadline = None;
     reader.get_mut().deadline = None;
-    Ok(reader)
+    Ok((reader, ack["capture_ack"] == true))
 }
 
 struct HelperOutput {
+    confirmed: u64,
+    replay: Option<Vec<u8>>,
     captures: mpsc::Receiver<Capture>,
     pending: Option<Capture>,
     status: Arc<Mutex<serde_json::Value>>,
@@ -734,9 +787,26 @@ impl HelperOutput {
         &mut self,
         file: &mut impl Write,
         reports: mpsc::Receiver<venera_debug_protocol::SystemInfoResult>,
+        acks: Option<&mpsc::Receiver<u64>>,
         commands_finished: impl Fn() -> bool,
     ) -> io::Result<()> {
         loop {
+            if let Some(bytes) = &self.replay {
+                let acks = acks.ok_or(io::ErrorKind::InvalidData)?;
+                file.write_all(bytes)?;
+                let id = acks
+                    .recv_timeout(CAPTURE_ACK_TIMEOUT)
+                    .map_err(|e| match e {
+                        mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+                        mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::BrokenPipe,
+                    })?;
+                if self.confirmed.checked_add(1) != Some(id) {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                self.confirmed = id;
+                self.replay = None;
+                continue;
+            }
             if self.pending.is_none() {
                 self.pending = match self.captures.recv_timeout(Duration::from_secs(1)) {
                     Ok(capture) => Some(capture),
@@ -748,6 +818,7 @@ impl HelperOutput {
                 return Ok(());
             }
             let frame = HelperFrame {
+                delivery: acks.map(|_| self.confirmed + 1),
                 capture: self.pending.take(),
                 health: self.status.lock().unwrap().clone(),
                 dropped: self.dropped.load(Ordering::Relaxed),
@@ -757,6 +828,11 @@ impl HelperOutput {
             self.pending = frame.capture;
             let mut bytes = encoded?;
             bytes.push(b'\n');
+            if acks.is_some() {
+                self.pending.take();
+                self.replay = Some(bytes);
+                continue;
+            }
             let first = file.write(&bytes)?;
             if first == 0 {
                 return Err(io::ErrorKind::WriteZero.into());
@@ -773,6 +849,16 @@ impl HelperOutput {
     }
 }
 
+fn enqueue_capture(
+    tx: &mpsc::SyncSender<Capture>,
+    dropped: &std::sync::atomic::AtomicU64,
+    capture: Capture,
+) {
+    if tx.try_send(capture).is_err() {
+        dropped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub fn helper() -> io::Result<()> {
     let mut session = 0;
     if unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) } == 0 {
@@ -786,11 +872,7 @@ pub fn helper() -> io::Result<()> {
     std::thread::spawn(move || loop {
         let result = dbwin::collect(
             false,
-            |capture| {
-                if tx.try_send(capture).is_err() {
-                    collector_dropped.fetch_add(1, Ordering::Relaxed);
-                }
-            },
+            |capture| enqueue_capture(&tx, &collector_dropped, capture),
             || true,
             || {
                 *collector_status.lock().unwrap() = serde_json::json!("collecting");
@@ -804,19 +886,35 @@ pub fn helper() -> io::Result<()> {
     let mut output = HelperOutput {
         captures: rx,
         pending: None,
+        confirmed: 0,
+        replay: None,
         status,
         dropped,
     };
     loop {
         if let Ok(mut file) = connect_pipe() {
             let connection_stop = file.stop.clone();
-            if let Ok(reader) = capture_handshake(&mut file, Instant::now() + RPC_TIMEOUT) {
+            if let Ok((reader, reliable)) =
+                capture_handshake(&mut file, Instant::now() + RPC_TIMEOUT)
+            {
                 let reader_stop = connection_stop.clone();
                 let (report_tx, report_rx) = mpsc::sync_channel(1);
+                let (ack_tx, ack_rx) = mpsc::sync_channel(1);
                 let commands = std::thread::Builder::new()
                     .name("system-info-commands".into())
-                    .spawn(move || helper_commands(reader, session, reader_stop, report_tx))?;
-                let _ = output.send_frames(&mut file, report_rx, || commands.is_finished());
+                    .spawn(move || {
+                        helper_commands(
+                            reader,
+                            session,
+                            reader_stop,
+                            report_tx,
+                            reliable.then_some(ack_tx),
+                        )
+                    })?;
+                let _ =
+                    output.send_frames(&mut file, report_rx, reliable.then_some(&ack_rx), || {
+                        commands.is_finished()
+                    });
                 connection_stop.store(true, Ordering::Release);
                 let _ = commands.join();
             }
@@ -1055,7 +1153,7 @@ mod tests {
         result.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(
             line(&mut BufReader::new(service)).unwrap(),
-            b"{\"type\":\"local.capture\"}\n"
+            b"{\"type\":\"local.capture\",\"capture_ack\":true}\n"
         );
         worker.join().unwrap();
     }
@@ -1067,6 +1165,8 @@ mod tests {
             HelperOutput {
                 captures,
                 pending: None,
+                confirmed: 0,
+                replay: None,
                 status: Arc::new(Mutex::new(serde_json::json!("collecting"))),
                 dropped: Arc::default(),
             },
@@ -1087,11 +1187,11 @@ mod tests {
             drop(tx);
             let mut prefix = [0u8; 4];
             let mut old = &mut prefix[..capacity];
-            let outcome = output.send_frames(&mut old, mpsc::channel().1, || finished);
+            let outcome = output.send_frames(&mut old, mpsc::channel().1, None, || finished);
             assert_eq!(outcome.is_ok(), finished);
             let (service, mut helper) = helper_pair();
             output
-                .send_frames(&mut helper, mpsc::channel().1, || false)
+                .send_frames(&mut helper, mpsc::channel().1, None, || false)
                 .unwrap();
             helper.write_all(b"\n").unwrap();
             let frames: Vec<HelperFrame> = BufReader::new(service)
@@ -1112,6 +1212,94 @@ mod tests {
     }
 
     #[test]
+    fn helper_replays_in_order_and_reports_queue_overflow() {
+        let (tx, rx) = mpsc::sync_channel(2);
+        let (_, mut output) = helper_output();
+        output.captures = rx;
+        for text in ["first", "second", "third", "fourth", "fifth"] {
+            enqueue_capture(&tx, &output.dropped, serde_json::from_value(serde_json::json!({"text":text,"source":"dbwin","observed_at":"now","observed_filetime":0})).unwrap());
+        }
+        drop(tx);
+        let (mut prefix, mut first) = ([0; 8], Vec::new());
+        let (closed, lost_ack) = mpsc::channel();
+        drop(closed);
+        assert_eq!(
+            output
+                .send_frames(
+                    &mut &mut prefix[..],
+                    mpsc::channel().1,
+                    Some(&lost_ack),
+                    || false
+                )
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WriteZero
+        );
+        assert!(line(&mut BufReader::new(&prefix[..])).is_err());
+        assert_eq!(
+            output
+                .send_frames(&mut first, mpsc::channel().1, Some(&lost_ack), || false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        let (receipts, acks) = mpsc::sync_channel(1);
+        let (mut server, mut pipe) = helper_pair();
+        let command_pipe = pipe.clone();
+        let stop = pipe.stop.clone();
+        let commands = std::thread::spawn(move || {
+            helper_commands(
+                BufReader::new(command_pipe),
+                2,
+                stop,
+                mpsc::sync_channel(1).0,
+                Some(receipts),
+            )
+        });
+        let worker = std::thread::spawn(move || {
+            output.send_frames(&mut pipe, mpsc::channel().1, Some(&acks), || false)
+        });
+        let mut reader = BufReader::new(server.try_clone().unwrap());
+        let replay = line(&mut reader).unwrap();
+        assert_eq!(replay, first);
+        let cursor = Mutex::new(0);
+        let mut records = Vec::new();
+        let state = Arc::new(Mutex::new(State::new("helper-test".into(), false)));
+        let peer = state.lock().unwrap().add_local_peer();
+        let mut consume = |bytes: &[u8]| {
+            let frame: HelperFrame = serde_json::from_slice(bytes).unwrap();
+            let id = frame.delivery.unwrap();
+            receive_once(&cursor, id, || {
+                records.push(frame.capture.as_ref().unwrap().text.clone());
+                receive_helper_frame(&state, 2, 42, frame);
+            })
+            .unwrap();
+            id
+        };
+        consume(&first);
+        write_capture_ack(&mut server, consume(&replay)).unwrap();
+        write_capture_ack(&mut server, consume(&line(&mut reader).unwrap())).unwrap();
+        drop(reader);
+        drop(server);
+        commands.join().unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(records, ["first", "second"]);
+        let mut gaps = Vec::new();
+        while let Some((_, bytes)) = state.lock().unwrap().next_line(peer) {
+            if let Message::Gap { reason, count, .. } =
+                venera_debug_protocol::decode(&bytes).unwrap().body
+            {
+                gaps.push((reason, count));
+            }
+        }
+        assert_eq!(gaps, [("session_2_queue_overflow".to_owned(), Some(3))]);
+        assert_eq!(
+            state.lock().unwrap().status.health["session_helper_loss"]["2"]["dropped_total"],
+            3
+        );
+    }
+
+    #[test]
     fn helper_duplex_delivers_health_before_report_command() {
         let (mut service, mut helper) = helper_pair();
         let pending_read = Arc::new(AtomicBool::new(false));
@@ -1121,7 +1309,7 @@ mod tests {
             let mut reader = BufReader::new(service.try_clone().expect("service reader"));
             assert_eq!(
                 line(&mut reader).expect("capture handshake"),
-                b"{\"type\":\"local.capture\"}\n"
+                b"{\"type\":\"local.capture\",\"capture_ack\":true}\n"
             );
             service
                 .write_all(b"{\"ok\":true}\n")
@@ -1148,7 +1336,7 @@ mod tests {
             );
             observed.send("result").unwrap();
         });
-        let mut helper_reader =
+        let (mut helper_reader, _) =
             capture_handshake(&mut helper, Instant::now() + Duration::from_millis(750)).unwrap();
         helper_reader.get_mut().io_pending = Some(pending_read.clone());
         let (reports, report_rx) = mpsc::sync_channel(1);
@@ -1159,6 +1347,7 @@ mod tests {
                 2,
                 reader_stop,
                 reports,
+                None,
                 |request_id, session, _| {
                     assert_eq!(request_id, "duplex-2");
                     assert_eq!(session, 2);
@@ -1181,7 +1370,7 @@ mod tests {
         let (captures, mut output) = helper_output();
         let writer_stop = stop.clone();
         let writer = std::thread::spawn(move || {
-            let _ = output.send_frames(&mut helper, report_rx, || {
+            let _ = output.send_frames(&mut helper, report_rx, None, || {
                 writer_stop.load(Ordering::Acquire)
             });
             written.send(()).unwrap();
@@ -1254,6 +1443,7 @@ mod tests {
                 2,
                 Arc::new(AtomicBool::new(false)),
                 reports,
+                None,
             );
             finished.send("finished").unwrap();
         });
@@ -1281,7 +1471,7 @@ mod tests {
         let stop = helper.stop.clone();
         let reader_stop = stop.clone();
         let worker = std::thread::spawn(move || {
-            helper_commands(BufReader::new(helper), 2, reader_stop, reports)
+            helper_commands(BufReader::new(helper), 2, reader_stop, reports, None)
         });
         wait_pending(&pending);
         stop.store(true, Ordering::Release);

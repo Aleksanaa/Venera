@@ -51,11 +51,13 @@ fn start(session: u32, state: &Shared, job: HANDLE) -> io::Result<Helper> {
             TerminateProcess(process.0, 1);
             return Err(issue);
         }
-        state
-            .lock()
-            .unwrap()
-            .helpers
-            .insert(session, process::identity(info.dwProcessId));
+        state.lock().unwrap().helpers.insert(
+            session,
+            crate::state::RegisteredHelper {
+                identity: process::identity(info.dwProcessId),
+                delivered: Default::default(),
+            },
+        );
         if ResumeThread(thread.0) == u32::MAX {
             let issue = error();
             TerminateProcess(process.0, 1);
