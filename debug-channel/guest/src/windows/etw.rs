@@ -904,6 +904,26 @@ mod tests {
     }
 
     #[test]
+    fn default_component_dbgprint_becomes_a_kernel_log_record() {
+        // DbgPrint uses DPFLTR_DEFAULT_ID and DPFLTR_INFO_LEVEL.
+        let payload = b"\x65\0\0\0\x03\0\0\0VioGpu: DxgkInitialize failed with Status: 0xC0000001\n\0";
+        let mut event: EVENT_RECORD = unsafe { std::mem::zeroed() };
+        event.EventHeader.ProviderId = PROVIDER;
+        event.EventHeader.TimeStamp = 134393633912317080;
+        event.EventHeader.ProcessId = 4;
+        event.UserData = payload.as_ptr().cast_mut().cast();
+        event.UserDataLength = payload.len() as u16;
+        let capture = unsafe { decode_record(&event, 134393633875000000) }.unwrap().unwrap();
+        let class = crate::collector::classify_capture(&capture).unwrap();
+        let mut state = crate::state::State::new("dbgprint".into(), true);
+        let record = state.capture_record(capture, Some(class)).unwrap();
+        assert_eq!(record.source, "etw");
+        assert_eq!(record.component, "kernel");
+        assert_eq!(record.raw_level, "3");
+        assert_eq!(record.text, "VioGpu: DxgkInitialize failed with Status: 0xC0000001\n");
+    }
+
+    #[test]
     fn captured_debugprint_marker_keeps_its_original_filetime() {
         // early-kmd.etl.001: payload starts at 65640, message starts at 65648.
         let payload =
