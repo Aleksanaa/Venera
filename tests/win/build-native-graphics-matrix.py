@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Assemble package-DLL producers and the Windows history comparison test."""
+"""Assemble dual-architecture package probes and the installed ETW history test."""
 import argparse
 import json
 import os

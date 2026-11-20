@@ -17,7 +17,7 @@ $env:VENERA_GRAPHICS_KIT = (Get-Location).Path
 .\native-graphics-history.exe --ignored --nocapture --exact windows::capture::tests::native_graphics_history::native_graphics_history
 ```
 
-运行输出首行包含 `VeneraGraphicsQA-...` 会话名和 `%TEMP%\venera-native-graphics-...` 产物目录。目录中的 `graphics.etl` 是原始跟踪；同目录保存各发射程序的输出和私有历史库。工具通过私有管道调用生产 `history.read`，`history-result.json` 保存返回值；核对通过后写出 `history-page.json`，可直接归档。
+运行输出首行包含 `VeneraGraphicsQA-...` 会话名和 `%TEMP%\venera-native-graphics-...` 产物目录。目录中的 `graphics.etl` 是原始跟踪；同目录保存各发射程序的输出和私有历史库。工具通过私有管道调用生产 `history.read`，`history-result.json` 保存返回值；核对通过后写出 `history-page.json`，供文件回放归档校验。安装服务和活动归档见[双架构验收](native-graphics-matrix.md)。
 
 核对点：
 

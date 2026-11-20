@@ -3,7 +3,7 @@ use super::*;
 use crate::windows::ipc::tests::{native_graphics_live_pair as live, native_graphics_pipe as pipe};
 use serde_json::json;
 use std::process::{Command, ExitStatus, Stdio};
-use venera_debug_protocol::v1::{EventValue, HistoryEvent, HistoryPage, LogRecord};
+use venera_debug_protocol::v1::{EventValue, HistoryEvent, HistoryPage, HistoryRecord, LogRecord};
 
 fn run(kit: &Path, dir: &Path, name: &str, args: &[&str]) -> (u32, ExitStatus) {
     let mut child = Command::new(kit.join(name))
@@ -27,15 +27,15 @@ fn run(kit: &Path, dir: &Path, name: &str, args: &[&str]) -> (u32, ExitStatus) {
     (pid, exit)
 }
 
-fn entries(page: &HistoryPage, pid: u32) -> impl Iterator<Item = &LogRecord> {
-    page.records.iter().filter_map(move |entry| match &entry.event {
+fn entries(records: &[HistoryRecord], pid: u32) -> impl Iterator<Item = &LogRecord> {
+    records.iter().filter_map(move |entry| match &entry.event {
         HistoryEvent::Log { record } if record.process.as_ref().is_some_and(|p| p.pid == pid) => Some(record),
         _ => None,
     })
 }
 
 #[test]
-#[ignore = "Uses the interactive Windows listener and a private ETW session"]
+#[ignore = "Uses the installed Windows service and a private ETW session"]
 fn native_graphics_package_matrix() {
     let kit = fs::canonicalize(PathBuf::from(std::env::var_os("VENERA_GRAPHICS_MATRIX").unwrap())).unwrap();
     let kit = PathBuf::from(kit.to_str().unwrap().trim_start_matches(r"\\?\"));
@@ -43,6 +43,7 @@ fn native_graphics_package_matrix() {
     let payload = payload.to_str().unwrap();
     let tag = format!("{}-{}", std::process::id(), clock::filetime());
     let marker = format!("Venera graphics same text {tag}");
+    let fence = format!("Venera graphics capture fence {tag}");
     let dir = std::env::temp_dir().join(format!("venera-graphics-matrix-{tag}"));
     fs::create_dir(&dir).unwrap();
     let trace = dir.join("graphics.etl");
@@ -51,15 +52,20 @@ fn native_graphics_package_matrix() {
 
     let session = FileSession::start(&session_name, &trace, 0, 32).unwrap();
     session.enable(&etw::KERNEL_PROVIDER, 5, 1).unwrap();
-    let before = live::range();
-    let (pair_pid, pair_status) = run(&kit, &dir, "native-graphics-matrix-x64.exe", &["pair", payload, &marker]);
+    let before = live::range().expect("history.range from installed Venera service");
     let (pid64, status64) = run(&kit, &dir, "native-graphics-matrix-x64.exe", &["matrix", payload]);
     let (pid32, status32) = run(&kit, &dir, "native-graphics-matrix-x86.exe", &["matrix", payload]);
+    let (pair_pid, pair_status) = run(&kit, &dir, "native-graphics-matrix-x64.exe", &["pair", payload, &marker, &fence]);
+    assert!(pair_status.success(), "same-text producer failed: {pair_status}");
+    let ods_returned_filetime = fs::read_to_string(dir.join("native-graphics-matrix-x64.exe-pair.images.txt")).unwrap()
+        .lines().find_map(|line| line.strip_prefix("ods-returned-filetime="))
+        .expect("ODS return time from pair producer").parse().unwrap();
     let loss = session.control_status();
     let stopped = session.stop();
-    let (live_pass, live_report) = live::observe(before, pair_pid, &marker);
+    let (live_pass, live_report, live_records) = live::observe(before, [pid64, pid32], pair_pid, &marker, &fence, ods_returned_filetime);
     fs::write(dir.join("live-pair.json"), serde_json::to_vec_pretty(&live_report).unwrap()).unwrap();
-    println!("live history: {} ETW matches={} DBWIN matches={}", live_report["status"], live_report["etw_matches"], live_report["dbwin_matches"]);
+    fs::write(dir.join("installed-graphics-records.json"), serde_json::to_vec(&live_records).unwrap()).unwrap();
+    println!("live history: {} ETW matches={} DBWIN matches={} fence matches={}", live_report["status"], live_report["etw_matches"], live_report["dbwin_matches"], live_report["fence_matches"]);
     stopped.unwrap();
     let loss = loss.unwrap();
 
@@ -88,10 +94,12 @@ fn native_graphics_package_matrix() {
     assert_eq!(page.range.high_water, page.next.position, "private history page ended early");
     assert!(page.missing.is_empty());
     assert!(page.records.iter().all(|r| !matches!(r.event, HistoryEvent::Gap { .. })));
-    let pair: Vec<_> = entries(&page, pair_pid).filter(|r| r.text.contains(&marker)).collect();
-    assert_eq!(pair.len(), 1, "private same-text records: {pair:?}");
-    assert_eq!((pair[0].text.as_str(), pair[0].source.as_str(), pair[0].component.as_str(), pair[0].structured.as_ref().map(|e| e.event_id)),
-        (marker.as_str(), "etw", "venera_d3d11", Some(5)));
+    for text in [&marker, &fence] {
+        let pair: Vec<_> = entries(&page.records, pair_pid).filter(|r| r.text.contains(text)).collect();
+        assert_eq!(pair.len(), 1, "private records for {text}: {pair:?}");
+        assert_eq!((pair[0].text.as_str(), pair[0].source.as_str(), pair[0].component.as_str(), pair[0].structured.as_ref().map(|e| e.event_id)),
+            (text.as_str(), "etw", "venera_d3d11", Some(5)));
+    }
 
     let shader = "mov r0, r1\n".repeat(8000);
     assert_eq!(shader.len(), 88_000);
@@ -108,16 +116,17 @@ fn native_graphics_package_matrix() {
     ];
     for (pid, bits, status) in [(pid64, 64, status64), (pid32, 32, status32)] {
         assert!(status.success(), "producer {bits}-bit failed: {status}");
-        for (id, component, level, channel, text) in expected {
-            let count = entries(&page, pid).filter(|r| {
-                r.source == "etw" && r.component == component && r.raw_level == level && r.text == text
-                    && r.structured.as_ref().is_some_and(|event| event.event_id == id
-                        && event.fields.get("channel") == channel.map(|s| EventValue::AnsiString(s.into())).as_ref())
-            }).count();
-            assert_eq!(count, 1, "{bits}-bit pid={pid} event={id} {component} bytes={}", text.len());
-            println!("private history {bits}-bit pid={pid} event={id} {component} bytes={}", text.len());
+        for (path, records) in [("private", page.records.as_slice()), ("installed", live_records.as_slice())] {
+            for (id, component, level, channel, text) in expected {
+                let count = entries(records, pid).filter(|r| {
+                    r.source == "etw" && r.component == component && r.raw_level == level && r.text == text
+                        && r.structured.as_ref().is_some_and(|event| event.event_id == id
+                            && event.fields.get("channel") == channel.map(|s| EventValue::AnsiString(s.into())).as_ref())
+                }).count();
+                assert_eq!(count, 1, "{path} history {bits}-bit pid={pid} event={id} {component} bytes={}", text.len());
+                println!("{path} history {bits}-bit pid={pid} event={id} {component} bytes={}", text.len());
+            }
         }
     }
-    assert!(pair_status.success(), "same-text producer failed: {pair_status}");
     assert!(live_pass, "live history report: {live_report}");
 }

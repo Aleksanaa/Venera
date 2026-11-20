@@ -54,15 +54,35 @@ void umd(HMODULE mod, const char* adapter, size_t log, const char* body)
     entry<void (*)(int, const char*, ...)>(mod, log)(1, "%s", body);
 }
 
-int pair(const std::wstring& dir, const char* body)
+void report_dbwin_objects()
+{
+    DWORD session;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) fail("ProcessIdToSessionId");
+    const char* names[] = {"DBWIN_BUFFER_READY", "DBWIN_DATA_READY", "DBWIN_BUFFER"};
+    for (int i = 0; i < 3; ++i) {
+        HANDLE object = i == 2 ? OpenFileMappingA(FILE_MAP_READ, FALSE, names[i])
+                               : OpenEventA(SYNCHRONIZE, FALSE, names[i]);
+        DWORD error = object ? ERROR_SUCCESS : GetLastError();
+        if (object) CloseHandle(object);
+        std::printf("local object session=%lu name=%s open_result=%lu\n", session, names[i], error);
+    }
+}
+
+int pair(const std::wstring& dir, const char* body, const char* fence)
 {
     if (IsDebuggerPresent()) fail("Standalone pair process");
+    report_dbwin_objects();
     auto d11 = load(dir, image_d11);
     umd(d11, "OpenAdapter10_2", umd11_log, body);
     OutputDebugStringA(body);
+    FILETIME now;
+    GetSystemTimePreciseAsFileTime(&now);
+    std::printf("ods-returned-filetime=%llu\n", (static_cast<unsigned long long>(now.dwHighDateTime) << 32) | now.dwLowDateTime);
     std::printf("same-text sent pid=%lu text=%s\n", GetCurrentProcessId(), body);
-    // Keep the process alive while the interactive-session DBWIN listener resolves it.
+    // Give an interactive capture pipeline time to resolve the live process.
     Sleep(1000);
+    umd(d11, "OpenAdapter10_2", umd11_log, fence);
+    std::printf("fence sent pid=%lu text=%s\n", GetCurrentProcessId(), fence);
     return 0;
 }
 
@@ -97,7 +117,7 @@ int matrix(const std::wstring& dir)
 int wmain(int argc, wchar_t** argv)
 {
     if (argc == 3 && !std::wcscmp(argv[1], L"matrix")) return matrix(argv[2]);
-    if (argc == 4 && !std::wcscmp(argv[1], L"pair")) return pair(argv[2], utf8(argv[3]).c_str());
-    std::fprintf(stderr, "Usage: native-graphics-matrix matrix PAYLOAD | pair PAYLOAD MARKER\n");
+    if (argc == 5 && !std::wcscmp(argv[1], L"pair")) return pair(argv[2], utf8(argv[3]).c_str(), utf8(argv[4]).c_str());
+    std::fprintf(stderr, "Usage: native-graphics-matrix matrix PAYLOAD | pair PAYLOAD MARKER FENCE\n");
     return 1;
 }
