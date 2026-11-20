@@ -974,6 +974,14 @@ fn negotiated_attribution_survives_independent_archive_progress() {
             .all(|row| row["message"]["type"] != "attribution_revision")
     );
     let a = &all.iter().find(|row| row["id"] == original_id).unwrap();
+    for (program, expected) in [("A.exe", Some(*a)), ("B.exe", None)] {
+        let (status, body) = get(addr, &format!("/api/events?after={original_id}&program={program}"));
+        assert_eq!(status, 200);
+        let page: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(page["changes"], json!([{"id":original_id,"event":expected}]));
+        let (_, next) = get(addr, &format!("/api/events?after={}",page["next_id"].as_str().unwrap()));
+        assert_eq!(serde_json::from_str::<Value>(&next).unwrap()["changes"], json!([]));
+    }
     assert_eq!(a["message"]["process"]["start_time_filetime"], "200");
     assert_eq!(a["message"]["ancestors"][0]["start_time_filetime"], "100");
     assert_eq!(get(addr, &format!("/api/events/{original_id}")).0, 200);

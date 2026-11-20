@@ -183,6 +183,52 @@ test('follows the entire first burst after opening an empty archive', async () =
   ).toEqual(burst.map((e) => `查看事件 ${e.id}`));
 });
 
+test('applies late attribution to the visible row and its open details', async () => {
+  vi.useFakeTimers();
+  const repaired = {
+    ...first,
+    message: {
+      ...first.message,
+      process: { pid: 99, exe_path: 'C:\\later.exe' },
+    },
+  };
+  vi.stubGlobal('fetch', async (input: string) => {
+    const url = new URL(input, 'http://localhost');
+    if (url.pathname.endsWith(first.id)) return response(first);
+    const after = url.searchParams.get('after');
+    if (!after) return page([first]);
+    return response({
+      events: [],
+      changes: [{ id: first.id, event: after === first.id ? repaired : null }],
+      next_id: '9007199254740999',
+      oldest_id: first.id,
+      latest_id: first.id,
+    });
+  });
+  await act(async () => {
+    render(<App />);
+  });
+  await act(async () => {
+    fireEvent.click(
+      screen.getByRole('button', { name: `查看事件 ${first.id}` }),
+    );
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+  expect(screen.getByText('C:\\later.exe')).toBeVisible();
+  const history = screen.getByRole('region', { name: '事件历史' });
+  expect(
+    within(history).getByRole('button', { name: `查看事件 ${first.id}` }),
+  ).toHaveTextContent('later.exe');
+  expect(within(history).getByText(first.message.text)).toBeVisible();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+  expect(within(history).queryByText(first.message.text)).toBeNull();
+  expect(screen.queryByText('C:\\later.exe')).toBeNull();
+});
+
 test('选择事件展示完整多行详情并复制原始 JSON', async () => {
   vi.stubGlobal(
     'fetch',

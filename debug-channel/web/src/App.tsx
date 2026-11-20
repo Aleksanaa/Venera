@@ -39,6 +39,8 @@ import { SystemInfo } from './SystemInfo';
 
 type Page = {
   events: LogEvent[];
+  changes?: { id: string; event: LogEvent | null }[];
+  next_id?: string;
   oldest_id: string | null;
   latest_id: string | null;
 };
@@ -154,6 +156,9 @@ export function App() {
   const [trimmed, setTrimmed] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selected, setSelected] = useState<LogEvent | null>(null);
+  const selectedRef = useRef(selectedId);
+  selectedRef.current = selectedId;
+  const detailVersion = useRef(0);
   const [detailError, setDetailError] = useState('');
   const epoch = useRef(0);
   const olderRequest = useRef(false);
@@ -286,8 +291,27 @@ export function App() {
           controller.signal,
         );
         if (generation !== epoch.current) return;
-        cursor.current = page.events.at(-1)?.id ?? page.latest_id ?? '0';
-        mergeRef.current(page.events, false, page.oldest_id);
+        cursor.current =
+          page.next_id ?? page.events.at(-1)?.id ?? page.latest_id ?? '0';
+        if (page.changes?.length) {
+          const visible = new Map(
+            [...rows.current, ...page.events].map((row) => [row.id, row]),
+          );
+          for (const { id, event } of page.changes) {
+            if (event) visible.set(id, event);
+            else visible.delete(id);
+            if (id === selectedRef.current) {
+              detailVersion.current++;
+              setSelected(event);
+              setDetailError('');
+              if (!event) setSelectedId(null);
+            }
+          }
+          rows.current = Array.from(visible.values()).sort((a, b) =>
+            BigInt(a.id) < BigInt(b.id) ? -1 : 1,
+          );
+          mergeRef.current([], false, page.oldest_id);
+        } else mergeRef.current(page.events, false, page.oldest_id);
         ready = true;
         setError('');
       } catch (reason) {
@@ -318,14 +342,17 @@ export function App() {
 
   useEffect(() => {
     if (!selectedId) return;
+    const version = detailVersion.current;
     const controller = new AbortController();
     setDetailError('');
     void read<LogEvent>(`/api/events/${selectedId}`, controller.signal)
       .then((event) => {
-        if (!controller.signal.aborted) setSelected(event);
+        if (!controller.signal.aborted && version === detailVersion.current)
+          setSelected(event);
       })
       .catch((reason) => {
-        if (!controller.signal.aborted) setDetailError(String(reason.message));
+        if (!controller.signal.aborted && version === detailVersion.current)
+          setDetailError(String(reason.message));
       });
     return () => controller.abort();
   }, [selectedId]);

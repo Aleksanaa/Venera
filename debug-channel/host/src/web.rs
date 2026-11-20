@@ -178,24 +178,44 @@ async fn events(
     let range = query.filters.range()?;
     let instance = query.filters.instance()?;
     tokio::task::spawn_blocking(move || -> std::result::Result<Json<Value>, ApiError> {
-        let db = open(&path).map_err(internal)?;
+        let mut conn = open(&path).map_err(internal)?;
+        let db = conn.transaction().map_err(internal)?;
         let raw = if has_raw(&db).map_err(internal)? { "raw_message" } else { "NULL" };
         let visible = visible(&db).map_err(internal)?;
         let (oldest, latest): (Option<i64>, Option<i64>) = db.query_row(&format!("SELECT MIN(id),MAX(id) FROM events WHERE {visible}"), [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(internal)?;
-        let (condition, order) = if after.is_some() { ("id>?1", "ASC") } else { ("(?1 IS NULL OR id<?1)", "DESC") };
-        let mut statement = db.prepare(&format!("SELECT id,received_at,message,{raw} FROM events WHERE {visible} AND {condition} AND id<=?2 ORDER BY id {order}")).map_err(internal)?;
+        let upper: i64 = db.query_row("SELECT COALESCE(MAX(id),0) FROM events", [], |r| r.get(0)).map_err(internal)?;
+        let sql = if after.is_some() && visible != "1" {
+            // Each revision advances the scan at its own ID but delivers the current
+            // projection at the original row ID, including rows leaving the filter.
+            "SELECT e.id, COALESCE(t.id,e.id), COALESCE(t.received_at,e.received_at),
+                    COALESCE(t.message,e.message), CASE WHEN t.id IS NULL THEN e.raw_message ELSE t.raw_message END, t.id IS NOT NULL
+             FROM events e LEFT JOIN events t ON t.journal_id=e.journal_id AND t.position=e.revision_target
+             WHERE e.id>?1 AND e.id<=?2 AND (e.revision_target IS NULL OR t.id IS NOT NULL) ORDER BY e.id".into()
+        } else {
+            let (condition, order) = if after.is_some() { ("id>?1", "ASC") } else { ("(?1 IS NULL OR id<?1)", "DESC") };
+            format!("SELECT id,id,received_at,message,{raw},0 FROM events WHERE {visible} AND {condition} AND id<=?2 ORDER BY id {order}")
+        };
+        let mut statement = db.prepare(&sql).map_err(internal)?;
         let cursor = after.or(before);
-        let mut rows = statement.query(params![cursor, latest.unwrap_or(0)]).map_err(internal)?;
+        let mut rows = statement.query(params![cursor, upper]).map_err(internal)?;
         let mut events = Vec::new();
+        let mut changes = Vec::new();
+        let mut next = upper.max(after.unwrap_or(0));
         while let Some(row) = rows.next().map_err(internal)? {
-            let value = event(row.get(0).map_err(internal)?, row.get(1).map_err(internal)?, row.get(2).map_err(internal)?, row.get(3).map_err(internal)?).map_err(internal)?;
-            if range.contains(value["received_at"].as_str().unwrap()).map_err(internal)? && query.filters.matches(&value["message"], instance.as_ref()) {
+            let value = event(row.get(1).map_err(internal)?, row.get(2).map_err(internal)?, row.get(3).map_err(internal)?, row.get(4).map_err(internal)?).map_err(internal)?;
+            let matches = range.contains(value["received_at"].as_str().unwrap()).map_err(internal)? && query.filters.matches(&value["message"], instance.as_ref());
+            if row.get::<_,bool>(5).map_err(internal)? {
+                changes.push(json!({"id":value["id"],"event":matches.then_some(&value)}));
+            } else if matches {
                 events.push(value);
-                if events.len() == limit { break; }
+            }
+            if events.len() + changes.len() == limit {
+                if after.is_some() { next = row.get(0).map_err(internal)?; }
+                break;
             }
         }
         if after.is_none() { events.reverse(); }
-        Ok(Json(json!({"events":events,"oldest_id":oldest.map(|v| v.to_string()),"latest_id":latest.map(|v| v.to_string())})))
+        Ok(Json(json!({"events":events,"changes":changes,"next_id":next.to_string(),"oldest_id":oldest.map(|v| v.to_string()),"latest_id":latest.map(|v| v.to_string())})))
     }).await.map_err(internal)?
 }
 async fn detail(
