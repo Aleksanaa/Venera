@@ -282,7 +282,7 @@ fn fresh_history_is_available_after_health() {
     let server = Server::start(false);
     assert_eq!(
         server.json("/api/events"),
-        json!({"events":[],"oldest_id":null,"latest_id":null})
+        json!({"events":[],"changes":[],"next_id":"0","oldest_id":null,"latest_id":null})
     );
     assert_eq!(server.get("/api/export"), (200, String::new()));
     assert_eq!(server.get("/api/events/1").0, 404);
