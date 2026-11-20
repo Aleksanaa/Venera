@@ -8,9 +8,11 @@ set(DXVK_BUILD "${CMAKE_BINARY_DIR}/dxvk-debug-output")
 
 find_program(VENERA_PATCH patch REQUIRED)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/patches/debug-output/engine_etw.h"
     "${CMAKE_SOURCE_DIR}/patches/debug-output/dxvk.patch")
 file(COPY "${DXVK_SRC}/" DESTINATION "${DXVK_BUILD}/source" PATTERN ".git" EXCLUDE)
 file(COPY_FILE "${DXVK_SRC}/src/util/log/log.cpp" "${DXVK_BUILD}/source/src/util/log/log.cpp")
+configure_file("${CMAKE_SOURCE_DIR}/patches/debug-output/engine_etw.h" "${DXVK_BUILD}/source/src/util/log/engine_etw.h" COPYONLY)
 execute_process(COMMAND "${VENERA_PATCH}" -p1 -i "${CMAKE_SOURCE_DIR}/patches/debug-output/dxvk.patch"
     WORKING_DIRECTORY "${DXVK_BUILD}/source" COMMAND_ERROR_IS_FATAL ANY)
 set(DXVK_SRC "${DXVK_BUILD}/source")
