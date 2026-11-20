@@ -17,6 +17,7 @@ parser = argparse.ArgumentParser(description="Build Windows source-runtime and c
 parser.add_argument("--build-dir", type=Path, default=Path("build/win"))
 parser.add_argument("--mesa-build-dir", type=Path, default=Path("build/icd/meson"))
 parser.add_argument("--output-dir", type=Path, default=Path("build/json-probes"))
+parser.add_argument("--etw-fixture", action="store_true", help="Capture graphics event payloads for the local file matrix")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[2]
 sources = root / "tests/win"
@@ -28,6 +29,10 @@ mesa = args.mesa_build_dir.resolve()
 json_flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "nlohmann_json"], text=True))
 compile_flags = ["-O2", "-isystem", os.environ["VENERA_MINGW_MCFG_INCLUDE"]]
 link_flags = ["-static", "-static-libgcc", "-static-libstdc++", "-L" + os.environ["VENERA_MINGW_MCFG_LIB"]]
+if args.etw_fixture:
+    sink = out / "engine-etw-sink.o"
+    run(["x86_64-w64-mingw32-gcc", "-c", sources / "engine-etw-sink.c", "-o", sink])
+    link_flags.append(str(sink))
 cxx = ["x86_64-w64-mingw32-g++", "-std=c++20", *compile_flags, *json_flags]
 for name in ("source-runtime-venera", "channel-stress-venera"):
     run([*cxx, "-I" + str(root / "umd/common"), sources / (name + ".cpp"),
