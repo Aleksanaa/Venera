@@ -494,7 +494,17 @@ impl State {
     pub fn current(&mut self) -> Status {
         self.status.loss["queue_dropped"] = json!(self.dropped);
         self.status.loss["parse_errors"] = json!(self.parse_errors);
-        self.status.clone()
+        let status = self.status.clone();
+        #[cfg(windows)]
+        let status = {
+            let mut status = status;
+            if let Some(error) = self.history.as_ref().and_then(|h| h.storage_error()) {
+                status.health["history_storage"] =
+                    json!({"state":"retrying", "error":error.to_string()});
+            }
+            status
+        };
+        status
     }
     pub fn notify(&mut self) {
         let status = self.current();

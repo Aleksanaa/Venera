@@ -5,7 +5,7 @@ use crate::journal::{
 use std::{
     io,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI32, Ordering},
         mpsc::{self, Receiver, SyncSender},
         Arc, Mutex,
     },
@@ -91,6 +91,7 @@ pub struct History {
     queries: SyncSender<Query>,
     stop: Arc<AtomicBool>,
     journal_id: Arc<str>,
+    storage_error: Arc<AtomicI32>,
 }
 
 impl History {
@@ -222,6 +223,8 @@ impl History {
         let (input, entries) = mpsc::sync_channel(2048);
         let (queries, requests) = mpsc::sync_channel(64);
         let owner_stop = stop.clone();
+        let storage_error = Arc::new(AtomicI32::new(0));
+        let owner_error = storage_error.clone();
         let worker = thread::Builder::new()
             .name("guest-history".into())
             .spawn(move || {
@@ -233,7 +236,10 @@ impl History {
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as u64;
-                        journal.prune(now)?;
+                        if let Err(error) = journal.prune(now) {
+                            recover(&mut journal, error, &owner_stop, &requests, &owner_error)?;
+                            continue;
+                        }
                         next_prune = Instant::now() + Duration::from_secs(1);
                     }
                     for _ in 0..4 {
@@ -241,6 +247,9 @@ impl History {
                             break;
                         };
                         answer(&mut journal, query);
+                        if let Err(error) = journal.check() {
+                            recover(&mut journal, error, &owner_stop, &requests, &owner_error)?;
+                        }
                     }
                     let first = match pending
                         .take()
@@ -275,7 +284,25 @@ impl History {
                         bytes += size;
                         batch.push(next);
                     }
-                    journal.append_batch(batch)?;
+                    let mut before = journal.range()?.high_water.0;
+                    loop {
+                        match journal.append_batch(batch.clone()) {
+                            Ok(_) => break,
+                            Err(error) => {
+                                let published = recover(
+                                    &mut journal,
+                                    error,
+                                    &owner_stop,
+                                    &requests,
+                                    &owner_error,
+                                )?;
+                                if published > before {
+                                    break;
+                                }
+                                before = journal.range()?.high_water.0;
+                            }
+                        }
+                    }
                 }
                 // Finish captures already accepted by the service before closing its journal.
                 loop {
@@ -305,12 +332,21 @@ impl History {
                 queries,
                 stop,
                 journal_id,
+                storage_error,
             },
             worker,
         ))
     }
     pub fn append(&self, entry: JournalInput) -> io::Result<()> {
         self.send(&self.input, self.prepare_input(entry)?)
+    }
+
+    pub fn storage_error(&self) -> Option<io::Error> {
+        match self.storage_error.load(Ordering::Acquire) {
+            0 => None,
+            -1 => Some(io::Error::other("History storage is recovering")),
+            code => Some(io::Error::from_raw_os_error(code)),
+        }
     }
 
     fn prepare_input(&self, mut entry: JournalInput) -> io::Result<JournalInput> {
@@ -343,6 +379,9 @@ impl History {
         loop {
             if self.stop.load(Ordering::Acquire) {
                 return Err(io::ErrorKind::Interrupted.into());
+            }
+            if let Some(error) = self.storage_error() {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, error));
             }
             match sender.try_send(value) {
                 Ok(()) => return Ok(()),
@@ -585,6 +624,43 @@ pub fn finish(
         .map_err(|_| io::Error::other("History worker failed"))?
 }
 
+fn recover(
+    journal: &mut Journal,
+    mut error: io::Error,
+    stop: &AtomicBool,
+    requests: &Receiver<Query>,
+    status: &AtomicI32,
+) -> io::Result<u64> {
+    if journal.check().is_ok()
+        && matches!(
+            error.kind(),
+            io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
+        )
+    {
+        return Err(error);
+    }
+    let mut delay = Duration::from_millis(100);
+    loop {
+        status.store(error.raw_os_error().unwrap_or(-1), Ordering::Release);
+        let deadline = Instant::now() + delay;
+        while Instant::now() < deadline {
+            if stop.load(Ordering::Acquire) {
+                return Err(error);
+            }
+            // Release callers that submitted before recovery was announced.
+            drop(requests.recv_timeout(Duration::from_millis(10)));
+        }
+        match journal.reopen_published() {
+            Ok(position) => {
+                status.store(0, Ordering::Release);
+                return Ok(position);
+            }
+            Err(next) => error = next,
+        }
+        delay = (delay * 2).min(Duration::from_secs(2));
+    }
+}
+
 fn answer(journal: &mut Journal, query: Query) {
     match query {
         Query::Processes(boot, tx) => {
@@ -674,6 +750,65 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use venera_debug_protocol::v1::{DecimalU64, HistoryCursor, HistoryEvent};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn owner_replays_an_unpublished_capture_after_storage_recovers() {
+        let root = std::env::temp_dir().join(format!(
+            "venera-owner-retry-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let journal = Journal::open(&root, "journal", RetentionPolicy::default()).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (history, worker) = History::start(journal, stop.clone()).unwrap();
+        let obstruction = root.join("metadata.pending");
+        std::fs::create_dir(&obstruction).unwrap();
+        history
+            .append(JournalInput {
+                boot_id: "boot".into(),
+                recorded_at_ms: 1,
+                startup: true,
+                event: HistoryEvent::Gap {
+                    gap: Gap {
+                        stream_id: "stream".into(),
+                        reason: "retained capture".into(),
+                        count: None,
+                        first_seq: None,
+                        last_seq: None,
+                    },
+                },
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while history.storage_error().is_none() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            history.range().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        std::fs::remove_dir(obstruction).unwrap();
+        let page = loop {
+            if let Ok(page) = history.read(HistoryRead {
+                after: None,
+                through: None,
+                limit: 10,
+            }) {
+                if !page.records.is_empty() {
+                    break page;
+                }
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(page.next.position.0, 1);
+        assert!(
+            matches!(&page.records[0].event, HistoryEvent::Gap {gap} if gap.reason=="retained capture")
+        );
+        finish(Vec::new(), &stop, worker).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn process_owner_small_batches_with_a_cold_checkpoint() {

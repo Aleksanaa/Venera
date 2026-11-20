@@ -120,6 +120,7 @@ fn event_identity(event: &HistoryEvent) -> Option<EventIdentity> {
 }
 
 /// A captured event with its boot and retention context.
+#[derive(Clone)]
 pub struct JournalInput {
     pub boot_id: String,
     pub recorded_at_ms: u64,
@@ -707,7 +708,27 @@ impl Journal {
         Ok(journal)
     }
 
-    fn check(&self) -> io::Result<()> {
+    // Read the published cursor before open resumes pending attribution revisions.
+    // It distinguishes a failed publication from an error cleaning up after it.
+    pub(super) fn reopen_published(&mut self) -> io::Result<u64> {
+        let file = File::open(self.root.join("metadata.json"))?;
+        if file.metadata()?.len() > MAX_ENTRY_BYTES {
+            return Err(invalid("journal metadata exceeds capacity"));
+        }
+        let published: Metadata = serde_json::from_reader(file)?;
+        if published.journal_id != self.metadata.journal_id {
+            return Err(invalid("journal identity changed during recovery"));
+        }
+        *self = Self::open_with_unit(
+            &self.root,
+            published.journal_id,
+            self.policy.clone(),
+            self.unit,
+        )?;
+        Ok(published.high_water)
+    }
+
+    pub(super) fn check(&self) -> io::Result<()> {
         if self.healthy {
             Ok(())
         } else {
