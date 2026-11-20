@@ -471,7 +471,10 @@ fn begin_replay_observed(
     Ok(session)
 }
 
-pub fn recover_recorders(directory: &Path) -> io::Result<Vec<std::path::PathBuf>> {
+pub fn recover_recorders(
+    directory: &Path,
+    eligible: &[std::path::PathBuf],
+) -> io::Result<Vec<std::path::PathBuf>> {
     let mut capacity = 64;
     for _ in 0..2 {
         let mut storage: Vec<Vec<u64>> = (0..capacity).map(|_| vec![0u64; 8192]).collect();
@@ -533,6 +536,7 @@ pub fn recover_recorders(directory: &Path) -> io::Result<Vec<std::path::PathBuf>
             if !path
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy().starts_with("recorder-v1-"))
+                || !eligible.iter().any(|entry| entry.file_name() == path.file_name())
             {
                 continue;
             }

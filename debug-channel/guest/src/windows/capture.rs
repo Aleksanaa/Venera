@@ -59,20 +59,23 @@ fn owns_legacy() -> io::Result<bool> {
 }
 
 fn traces(directory: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    let mut sizes = Vec::new();
-    for entry in fs::read_dir(directory)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            return Err(io::ErrorKind::InvalidData.into());
+    capture_storage::scan(directory, &mut Default::default())
+}
+
+fn reported_traces(state: &Shared, directory: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut skipped = capture_storage::SkippedEntries::default();
+    let paths = capture_storage::scan(directory, &mut skipped);
+    let mut state = state.lock().unwrap();
+    let health = state.status.health.as_object_mut().unwrap();
+    match skipped.health() {
+        Some(report) if health.get("capture_scan") != Some(&report) => {
+            health.insert("capture_scan".into(), report);
+            state.notify();
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        sizes.push((name, entry.metadata()?.len()));
-        paths.push(entry.path());
+        None if paths.is_ok() && health.remove("capture_scan").is_some() => state.notify(),
+        _ => (),
     }
-    capture_storage::validate(&sizes)?;
-    paths.sort();
-    Ok(paths)
+    paths
 }
 
 fn new_path(directory: &Path, prefix: &str) -> io::Result<PathBuf> {
@@ -99,10 +102,11 @@ fn new_path(directory: &Path, prefix: &str) -> io::Result<PathBuf> {
         ));
     }
     let path = directory.join(format!("{prefix}{}.etl", clock::filetime()));
-    if path.exists() {
-        return Err(io::ErrorKind::AlreadyExists.into());
+    match fs::symlink_metadata(&path) {
+        Ok(_) => Err(io::ErrorKind::AlreadyExists.into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(path),
+        Err(error) => Err(error),
     }
-    Ok(path)
 }
 
 struct CaptureSession {
@@ -466,7 +470,7 @@ fn import_sealed(
     sessions: &[CaptureSession],
 ) -> io::Result<()> {
     let mut inventory = Vec::new();
-    let paths = traces(directory)?;
+    let paths = reported_traces(state, directory)?;
     let mut present = Vec::new();
     let mut trusted = true;
     let mut graphics_order_known = true;
@@ -477,7 +481,7 @@ fn import_sealed(
             .to_string_lossy()
             .starts_with("recorder-")
     }) {
-        match files::recover_recorders(directory) {
+        match files::recover_recorders(directory, &paths) {
             Ok(paths) => Some(paths),
             Err(error) => {
                 state.lock().unwrap().status.health["recorder"] =
@@ -2569,9 +2573,21 @@ mod tests {
         if damaged_recorder {
             fs::write(&damaged, b"partial trace header").unwrap();
         }
+        let unrelated = capture.join("foreign.etl");
+        fs::write(&unrelated, b"unrelated data").unwrap();
+        let folder = capture.join("legacy-live-folder.etl");
+        fs::create_dir(&folder).unwrap();
+        let nested = folder.join("legacy-live-nested.etl");
+        fs::write(&nested, b"nested data").unwrap();
         import_sealed(&state, &history, &capture, &sessions).unwrap();
         assert!(!first.exists());
         assert!(!damaged.exists());
+        assert_eq!(fs::read(unrelated).unwrap(), b"unrelated data");
+        assert_eq!(fs::read(nested).unwrap(), b"nested data");
+        assert_eq!(
+            state.lock().unwrap().status.health["capture_scan"],
+            serde_json::json!({"skipped": 2, "file": "foreign.etl", "reason": "unrecognized name"})
+        );
         assert_eq!(
             history.range().unwrap().high_water.0,
             if damaged_recorder { 2 } else { 1 }
@@ -2766,7 +2782,8 @@ mod tests {
         let mut session = FileSession::start(&name, &path, 0, 4).unwrap();
         session.retain();
         drop(session);
-        let recovered = files::recover_recorders(&directory).unwrap();
+        let paths = traces(&directory).unwrap();
+        let recovered = files::recover_recorders(&directory, &paths).unwrap();
         assert_eq!(recovered.len(), 1);
         assert_eq!(
             recovered[0].canonicalize().unwrap(),
@@ -2774,7 +2791,7 @@ mod tests {
         );
         let size = fs::metadata(&path).unwrap().len();
         assert!(size > 0);
-        assert_eq!(files::recover_recorders(&directory).unwrap().len(), 0);
+        assert_eq!(files::recover_recorders(&directory, &paths).unwrap().len(), 0);
         assert_eq!(fs::metadata(&path).unwrap().len(), size);
         assert_eq!(
             files::header(&path).unwrap().boot_filetime.to_string(),
@@ -3047,7 +3064,7 @@ fn collect_once(state: &Shared) -> io::Result<()> {
         resume_primary(&history, boot, &primary.active)?;
     } else {
         let mut through = 0;
-        for path in traces(&directory)? {
+        for path in reported_traces(state, &directory)? {
             if path
                 .file_name()
                 .unwrap()

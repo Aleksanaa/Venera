@@ -8,7 +8,11 @@ pub const CAPTURE_RESERVATION: u64 =
 pub const JOURNAL_BYTES: u64 = TOTAL_BYTES - CAPTURE_RESERVATION;
 
 use crate::{history::History, journal::ImportSource, state::State};
-use std::{io, sync::Mutex};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 pub fn capture_loss(
     events: u32,
@@ -111,26 +115,80 @@ impl ImportDiagnostics {
     }
 }
 
+fn group(name: &str) -> Option<usize> {
+    [
+        "kernel-boot.etl",
+        "legacy-boot.etl",
+        "kernel-live-",
+        "legacy-live-",
+        "recorder-v1-",
+    ]
+    .iter()
+    .position(|prefix| name.starts_with(prefix))
+}
+
+#[derive(Default)]
+pub struct SkippedEntries {
+    count: usize,
+    example: Option<(String, &'static str)>,
+}
+
+impl SkippedEntries {
+    fn record(&mut self, name: String, reason: &'static str) {
+        self.count += 1;
+        let example = (name, reason);
+        if self.example.as_ref().is_none_or(|current| &example < current) {
+            self.example = Some(example);
+        }
+    }
+
+    pub fn health(&self) -> Option<serde_json::Value> {
+        self.example.as_ref().map(|(name, reason)| {
+            serde_json::json!({"skipped": self.count, "file": name, "reason": reason})
+        })
+    }
+}
+
+pub fn scan(directory: &Path, skipped: &mut SkippedEntries) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut sizes = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if group(&name).is_none() {
+            skipped.record(name, "unrecognized name");
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        let regular = metadata.is_file();
+        #[cfg(windows)]
+        let regular = {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            regular && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        };
+        if !regular {
+            skipped.record(name, "non-regular entry");
+            continue;
+        }
+        sizes.push((name, metadata.len()));
+        paths.push(entry.path());
+    }
+    validate(&sizes)?;
+    paths.sort();
+    Ok(paths)
+}
+
 pub fn validate(files: &[(String, u64)]) -> std::io::Result<()> {
     let mut counts = [0usize; 5];
     let mut bytes = 0u64;
     for (name, size) in files {
-        let group = if name.starts_with("kernel-boot.etl") {
-            0
-        } else if name.starts_with("legacy-boot.etl") {
-            1
-        } else if name.starts_with("kernel-live-") {
-            2
-        } else if name.starts_with("legacy-live-") {
-            3
-        } else if name.starts_with("recorder-v1-") {
-            4
-        } else {
-            return Err(std::io::Error::new(
+        let group = group(name).ok_or_else(|| {
+            std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Unrecognized capture file",
-            ));
-        };
+            )
+        })?;
         counts[group] += 1;
         let limit = if group == 4 {
             4
@@ -174,6 +232,47 @@ mod tests {
         Arc,
     };
     use venera_debug_protocol::v1::{DecimalU64, HistoryEvent, HistoryRead};
+
+    #[test]
+    fn capture_scan_returns_bounded_traces_alongside_unrelated_entries() {
+        let dir = std::env::temp_dir().join(format!(
+            "venera-capture-scan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let trace = dir.join("kernel-boot.etl.001");
+        let unrelated = dir.join("notes.txt");
+        let folder = dir.join("kernel-live-folder.etl");
+        let nested = folder.join("kernel-live-nested.etl");
+        fs::write(&trace, b"trace").unwrap();
+        fs::write(&unrelated, b"notes").unwrap();
+        fs::create_dir(&folder).unwrap();
+        fs::write(&nested, b"nested trace").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&trace, dir.join("kernel-live-link.etl")).unwrap();
+
+        let mut skipped = SkippedEntries::default();
+        assert_eq!(scan(&dir, &mut skipped).unwrap(), [trace]);
+        assert_eq!(
+            skipped.health().unwrap(),
+            json!({"skipped": if cfg!(unix) { 3 } else { 2 },
+                   "file": "kernel-live-folder.etl", "reason": "non-regular entry"})
+        );
+        assert_eq!(fs::read(unrelated).unwrap(), b"notes");
+        assert_eq!(fs::read(nested).unwrap(), b"nested trace");
+
+        for index in 0..3 {
+            fs::write(dir.join(format!("kernel-live-{index}.etl")), b"trace").unwrap();
+        }
+        let error = scan(&dir, &mut SkippedEntries::default()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        assert_eq!(error.to_string(), "Capture storage is full");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn sealed_source_session_status_and_history() {
