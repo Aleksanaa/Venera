@@ -6,6 +6,8 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+#[path = "follow_output.rs"]
+mod follow_output;
 use venera_debug_protocol::{Filter, Message};
 use windows_sys::Win32::{
     Security::{Authorization::*, *},
@@ -935,7 +937,8 @@ pub fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             (Method::FilterSet, serde_json::json!({"filter":crate::state::wire::filter_v1(&filter)?,"duration_ms":duration_ms.map(|value| value.to_string())}))
         },
         [command] if command == "filter-reset" => (Method::FilterReset, serde_json::json!({})),
-        [command, flag] if command == "logs" && flag == "--follow" => return follow(),
+        [command, flag] if command == "logs" && flag == "--follow" => return follow(false),
+        [command, flag, panel] if command == "logs" && flag == "--follow" && panel == "--panel" => return follow(true),
         _ => return Err("Commands: status --json; forwarding on|off; filter-set --json FILE; filter-reset; logs --follow; install-service; uninstall-service; service; session-helper".into()),
     };
     let (mut client, mut file) = rpc_connect()?;
@@ -951,13 +954,26 @@ pub fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn rpc_connect() -> io::Result<(venera_debug_protocol::client::Client, ClientPipe)> {
+    rpc_connect_with(venera_debug_protocol::client::Client::default())
+}
+
+fn rpc_connect_with(
+    client: venera_debug_protocol::client::Client,
+) -> io::Result<(venera_debug_protocol::client::Client, ClientPipe)> {
     let mut file = connect_pipe()?;
-    let client = rpc_negotiate(&mut file)?;
+    let client = rpc_negotiate_with(&mut file, client)?;
     Ok((client, file))
 }
 
+#[cfg(test)]
 fn rpc_negotiate(file: &mut ClientPipe) -> io::Result<venera_debug_protocol::client::Client> {
-    let mut client = venera_debug_protocol::client::Client::default();
+    rpc_negotiate_with(file, venera_debug_protocol::client::Client::default())
+}
+
+fn rpc_negotiate_with(
+    file: &mut ClientPipe,
+    mut client: venera_debug_protocol::client::Client,
+) -> io::Result<venera_debug_protocol::client::Client> {
     client.connect();
     file.deadline = Some(Instant::now() + RPC_TIMEOUT);
     while client
@@ -1013,17 +1029,25 @@ fn rpc_call(
     }
 }
 
-fn follow() -> Result<(), Box<dyn std::error::Error>> {
+fn follow(panel: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use follow_output::{invalid, FollowPage, PanelOutput};
     use venera_debug_protocol::{
-        client::{HistoryConsumer, Start},
+        client::{Client, HistoryConsumer, Start},
         v1::*,
     };
     let mut consumer = HistoryConsumer::new(Start::Now);
+    let mut panel_output = PanelOutput::default();
     let mut connection = None;
+    let mut recover = false;
     loop {
-        let page = (|| -> io::Result<(HistoryPage, venera_debug_protocol::Filter)> {
+        let page = (|| -> io::Result<_> {
             if connection.is_none() {
-                connection = Some(rpc_connect()?);
+                recover = true;
+                connection = Some(if panel {
+                    rpc_connect_with(Client::with_history_attribution())?
+                } else {
+                    rpc_connect()?
+                });
             }
             let (client, file) = connection.as_mut().unwrap();
             let status: Status = serde_json::from_value(rpc_call(
@@ -1038,18 +1062,14 @@ fn follow() -> Result<(), Box<dyn std::error::Error>> {
                 Method::HistoryRange,
                 serde_json::json!({}),
             )?)?;
-            consumer
-                .range(range, None)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.message))?;
-            let page: HistoryPage = serde_json::from_value(rpc_call(
+            consumer.range(range, None).map_err(invalid)?;
+            let page = rpc_call(
                 client,
                 file,
                 Method::HistoryRead,
                 serde_json::to_value(consumer.read_request())?,
-            )?)?;
-            consumer
-                .page(&page)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.message))?;
+            )?;
+            let page = FollowPage::decode(&mut consumer, client.history_encoding(), page)?;
             Ok((
                 page,
                 crate::state::wire::filter_legacy(status.effective_filter),
@@ -1066,11 +1086,52 @@ fn follow() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         let mut output = io::stdout().lock();
-        consumer.display(&page, &filter, &mut output)?;
+        match page {
+            FollowPage::Attribution(page) => {
+                recover |= !page.missing.is_empty();
+                panel_output.page(&mut consumer, &page, filter, &mut output)?;
+                if recover {
+                    match recover_panel(&mut panel_output, &page.next.journal_id, &mut output) {
+                        Ok(()) => recover = false,
+                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                            return Err(error.into());
+                        }
+                        Err(_) => {
+                            // Keep consuming the live connection while the snapshot read retries.
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
+                    }
+                }
+            }
+            FollowPage::Compatibility(page) => {
+                consumer.display(&page, &filter, &mut output)?;
+            }
+        }
         if consumer.caught_up() {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
+}
+
+fn recover_panel(
+    panel: &mut follow_output::PanelOutput,
+    journal_id: &str,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    use venera_debug_protocol::v1::*;
+    let Some((first, last)) = panel.recovery_bounds(journal_id) else {
+        return Ok(());
+    };
+    // Compatibility reads materialize attribution even after the revision event expires.
+    let (mut client, mut file) = rpc_connect()?;
+    let range: HistoryRange = serde_json::from_value(rpc_call(
+        &mut client, &mut file, Method::HistoryRange, serde_json::json!({}),
+    )?)?;
+    panel.recover(range, (first, last), output, |request| {
+        Ok(serde_json::from_value(rpc_call(
+            &mut client, &mut file, Method::HistoryRead, serde_json::to_value(request)?,
+        )?)?)
+    })
 }
 
 #[cfg(test)]
