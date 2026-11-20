@@ -1,5 +1,5 @@
 //! Draft-07 generation for each receiving endpoint.
-use super::{Discovery, Receiver};
+use super::{AttributionHistoryPage, Discovery, Method as RpcMethod, Receiver};
 use schemars::{generate::SchemaSettings, SchemaGenerator};
 use serde_json::{json, Map, Value};
 
@@ -52,6 +52,13 @@ pub fn document(receiver: Receiver) -> Discovery {
     let mut input = generator(false);
     let mut output = generator(true);
     let mut declarations = super::declarations(receiver, &mut input, &mut output);
+    if let Some(read) = declarations
+        .iter_mut()
+        .find(|method| method.name == RpcMethod::HistoryRead.name())
+    {
+        // The extended result includes the compatibility record shapes.
+        read.result = Some(output.subschema_for::<AttributionHistoryPage>().to_value());
+    }
     let mut schemas = Map::new();
     // Contract-specific names preserve nullable/required differences in shared DTOs.
     collect(&mut input, "Input", &mut schemas);
@@ -153,7 +160,21 @@ Discover the guest's `history.range`, `history.read`, and `history.ack` methods 
 
 Call `history.read` with a `limit` from 1 through 256, an optional `after` cursor, and an optional inclusive `through` position. Omit `after` to start at position 0; omit `through` to use the current high water. Snapshot `high_water` as `through` to page through a bounded backlog. Pages contain `range`, `records`, inclusive `missing` intervals with reason `retention_expired`, and the `next` cursor. Follow `next` for the next page. Each page accounts for positions through `next` using records or missing intervals; page size also follows the JSONL frame limit. At the current high water, an empty page keeps the cursor there. An empty retained set has `oldest` one greater than `high_water`.
 
-Store a page and its continuous progress together, then send `history.ack` with `{"cursor":{"journal_id":"journal-1","position":"42"}}`. A successful acknowledgement echoes the cursor. Each consumer maintains its own progress. Repeated reads preserve record identity and content.
+Store a page and its continuous progress together, then send `history.ack` with `{"cursor":{"journal_id":"journal-1","position":"42"}}`. A successful acknowledgement echoes the cursor. Each consumer maintains its own progress. Repeated reads preserve record identity and archived content.
+
+### Late process attribution
+
+An endpoint that enables attribution revisions includes `"capabilities":["history.attribution"]` in its `endpoint.info` result. The guest selects the revision encoding after the connection's standard endpoint and discovery exchange, with both endpoints advertising the capability. A reconnect exchanges capabilities again. The same `history.read` method serves both encodings.
+
+An `attribution_revision` event occupies its own durable position. Its `target` is the cursor of an earlier log in the same journal and boot. Its `attribution` contains `process` and `ancestors`, in nearest-parent-first order, with a known creation FILETIME for each instance. The array represents the complete currently determined ancestor snapshot, including an empty snapshot. Example event at position `43`:
+
+```json
+{"type":"attribution_revision","target":{"journal_id":"journal-1","position":"42"},"attribution":{"process":{"pid":840,"start_time_filetime":"133700000000004200","exe_path":"C:\\app.exe"},"ancestors":[]}}
+```
+
+The original entry remains the source for raw export. For the effective view, replace the target log's process and ancestor snapshot with the revision at the greatest applied position. The revision cursor provides replay identity; applying the same revision again preserves the effective view. Commit the projection and cursor together before acknowledging. Treat a revision targeting an expired log as progress; any retention gap remains part of the history. To recover current attribution after an older revision expires, the guest can deliver the snapshot for a retained target as a revision at a newer durable position, using the same event shape.
+
+Compatibility pages carry self-contained logs with the current known attribution from the server's read view. At a revision-only position the page carries the existing `gap` envelope with reason `attribution_revision`, count `"0"`, and null `first_seq` and `last_seq`. This zero-count position marker provides contiguous coverage through `next`, including pages made entirely of markers. Consumers count it as cursor progress; missing intervals and ordinary gaps report retention and capture loss separately. A compatibility client that already read the target can obtain its current attribution by reading the target again. The guest applies the frame budget to the selected encoding, including the size of any attribution snapshot added to a log.
 
 ## System Report Messages
 

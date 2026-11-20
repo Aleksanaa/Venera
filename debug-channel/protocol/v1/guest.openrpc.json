@@ -158,7 +158,7 @@
       "result": {
         "name": "result",
         "schema": {
-          "$ref": "#/components/schemas/OutputHistoryPage"
+          "$ref": "#/components/schemas/OutputAttributionHistoryPage"
         }
       }
     },
@@ -391,6 +391,121 @@
           }
         ]
       },
+      "OutputAttributionHistoryEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "record": {
+                "$ref": "#/components/schemas/OutputLogRecord"
+              },
+              "type": {
+                "const": "log",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "record"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "gap": {
+                "$ref": "#/components/schemas/OutputGap"
+              },
+              "type": {
+                "const": "gap",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "gap"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attribution": {
+                "$ref": "#/components/schemas/OutputHistoryAttribution"
+              },
+              "target": {
+                "$ref": "#/components/schemas/OutputHistoryCursor"
+              },
+              "type": {
+                "const": "attribution_revision",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "target",
+              "attribution"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "OutputAttributionHistoryPage": {
+        "properties": {
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/OutputHistoryMissing"
+            },
+            "type": "array"
+          },
+          "next": {
+            "$ref": "#/components/schemas/OutputHistoryCursor"
+          },
+          "range": {
+            "$ref": "#/components/schemas/OutputHistoryRange"
+          },
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/OutputAttributionHistoryRecord"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "range",
+          "records",
+          "missing",
+          "next"
+        ],
+        "type": "object"
+      },
+      "OutputAttributionHistoryRecord": {
+        "properties": {
+          "boot_id": {
+            "type": "string"
+          },
+          "cursor": {
+            "$ref": "#/components/schemas/OutputHistoryCursor"
+          },
+          "event": {
+            "$ref": "#/components/schemas/OutputAttributionHistoryEvent"
+          },
+          "recorded_at_ms": {
+            "$ref": "#/components/schemas/OutputDecimalU64"
+          },
+          "startup": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cursor",
+          "boot_id",
+          "recorded_at_ms",
+          "startup",
+          "event"
+        ],
+        "type": "object"
+      },
       "OutputContentDescriptor": {
         "properties": {
           "name": {
@@ -471,6 +586,12 @@
       },
       "OutputEndpointInfo": {
         "properties": {
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "protocol_version": {
             "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$(?![\\s\\S])",
             "type": "string"
@@ -689,6 +810,25 @@
         },
         "required": [
           "cursor"
+        ],
+        "type": "object"
+      },
+      "OutputHistoryAttribution": {
+        "additionalProperties": false,
+        "properties": {
+          "ancestors": {
+            "items": {
+              "$ref": "#/components/schemas/OutputProcessIdentity"
+            },
+            "type": "array"
+          },
+          "process": {
+            "$ref": "#/components/schemas/OutputProcessIdentity"
+          }
+        },
+        "required": [
+          "process",
+          "ancestors"
         ],
         "type": "object"
       },

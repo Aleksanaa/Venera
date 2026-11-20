@@ -10,6 +10,8 @@ pub enum EndpointRole {
     Guest,
 }
 
+pub const HISTORY_ATTRIBUTION_CAPABILITY: &str = "history.attribution";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct EndpointInfo {
@@ -18,6 +20,8 @@ pub struct EndpointInfo {
     #[serde(deserialize_with = "stable_version")]
     #[cfg_attr(feature = "schema", schemars(schema_with = "version_schema"))]
     pub protocol_version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 impl EndpointInfo {
     pub fn new(role: EndpointRole, software_version: impl Into<String>) -> Self {
@@ -25,7 +29,13 @@ impl EndpointInfo {
             role,
             software_version: software_version.into(),
             protocol_version: super::PROTOCOL_VERSION.into(),
+            capabilities: Vec::new(),
         }
+    }
+    pub fn with_history_attribution(mut self) -> Self {
+        self.capabilities
+            .push(HISTORY_ATTRIBUTION_CAPABILITY.into());
+        self
     }
 }
 

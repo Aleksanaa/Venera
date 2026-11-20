@@ -74,6 +74,7 @@ pub struct Reply {
 #[derive(Default)]
 pub struct Client {
     negotiation: Negotiation,
+    history_attribution: bool,
     framer: JsonlFramer,
     serial: u64,
     calls: BTreeMap<String, Method>,
@@ -110,6 +111,28 @@ pub fn validate_result(method: Method, value: &Value) -> RpcResult<()> {
 }
 
 impl Client {
+    /// Opt in when the caller can consume attribution pages and commit their projections.
+    pub fn with_history_attribution() -> Self {
+        Self {
+            history_attribution: true,
+            ..Self::default()
+        }
+    }
+    fn endpoint_info(&self) -> EndpointInfo {
+        let info = EndpointInfo::new(EndpointRole::Host, env!("CARGO_PKG_VERSION"));
+        if self.history_attribution {
+            info.with_history_attribution()
+        } else {
+            info
+        }
+    }
+    pub fn history_encoding(&self) -> HistoryEncoding {
+        if self.negotiation.require(Method::HistoryRead).is_ok() {
+            HistoryEncoding::negotiate(&self.endpoint_info(), self.peer())
+        } else {
+            HistoryEncoding::Compatibility
+        }
+    }
     pub fn connect(&mut self) {
         self.disconnect();
         self.negotiation.peer.connect();
@@ -245,7 +268,15 @@ impl Client {
                             continue;
                         };
                         let result = result.and_then(|value| {
-                            validate_result(method, &value)?;
+                            if method == Method::HistoryRead
+                                && self.history_encoding() == HistoryEncoding::Attribution
+                            {
+                                serde_json::from_value::<AttributionHistoryPage>(value.clone())
+                                    .map_err(|_| RpcError::new(-32004, "Invalid guest result"))?
+                                    .validate_revisions()?;
+                            } else {
+                                validate_result(method, &value)?;
+                            }
                             Ok(value)
                         });
                         if matches!(method, Method::EndpointInfo | Method::Discover) {
@@ -255,10 +286,7 @@ impl Client {
                     }
                     PacketItem::Request(request) => {
                         let result = match request.incoming {
-                            Incoming::EndpointInfo { .. } => Ok(json!(EndpointInfo::new(
-                                EndpointRole::Host,
-                                env!("CARGO_PKG_VERSION")
-                            ))),
+                            Incoming::EndpointInfo { .. } => Ok(json!(self.endpoint_info())),
                             Incoming::Discover { .. } => Ok(serde_json::from_str(include_str!(
                                 "../v1/host.openrpc.json"
                             ))
@@ -360,6 +388,9 @@ impl HistoryConsumer {
                     value
                 }
                 HistoryEvent::Gap { gap } => {
+                    if gap.is_history_attribution_marker() {
+                        continue;
+                    }
                     let mut value = serde_json::to_value(gap)?;
                     value["type"] = json!("gap");
                     value
@@ -423,24 +454,48 @@ impl HistoryConsumer {
             .is_some_and(|cursor| cursor.position.0 == self.through)
     }
     pub fn page(&mut self, page: &HistoryPage) -> RpcResult<()> {
+        self.check_page(
+            &page.range,
+            &page.next,
+            page.records.iter().map(|r| &r.cursor),
+            &page.missing,
+        )
+    }
+    /// Validate a negotiated page before committing revisions and continuous progress.
+    pub fn attribution_page(&mut self, page: &AttributionHistoryPage) -> RpcResult<()> {
+        page.validate_revisions()?;
+        self.check_page(
+            &page.range,
+            &page.next,
+            page.records.iter().map(|r| &r.cursor),
+            &page.missing,
+        )
+    }
+    fn check_page<'a>(
+        &mut self,
+        range: &HistoryRange,
+        next: &HistoryCursor,
+        records: impl Iterator<Item = &'a HistoryCursor>,
+        missing: &[HistoryMissing],
+    ) -> RpcResult<()> {
         let invalid = || RpcError::new(-32004, "History page does not cover the requested range");
         let cursor = self.cursor.as_ref().ok_or_else(invalid)?;
-        if page.range.journal_id != cursor.journal_id
-            || page.next.journal_id != cursor.journal_id
-            || page.next.position.0 > self.through
-            || page.next.position < cursor.position
-            || page.range.high_water < page.next.position
+        if range.journal_id != cursor.journal_id
+            || next.journal_id != cursor.journal_id
+            || next.position.0 > self.through
+            || next.position < cursor.position
+            || range.high_water < next.position
         {
             return Err(invalid());
         }
         let mut intervals = Vec::new();
-        for record in &page.records {
-            if record.cursor.journal_id != cursor.journal_id {
+        for record in records {
+            if record.journal_id != cursor.journal_id {
                 return Err(invalid());
             }
-            intervals.push((record.cursor.position.0, record.cursor.position.0));
+            intervals.push((record.position.0, record.position.0));
         }
-        for missing in &page.missing {
+        for missing in missing {
             if missing.first > missing.last || missing.reason != "retention_expired" {
                 return Err(invalid());
             }
@@ -449,15 +504,15 @@ impl HistoryConsumer {
         intervals.sort_unstable();
         let mut last = cursor.position.0;
         for (first, end) in intervals {
-            if last.checked_add(1) != Some(first) || end > page.next.position.0 {
+            if last.checked_add(1) != Some(first) || end > next.position.0 {
                 return Err(invalid());
             }
             last = end;
         }
-        if last != page.next.position.0 || (!self.caught_up() && last == cursor.position.0) {
+        if last != next.position.0 || (!self.caught_up() && last == cursor.position.0) {
             return Err(invalid());
         }
-        self.page = Some(page.next.clone());
+        self.page = Some(next.clone());
         Ok(())
     }
     /// Called after the application commits or outputs the accepted page.

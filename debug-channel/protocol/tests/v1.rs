@@ -20,6 +20,7 @@ fn shared_codec_samples() {
             "SystemInfo" => accepts::<SystemInfo>(value),
             "HistoryCursor" => accepts::<HistoryCursor>(value),
             "HistoryRecord" => accepts::<HistoryRecord>(value),
+            "AttributionHistoryRecord" => accepts::<AttributionHistoryRecord>(value),
             "HistoryRead" => accepts::<HistoryRead>(value),
             "HistoryPage" => accepts::<HistoryPage>(value),
             "HistoryRange" => accepts::<HistoryRange>(value),
