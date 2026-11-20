@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine_events::Decoder;
 pub(super) mod files;
 use windows_sys::{core::GUID, Win32::System::Diagnostics::Etw::*};
 pub(super) const PROVIDER: GUID = GUID::from_u128(0x13976d09_a327_438c_950b_7f03192815c7);
@@ -210,7 +211,7 @@ unsafe fn process_event(record: &EVENT_RECORD, state: &Shared) -> bool {
 unsafe extern "system" fn event(record: *mut EVENT_RECORD) {
     let record = &*record;
     let id = record.EventHeader.ProviderId;
-    let state = &*(record.UserContext as *const Shared);
+    let (state, decoder) = &mut *(record.UserContext as *mut (Shared, Decoder));
     if same_guid(id, PROCESS_PROVIDER) {
         if !process_event(record, state) {
             let mut state = state.lock().unwrap();
@@ -223,7 +224,7 @@ unsafe extern "system" fn event(record: *mut EVENT_RECORD) {
         return;
     }
     let boot = state.lock().unwrap().boot_id.parse().unwrap_or(0);
-    match decode_record(record, boot) {
+    match decode_record_from(record, boot, recorder_message(), decoder) {
         Ok(Some(capture)) => accept(state, capture),
         Ok(None) => (),
         Err(error) => {
@@ -238,14 +239,16 @@ unsafe extern "system" fn event(record: *mut EVENT_RECORD) {
     }
 }
 
+#[cfg(test)]
 pub unsafe fn decode_record(record: &EVENT_RECORD, boot: u64) -> io::Result<Option<Capture>> {
-    decode_record_from(record, boot, recorder_message())
+    decode_record_from(record, boot, recorder_message(), &mut Decoder::default())
 }
 
 pub(super) unsafe fn decode_record_from(
     record: &EVENT_RECORD,
     boot: u64,
     recorder_guid: GUID,
+    decoder: &mut Decoder,
 ) -> io::Result<Option<Capture>> {
     let provider = record.EventHeader.ProviderId;
     let modern = same_guid(provider, KERNEL_PROVIDER);
@@ -268,16 +271,30 @@ pub(super) unsafe fn decode_record_from(
         .then_some(record.EventHeader.ThreadId);
     let observed_filetime = clock::filetime();
     let context_key = process_start_key(record)?;
-    if modern && matches!(record.EventHeader.EventDescriptor.Id, 5 | 6) {
+    if modern && matches!(record.EventHeader.EventDescriptor.Id, 5..=10) {
         let descriptor = record.EventHeader.EventDescriptor;
-        let decoded =
-            crate::user_events::decode(bytes, descriptor.Id, descriptor.Version, descriptor.Level)?;
         let pid = pid.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "User-mode event process is missing",
             )
         })?;
+        let decoded = if descriptor.Id <= 6 {
+            crate::user_events::decode(bytes, descriptor.Id, descriptor.Version, descriptor.Level)?
+        } else {
+            let Some(event) = decoder.decode(
+                bytes,
+                boot,
+                descriptor.Id,
+                descriptor.Version,
+                descriptor.Level,
+                pid,
+                tid.unwrap_or_default(),
+            )? else {
+                return Ok(None);
+            };
+            event
+        };
         let mut structured = decoded.structured(boot, pid);
         use venera_debug_protocol::v1::{DecimalU64, EventValue};
         structured.fields.insert(
@@ -489,7 +506,8 @@ fn collect_once(state: Shared) {
         logfile.Anonymous1.ProcessTraceMode =
             PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
         logfile.Anonymous2.EventRecordCallback = Some(event);
-        logfile.Context = (&state as *const Shared).cast_mut().cast();
+        let mut context = (state.clone(), Decoder::default());
+        logfile.Context = (&mut context as *mut (Shared, Decoder)).cast();
         let trace = OpenTraceW(&mut logfile);
         if trace.Value == u64::MAX {
             {

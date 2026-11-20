@@ -121,6 +121,7 @@ fn finish_source(
     path: &Path,
     source: ImportSource,
     diagnostic: Option<(String, Option<u64>)>,
+    graphics: Option<crate::engine_events::GraphicsUpdate>,
 ) -> io::Result<()> {
     let boot = state.lock().unwrap().boot_id.parse().unwrap_or(0);
     let name = path.file_name().unwrap().to_string_lossy();
@@ -130,7 +131,7 @@ fn finish_source(
         }),
         None => serde_json::json!("exported"),
     });
-    history.complete_import(source, diagnostic, boot, now_ms())?;
+    history.complete_graphics_import(source, diagnostic, boot, now_ms(), graphics)?;
     if let Some(result) = recorder {
         state.lock().unwrap().status.health["recorder"] = result;
     }
@@ -321,6 +322,16 @@ fn import_file(
         let mut last = receipt.through;
         let mut invalid_events = 0u64;
         let mut missing_process = None;
+        // The primary ETW stream uses one checkpoint per boot. Keep its predecessor
+        // checkpoint unchanged until this source completes: replay its entire ETL
+        // to rebuild state, and use the receipt only to skip committed output.
+        let graphics = name.starts_with("kernel-");
+        let mut decoder = if graphics {
+            let bytes = history.graphics_fragments(source.boot_filetime)?;
+            crate::engine_events::Decoder::restore(source.boot_filetime, &bytes)?
+        } else {
+            crate::engine_events::Decoder::default()
+        };
         use windows_sys::Win32::System::Diagnostics::Etw::EVENT_RECORD;
         let mut visit = |event: &EVENT_RECORD, boot, ordinal| {
             if stopped() {
@@ -333,7 +344,7 @@ fn import_file(
             if unsafe { etw::process_lifecycle(event, boot) }.is_err() {
                 invalid_events += 1;
             }
-            let decoded = match unsafe { etw::decode_record_from(event, boot, recorder_guid) } {
+            let decoded = match unsafe { etw::decode_record_from(event, boot, recorder_guid, &mut decoder) } {
                 Ok(capture) => capture,
                 Err(_) => {
                     invalid_events += 1;
@@ -413,7 +424,7 @@ fn import_file(
                     capture_storage::capture_loss(
                         summary.events_lost,
                         summary.buffers_lost,
-                        invalid_events,
+                        invalid_events + if graphics { decoder.evicted() } else { decoder.incomplete() },
                         capacity,
                         recovered,
                     ),
@@ -436,7 +447,14 @@ fn import_file(
                 "error": "Process history unavailable for captured record", "pid": pid, "file": name,
             });
         }
-        finish_source(state, history, path, source.clone(), diagnostic)?;
+        finish_source(
+            state,
+            history,
+            path,
+            source.clone(),
+            diagnostic,
+            graphics.then(|| decoder.checkpoint(source.boot_filetime)),
+        )?;
     }
     // The file identity is rechecked after the owner has confirmed durable completion.
     if !same_file(&source, path)? {
@@ -459,6 +477,7 @@ fn import_sealed(
     let paths = traces(directory)?;
     let mut present = Vec::new();
     let mut trusted = true;
+    let mut graphics_order_known = true;
     let known = history.import_sources()?;
     let recovered = if paths.iter().any(|path| {
         path.file_name()
@@ -478,10 +497,12 @@ fn import_sealed(
         Some(Vec::new())
     };
     for path in paths {
+        let graphics = path.file_name().unwrap().to_string_lossy().starts_with("kernel-");
         let identity = match files::file_identity(&path) {
             Ok(identity) => identity,
             Err(error) => {
                 trusted = false;
+                graphics_order_known &= !graphics;
                 state.lock().unwrap().status.health["capture_inventory"] =
                     serde_json::json!({"error":error.to_string()});
                 continue;
@@ -524,6 +545,7 @@ fn import_sealed(
             }
             Err(error) => {
                 trusted = false;
+                graphics_order_known &= !graphics;
                 state.lock().unwrap().status.health["capture_inventory"] =
                     serde_json::json!({"error":error.to_string(),"file":path});
             }
@@ -566,13 +588,28 @@ fn import_sealed(
             }
         }
     }
+    let mut deferred_graphics = std::collections::BTreeSet::new();
     for (path, source, failure) in inventory {
-        if pending_context.contains(&path) {
+        let graphics = path.file_name().unwrap().to_string_lossy().starts_with("kernel-");
+        let source_boot = source.boot_filetime;
+        if graphics
+            && (!graphics_order_known
+                || pending_context.contains(&path)
+                || deferred_graphics.contains(&source_boot))
+        {
+            deferred_graphics.insert(source_boot);
             continue;
         }
         let result = if let Some(reason) = failure {
             (|| {
-                finish_source(state, history, &path, source.clone(), Some((reason, None)))?;
+                finish_source(
+                    state,
+                    history,
+                    &path,
+                    source.clone(),
+                    Some((reason, None)),
+                    None,
+                )?;
                 if !same_file(&source, &path)? {
                     return Err(io::ErrorKind::InvalidData.into());
                 }
@@ -592,6 +629,9 @@ fn import_sealed(
             import_file(state, history, &path, source, interrupted_export, wait)
         };
         if let Err(error) = result {
+            if graphics {
+                deferred_graphics.insert(source_boot);
+            }
             let name = path.file_name().unwrap().to_string_lossy();
             let key = if name.starts_with("recorder-") {
                 "recorder"
@@ -604,6 +644,16 @@ fn import_sealed(
                 serde_json::json!({"error":error.to_string(), "file":name});
         }
     }
+    if trusted {
+        let boot = state.lock().unwrap().boot_id.parse().unwrap_or(0);
+        let primary_active = sessions.iter().any(|session| session.prefix == "kernel-live-");
+        for pending_boot in history.graphics_boots()? {
+            if !(pending_boot == boot && primary_active) && !deferred_graphics.contains(&pending_boot)
+            {
+                history.finish_graphics_boot(pending_boot, now_ms())?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -611,6 +661,66 @@ fn import_sealed(
 mod tests {
     use super::*;
     use windows_sys::Win32::System::Diagnostics::Etw::*;
+
+    #[test]
+    #[ignore = "Uses a local elevated Windows ETW file session"]
+    fn graphics_fragments_survive_etl_rotation_and_history_reopen() {
+        use venera_debug_protocol::v1::{HistoryEvent, HistoryRead};
+        let dir = std::env::temp_dir().join(format!("venera-graphics-{}", clock::filetime()));
+        fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("kernel-live-first.etl");
+        let second = dir.join("kernel-live-second.etl");
+        let mut session = FileSession::start(&format!("Venera graphics {}", clock::filetime()), &first, 0, 32).unwrap();
+        let mut provider = 0;
+        unsafe {
+            assert_eq!(EventRegister(&etw::KERNEL_PROVIDER, None, std::ptr::null(), &mut provider), 0);
+        }
+        session.enable(&etw::KERNEL_PROVIDER, 5, 1).unwrap();
+        let time = clock::filetime();
+        let emit = |index: u32, length, byte| {
+            let mut payload = Vec::new();
+            for value in [time, time, time, 1] {
+                payload.extend(value.to_le_bytes());
+            }
+            payload.extend(index.to_le_bytes());
+            payload.extend(2u32.to_le_bytes());
+            payload.extend(b"warn\0default\0");
+            payload.extend(vec![byte; length]);
+            let data = EVENT_DATA_DESCRIPTOR { Ptr: payload.as_ptr() as u64, Size: payload.len() as u32, ..Default::default() };
+            let descriptor = EVENT_DESCRIPTOR { Id: 7, Version: 1, Level: 4, Keyword: 1, ..Default::default() };
+            unsafe { assert_eq!(EventWrite(provider, &descriptor, 1, &data), 0); }
+        };
+        emit(0, 61_440, b'a');
+        session.rotate(&second).unwrap();
+        emit(1, 26_560, b'b');
+        session.stop().unwrap();
+        unsafe { assert_eq!(EventUnregister(provider), 0); }
+        let left = files::header(&first).unwrap();
+        let right = files::header(&second).unwrap();
+        let state = Arc::new(Mutex::new(State::new("graphics-rotation".into(), true)));
+        state.lock().unwrap().boot_id = left.boot_filetime.to_string();
+        let open = || {
+            let journal = crate::journal::Journal::open(dir.join("history"), "graphics-rotation", Default::default()).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let (history, owner) = crate::history::History::start(journal, stop.clone()).unwrap();
+            (history, owner, stop)
+        };
+        let (history, owner, stop) = open();
+        history.discover_imports(vec![left.clone(), right.clone()]).unwrap();
+        import_file(&state, &history, &first, left, false, false).unwrap();
+        assert!(!first.exists());
+        crate::history::finish(Vec::new(), &stop, owner).unwrap();
+        let (history, owner, stop) = open();
+        import_file(&state, &history, &second, right, false, false).unwrap();
+        crate::history::finish(Vec::new(), &stop, owner).unwrap();
+        let (history, owner, stop) = open();
+        let page = history.read(HistoryRead { after: None, through: None, limit: 10 }).unwrap();
+        assert_eq!(page.records.len(), 1);
+        let HistoryEvent::Log { record } = &page.records[0].event else { panic!("graphics log expected") };
+        assert_eq!(record.text, "a".repeat(61_440) + &"b".repeat(26_560));
+        crate::history::finish(Vec::new(), &stop, owner).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn replay_source(original: &Path, directory: &Path) -> PathBuf {
         let replay = new_path(directory, "kernel-live-").unwrap();
@@ -2022,6 +2132,13 @@ mod tests {
         }];
         import_sealed(&state, &history, &capture, &sessions).unwrap();
         assert!(first.exists());
+        assert!(second.exists());
+        assert!(history_records(&history).is_empty());
+        // The scanner holds later kernel traces behind an unreadable predecessor.
+        // Exercise reversed lifecycle arrival explicitly at the sealed-file boundary.
+        let source = files::header(&second).unwrap();
+        checkpoint_file(&history, &second, &source).unwrap();
+        import_file(&state, &history, &second, source, false, false).unwrap();
         assert!(!second.exists());
         stop.store(true, Ordering::Release);
         owner.join().unwrap().unwrap();

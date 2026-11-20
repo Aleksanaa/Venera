@@ -554,8 +554,10 @@ pub fn recover_recorders(directory: &Path) -> io::Result<Vec<std::path::PathBuf>
 }
 
 pub fn inspect(path: &Path, output: &mut dyn Write) -> io::Result<()> {
+    let mut decoder = Decoder::default();
+    let guid = recorder_message();
     let summary = read(path, &mut |record, boot, ordinal| {
-        let capture = unsafe { decode_record(record, boot) };
+        let capture = unsafe { decode_record_from(record, boot, guid, &mut decoder) };
         let provider = guid_text(record.EventHeader.ProviderId);
         let mut value = serde_json::json!({"type":"event", "ordinal":ordinal.to_string(), "provider":provider,
             "id":record.EventHeader.EventDescriptor.Id,"version":record.EventHeader.EventDescriptor.Version,
