@@ -19,6 +19,8 @@
         ln -s ${pkgs.wine64Packages.minimal}/bin/widl $out/bin/widl
       '';
     in {
+      packages.${system}.venera-debug-host = pkgs.callPackage ./debug-channel/package.nix { };
+
       devShells.${system}.default = pkgs.mkShell {
         packages = with pkgs; [
           cmake ninja pkg-config nlohmann_json

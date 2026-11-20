@@ -23,9 +23,14 @@ impl Drop for Server {
 }
 impl Server {
     fn start(populate: bool) -> Self {
+        Self::launch(populate, false)
+    }
+    fn launch(populate: bool, installed: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("index.html"), "<h1>History</h1>").unwrap();
-        std::fs::write(dir.path().join("app.js"), "window.historyReady=true;").unwrap();
+        let assets = dir.path().join("share/venera/web");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join("index.html"), "<h1>History</h1>").unwrap();
+        std::fs::write(assets.join("app.js"), "window.historyReady=true;").unwrap();
         if populate {
             let db = Connection::open(dir.path().join("history.db")).unwrap();
             db.execute_batch("PRAGMA auto_vacuum=FULL; CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,received_at TEXT NOT NULL,message TEXT NOT NULL)").unwrap();
@@ -56,12 +61,23 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        let mut command = Command::new(env!("CARGO_BIN_EXE_venera-debug-host"));
+        let binary = env!("CARGO_BIN_EXE_venera-debug-host");
+        let mut command = if installed {
+            let bin_dir = dir.path().join("bin");
+            std::fs::create_dir(&bin_dir).unwrap();
+            let path = bin_dir.join("venera-debug-host");
+            std::fs::copy(binary, &path).unwrap();
+            Command::new(path)
+        } else {
+            Command::new(binary)
+        };
+        command.arg("serve");
+        if !installed {
+            command.arg("--assets").arg(assets);
+        }
         command
-            .args(["serve", "--database"])
+            .arg("--database")
             .arg(dir.path().join("history.db"))
-            .arg("--assets")
-            .arg(dir.path())
             .args(["--listen", &addr.to_string()])
             .args(["--max-bytes", "1048576", "--cid", "42"])
             .arg("--control")
@@ -151,6 +167,12 @@ impl Server {
             .map(|v| v["id"].as_str().unwrap().to_owned())
             .collect()
     }
+}
+
+#[test]
+fn installed_host_serves_its_bundled_dashboard() {
+    let server = Server::launch(false, true);
+    assert_eq!(server.get("/"), (200, "<h1>History</h1>".into()));
 }
 
 #[test]

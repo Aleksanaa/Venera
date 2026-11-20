@@ -4,23 +4,24 @@ The host service connects to a Windows guest over VirtIO sockets, saving guest l
 
 ## Build and Run
 
-```sh
-nix develop -c scripts/build workbench
-```
-
-Configure the VM's VirtIO socket device with a guest CID, then start the host service from the repository root. This example uses CID 73 and the default service port, 49152:
+From the repository, list the guests visible on the local libvirt system connection, then start collecting from one by name:
 
 ```sh
-build/debug-channel/release/venera-debug-host serve \
-  --cid 73 --port 49152 \
-  --control /run/user/1000/venera-control.sock \
-  --database /home/user/.local/share/venera/history.db \
-  --max-bytes 1073741824 \
-  --assets debug-channel/web/dist \
-  --listen 127.0.0.1:8787
+nix run .#venera-debug-host -- list
+nix run .#venera-debug-host -- serve Windows10
 ```
 
-Create the history directory in the example first, and replace the paths with actual paths for the current user. Open <http://127.0.0.1:8787> to browse history. `serve` continuously reconnects to the guest and can be managed by `systemd --user`. Each connection negotiates endpoint capabilities and retrieves the effective guest state. Use `--no-web` in place of `--assets` and `--listen` for a collection deployment.
+Open <http://127.0.0.1:8787>. `list` shows each guest’s name, state, and live vsock CID when available. `serve 73` selects the guest named `73`. To connect by CID directly, choose the history database explicitly:
+
+```sh
+venera-debug-host serve --cid 73 --database ./history.db
+```
+
+When serving by name, the host tracks the domain UUID and refreshes its live CID whenever the control or history stream reconnects. The default database is `$XDG_DATA_HOME/venera/<domain-uuid>/history.db` (`XDG_DATA_HOME` defaults to `~/.local/share`). Renaming the guest preserves its archive.
+
+The service defaults to a 1 GiB history budget, guest port `49152`, and control socket `$XDG_RUNTIME_DIR/venera/control.sock` (runtime directory fallback: `/run/user/<uid>`). The host creates the directories for its default paths. Use `--database`, `--max-bytes`, `--port`, `--control`, and `--listen` to customize a deployment. Give concurrent services separate control sockets and listen addresses.
+
+The dashboard loads from `../share/venera/web` relative to the executable directory, or from `debug-channel/web/dist` for a source build (`nix develop -c scripts/build workbench`). Use `--assets DIR` to choose another frontend or `--no-web` for collection alone.
 
 `--max-bytes` is the total capacity budget for the history database and SQLite workspace, with a minimum of 73784 bytes. Transaction workspace is reserved within it, and history data uses the remaining capacity. History is evicted in batches starting with the oldest records, and database pages are reclaimed on commit. Archive reads adapt their page size to the available capacity and resume from committed progress. Connection status includes archive progress and diagnostic-write status.
 
@@ -80,11 +81,11 @@ Allocate distinct CIDs across running guests and match the host's `--cid` to the
 ## Queries and Filters
 
 ```sh
-venera-debug-host status --control /run/user/1000/venera-control.sock
-venera-debug-host filter-set --control /run/user/1000/venera-control.sock \
+venera-debug-host status
+venera-debug-host filter-set \
   --filter '{"components":["dxvk"],"levels":["warning","error"],"targets":[]}' \
   --duration-ms 60000
-venera-debug-host filter-reset --control /run/user/1000/venera-control.sock
+venera-debug-host filter-reset
 ```
 
 Commands submit requests to the continuously running background process, which forwards them to the guest and returns the corresponding response. The effective filter, revision, expiration time, and forwarding state in the response come from the guest. `status` queries the current effective state.
@@ -114,26 +115,7 @@ Export produces one JSON object per line, containing the host reception UTC time
 
 The workbench provides history browsing, live following, full-text search, and record details. Filter history by component, message level, program path or PID, and reception-time range, then export matching records as JSONL. Record details show complete text, program information, and the original record.
 
-Build the host program and frontend:
-
-```sh
-# Run from the repository root
-nix develop -c scripts/build workbench
-```
-
-Start the workbench, then open <http://127.0.0.1:8787> in a browser:
-
-```sh
-build/debug-channel/release/venera-debug-host serve \
-  --cid 73 --port 49152 \
-  --database .harness/vm-debug/live.sqlite \
-  --control .harness/vm-debug/host-control.sock \
-  --max-bytes 1073741824 \
-  --assets debug-channel/web/dist \
-  --listen 127.0.0.1:8787
-```
-
-This is an alternative launch example for the same service. Choose the CID and history paths for your deployment and create the parent directories first. Collection and the browser workbench share one service lifecycle and database. Enabling live following appends new records to the list; loading earlier records lets you browse backward. Page filters explore saved records, while debug channel settings in the Windows control panel manage collection and forwarding. The browser language selector offers System, English, and Simplified Chinese, applies changes immediately, and remembers the preference.
+Collection and the browser workbench share one service lifecycle and database. Enabling live following appends new records to the list; loading earlier records lets you browse backward. Page filters explore saved records, while debug channel settings in the Windows control panel manage collection and forwarding. The browser language selector offers System, English, and Simplified Chinese, applies changes immediately, and remembers the preference.
 
 Expand the toolbar's filter panel to adjust conditions alongside the event list. Header dividers resize columns, and the divider between the list and details resizes the details area; dividers also support arrow-key operation. The “Overview,” “Metadata,” and “Raw record” detail tabs show text and program information, complete fields, and copyable original content, respectively, with scrollable content areas.
 
