@@ -30,7 +30,8 @@ stamp="$(git -C "$mesa" rev-parse HEAD) $options"
 for p in "$root"/icd/patches/*.patch; do
     stamp="$stamp $(sha256sum "$p" | cut -d' ' -f1)"
 done
-if [ ! -f "$src/.stamp" ] || [ "$(cat "$src/.stamp")" != "$stamp" ]; then
+header="$root/patches/debug-output/engine_etw.h"
+if ! cmp -s "$header" "$src/src/util/engine_etw.h" || [ ! -f "$src/.stamp" ] || [ "$(cat "$src/.stamp")" != "$stamp" ]; then
     rm -rf "$src" "$out/meson" "$out/meson32"
     mkdir -p "$src"
     git -C "$mesa" archive HEAD | tar -x -C "$src"
@@ -38,6 +39,7 @@ if [ ! -f "$src/.stamp" ] || [ "$(cat "$src/.stamp")" != "$stamp" ]; then
         echo "icd: applying $(basename "$p")"
         (cd "$src" && patch -p1 --forward --quiet < "$p")
     done
+    cp "$header" "$src/src/util/engine_etw.h"
     echo "$stamp" > "$src/.stamp"
 fi
 

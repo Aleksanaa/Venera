@@ -1,35 +1,38 @@
-Subject: util: identify Mesa messages in Windows debug output
-
 --- a/src/util/os_misc.c
 +++ b/src/util/os_misc.c
-@@ -42,6 +42,7 @@
+@@ -40,6 +40,7 @@
+ #if DETECT_OS_WINDOWS
+ 
  #include <windows.h>
++#include "engine_etw.h"
  #include <stdio.h>
  #include <stdlib.h>
-+#include <string.h>
  
- #else
- 
-@@ -115,7 +116,21 @@
+@@ -115,7 +116,7 @@
     }
  
  #if DETECT_OS_WINDOWS
 -   OutputDebugStringA(message);
-+   if (strncmp(message, "MESA: ", 6) == 0 ||
-+       strncmp(message, "MESA-VIRTIO: ", 13) == 0) {
-+      OutputDebugStringA(message);
-+   } else {
-+      size_t length = strlen(message);
-+      char *debug_message = malloc(length + sizeof("MESA: "));
-+      if (debug_message) {
-+         memcpy(debug_message, "MESA: ", 6);
-+         memcpy(debug_message + 6, message, length + 1);
-+         OutputDebugStringA(debug_message);
-+         free(debug_message);
-+      } else {
-+         OutputDebugStringA(message);
-+      }
-+   }
++   venera_engine_text(VENERA_MESA_OS, "unknown", "default", message, strlen(message));
  #if !defined(_GAMING_XBOX)
     if(GetConsoleWindow() && !IsDebuggerPresent()) {
        fflush(stdout);
+--- a/src/util/log.c
++++ b/src/util/log.c
+@@ -42,6 +42,7 @@
+ 
+ #if DETECT_OS_WINDOWS
+ #include <windows.h>
++#include "engine_etw.h"
+ #endif
+ 
+ enum mesa_log_control {
+@@ -412,7 +413,7 @@
+          LOGGER_VASNPRINTF_AFFIX_NEWLINE,
+          level, tag, format, va);
+ 
+-   OutputDebugStringA(msg);
++   venera_engine_text(VENERA_MESA_LOG, level_to_str(level), tag, msg, strlen(msg));
+ 
+    if (msg != local_msg)
+       free(msg);
