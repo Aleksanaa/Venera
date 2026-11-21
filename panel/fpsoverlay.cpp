@@ -60,7 +60,7 @@ constexpr int kHotkey = 1;
 // them and at the sides; below a line, a row for each program that presents, the busiest first.
 constexpr float kGap = 24, kH = 60, kRowH = 22, kMargin = 8;
 constexpr size_t kMaxRows = 10;
-const wchar_t* const kLabels[] = {L"FPS", L"VSync", L"Worst gap", L"Mouse/s"};
+const wchar_t* columnLabel(int i) { return i == 0 ? L"FPS" : i == 1 ? L"VSync" : locale::text(i == 2 ? IDS_WorstGap : IDS_MouseRate); }
 const wchar_t* const kWidest[] = {L"000", L"000", L"000 ms", L"0000"};
 
 std::mutex lock;
@@ -233,6 +233,7 @@ private:
     static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     void place();
     void paint();
+    void measure();
     std::wstring appName(DWORD pid);
 
     HWND hwnd_ = nullptr;
@@ -269,7 +270,7 @@ std::wstring Overlay::appName(DWORD pid)
             name = e.szExeFile;
     CloseHandle(snap);
     if (name.empty())  // gone: its id, and no name kept
-        return L"Process " + std::to_wstring(pid);
+        return locale::format(IDS_ProcessName, {std::to_wstring(pid)});
     if (name.size() > 4 && !_wcsicmp(name.c_str() + name.size() - 4, L".exe"))
         name.resize(name.size() - 4);
     if (names_.size() > 256)  // ids are reused: forget them now and then
@@ -313,7 +314,7 @@ void Overlay::paint()
         D2D1_RECT_F value = {x, 8, x + columnW_[i], 34}, label = {x, 34, x + columnW_[i], 52};
         ui_.text(stats_.any ? values[i] : L"–", Ui::kSubtitle, value, i == 2 && hitch ? kCritical : kWhite, 1,
                  DWRITE_TEXT_ALIGNMENT_CENTER);
-        ui_.text(kLabels[i], Ui::kCaption, label, kWhite, kTextSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
+        ui_.text(columnLabel(i), Ui::kCaption, label, kWhite, kTextSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);
         x += columnW_[i] + kGap;
     }
     float y = kH;
@@ -347,6 +348,16 @@ LRESULT CALLBACK Overlay::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     Overlay* o = g_overlay;
     switch (msg) {
     case WM_TIMER:
+        {
+            auto before = locale::language();
+            locale::init();
+            if (before != locale::language()) {
+                o->ui_.languageChanged();
+                o->measure();
+                SetWindowTextW(hwnd, locale::text(IDS_FpsOverlay));
+                o->place();
+            }
+        }
         o->stats_ = sample();
         if (float h = kH + (o->stats_.apps.empty() ? 0 : 6 + o->stats_.apps.size() * kRowH + 8); h != o->h_) {
             o->h_ = h;
@@ -391,18 +402,23 @@ LRESULT CALLBACK Overlay::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-int Overlay::run()
+void Overlay::measure()
 {
-    g_overlay = this;
-    ui_.init();
     w_ = kGap;
     for (int i = 0; i < 4; i++) {
-        columnW_[i] = std::max(ui_.measure(kLabels[i], Ui::kCaption), ui_.measure(kWidest[i], Ui::kSubtitle));
+        columnW_[i] = std::max(ui_.measure(columnLabel(i), Ui::kCaption), ui_.measure(kWidest[i], Ui::kSubtitle));
         w_ += columnW_[i] + kGap;
     }
     countW_ = ui_.measure(L"0000", Ui::kBodyStrong);
     memoryW_ = ui_.measure(L"00000/00000 MB", Ui::kBody);
-    w_ = std::max(w_, 2 * kGap + ui_.measure(L"Process 00000", Ui::kBody) + 12 + memoryW_ + 12 + countW_);
+    w_ = std::max(w_, 2 * kGap + ui_.measure(locale::format(IDS_ProcessName, {L"00000"}), Ui::kBody) + 12 + memoryW_ + 12 + countW_);
+}
+
+int Overlay::run()
+{
+    g_overlay = this;
+    ui_.init();
+    measure();
     D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d_);
     dc_ = CreateCompatibleDC(nullptr);
     WNDCLASSW wc = {};
@@ -411,7 +427,7 @@ int Overlay::run()
     wc.lpszClassName = kClass;
     RegisterClassW(&wc);
     hwnd_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                            kClass, L"Frame rate overlay", WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, wc.hInstance,
+                            kClass, locale::text(IDS_FpsOverlay), WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, wc.hInstance,
                             nullptr);
     // The panel that turns it off may run without administrator rights, and UIPI drops its messages otherwise.
     ChangeWindowMessageFilterEx(hwnd_, WM_CLOSE, MSGFLT_ALLOW, nullptr);
@@ -436,12 +452,11 @@ int Overlay::run()
 std::wstring runFpsOverlay()
 {
     if (findFpsOverlay())
-        return L"The frame rate overlay is already on";
+        return locale::text(IDS_OverlayAlreadyOn);
     DWORD err = startTrace();
     if (err != ERROR_SUCCESS) {
         stopTrace();
-        return L"Cannot start the ETW session (error " + std::to_wstring(err) + L")" +
-               (err == ERROR_ACCESS_DENIED ? L"; it needs administrator rights" : L"");
+        return locale::format(IDS_OverlaySessionFailed, {std::to_wstring(err), err == ERROR_ACCESS_DENIED ? locale::text(IDS_AdminSuffix) : L""});
     }
     Overlay overlay;
     overlay.run();

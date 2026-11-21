@@ -5,6 +5,7 @@
 #pragma once
 
 #include <windows.h>
+#include "locale.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -18,8 +19,6 @@
 #include <vector>
 
 #include "tests/tests.h"
-
-struct _EVENT_RECORD;
 
 namespace panel {
 
@@ -50,6 +49,7 @@ public:
                 kFontCount };
 
     void init();
+    void languageChanged();
     void begin(ID2D1RenderTarget* target)
     {
         rt_ = target;
@@ -78,6 +78,7 @@ public:
     };
     // `s` wrapped to `width` in as many lines as it needs, breaking words that do not fit one; as high as its lines.
     Paragraph wrap(const std::wstring& s, Font f, float width);
+    void text(const Paragraph& p, float x, float y, UINT32 c = theme::kWhite, float a = theme::kTextPrimary);
 
     // Clickable areas, in window DIPs; `offset` is the scroll offset of what is being drawn.
     void hot(D2D1_RECT_F r, int id);
@@ -227,6 +228,7 @@ public:
 
 // Messages and timer ids the window passes on to its pages.
 constexpr UINT kPageMessage = WM_APP + 1;
+constexpr UINT kLanguageChanged = WM_APP + 60;
 constexpr UINT_PTR kPageTimer = 100;
 
 // /mock: the Overview shows a made-up system with every warning and problem row, for checking its layout.
@@ -237,6 +239,10 @@ std::unique_ptr<Page> makeLogs(HWND window);
 std::unique_ptr<Page> makeTests(HWND window);
 std::unique_ptr<Page> makeTools(HWND window);
 std::unique_ptr<Page> makeAbout(HWND window);
+std::unique_ptr<Page> makeDebug(HWND window);
+const wchar_t* testName(const TestGroup& group, const Test& test);
+const wchar_t* testDescription(const TestGroup& group, const Test& test);
+const wchar_t* testGroupDescription(const TestGroup& group);
 
 // ---- what the panel reads about the system (sysinfo.cpp) ----------------------------------------------------------
 
@@ -311,7 +317,7 @@ ChildResult runSelf(const std::wstring& args, DWORD timeoutMs, HANDLE cancel = n
 struct TestResult {
     bool ok = false, stopped = false;
     float seconds = 0;
-    std::wstring summary;  // why it failed
+    locale::Message summary;
     std::wstring output;
 };
 // A test by its full id, "<group>.<test>".
@@ -324,7 +330,7 @@ TestResult runTest(const std::string& id, HANDLE cancel);
 // The child: `/run-test <id>`.
 int runTestChild(const std::string& id);
 
-// ---- what the drivers log (logcapture.cpp) -------------------------------------------------------------------------
+// ---- log display -------------------------------------------------------------------------------------------------
 
 struct LogLine {
     SYSTEMTIME time;  // local
@@ -335,41 +341,6 @@ struct LogLine {
     std::wstring text;
 };
 
-// Captures debug output (OutputDebugString) from this session, and with administrator rights from services and
-// the kernel's (DbgPrint) too, as DebugView does. Lines reach the sink on the capture's threads, one at a time.
-class LogCapture {
-public:
-    ~LogCapture();
-    void start(std::function<void(LogLine&&)> sink);
-    void stop();
-    bool running() const { return running_; }
-    // Why a source did not start, after start(); empty when it did.
-    std::wstring userError, kernelError;
-
-private:
-    struct Dbwin {
-        HANDLE bufferReady = nullptr, dataReady = nullptr, section = nullptr;
-        const char* view = nullptr;
-        std::thread thread;
-    };
-    bool openDbwin(Dbwin& d, const wchar_t* prefix, std::wstring* error);
-    void closeDbwin(Dbwin& d);
-    void readDbwin(Dbwin& d);
-    bool startKernel(std::wstring* error);
-    void stopKernel();
-    void kernelEvent(_EVENT_RECORD* r);
-    std::wstring processName(DWORD pid);
-    void emit(LogLine&& l);
-
-    bool running_ = false;
-    HANDLE stop_ = nullptr;
-    Dbwin local_, global_;
-    ULONG64 session_ = 0, trace_ = ~0ull;
-    std::thread kernelThread_;
-    std::function<void(LogLine&&)> sink_;
-    std::mutex sinkMutex_, namesMutex_;
-    std::map<DWORD, std::wstring> names_;
-};
 // A line as /log prints it and the Logs page exports it: time, program[pid], component, level (I/W/E), text.
 std::wstring formatLogLine(const LogLine& l);
 // The process runs as administrator.
@@ -404,15 +375,22 @@ struct InfoRow {
     bool bad = false;      // the value is what does not work, drawn after an error icon
     std::wstring warning;  // what works but could work better, on a line of its own below the row after a warning
                            // icon; not a problem for anyProblem
+    locale::Message displayKey, displayValue, displayWarning;
+    std::wstring keyText() const { return displayKey.empty() ? key : displayKey.resolve(); }
+    std::wstring valueText() const { return displayValue.empty() ? value : displayValue.resolve(); }
+    std::wstring warningText() const { return displayWarning.empty() ? warning : displayWarning.resolve(); }
 };
 struct InfoSection {
     const wchar_t* icon;
     std::wstring title;
     std::vector<InfoRow> rows;
+    unsigned titleId = 0;
+    std::wstring titleText() const { return titleId ? locale::text(titleId) : title; }
 };
 // `probe` null: the probe is still running.
 std::vector<InfoSection> describe(const SystemInfo& info, const ProbeResult* probe);
-std::wstring reportText(const std::vector<InfoSection>& sections);
+std::wstring reportText(const std::vector<InfoSection>& sections, bool localized = false);
+std::string reportJson(const std::vector<InfoSection>& sections);
 bool anyProblem(const std::vector<InfoSection>& sections);
 // The host GPU and its Vulkan driver from Venus' device name, "Virtio-GPU Venus (<GPU> (<driver>))".
 void hostGpu(const ProbeResult* probe, std::wstring& gpu, std::wstring& driver);
@@ -432,8 +410,8 @@ struct Update {
     std::wstring url;      // where it downloads from
     std::string sha256;    // GitHub's checksum of the file, in hex
     ULONGLONG size = 0;
-    std::wstring note;     // Develop: why it is not the build of main's newest commit
-    std::wstring error;    // why there is none
+    locale::Message note;
+    locale::Message error;
 };
 // Asks GitHub; takes seconds.
 Update findUpdate(Channel c);
@@ -441,12 +419,12 @@ Update findUpdate(Channel c);
 std::wstring downloadPath(const Update& u);
 // Downloads it to `path` (unless it is there already) and checks it against GitHub's checksum; `progress` gets the
 // bytes so far and all of them (0 when unknown) and returns false to cancel. Returns why it failed, else empty.
-std::wstring downloadUpdate(const Update& u, const std::wstring& path,
+locale::Message downloadUpdate(const Update& u, const std::wstring& path,
                             const std::function<bool(ULONGLONG, ULONGLONG)>& progress);
 // As administrator: finds the newest on channel `c` again and, when it is newer than what is installed, checks it,
 // taking the file `downloaded` when it matches GitHub's checksum, and starts its installer (*started). `say` gets each
 // step. Returns why it failed, else empty.
-std::wstring installUpdate(Channel c, const std::wstring& downloaded,
+locale::Message installUpdate(Channel c, const std::wstring& downloaded,
                            const std::function<void(const std::wstring&)>& say, bool* started);
 
 // ---- the command line (cli.cpp)-------------------------------------------------------------------------------------

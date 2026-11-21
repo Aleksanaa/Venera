@@ -1,0 +1,48 @@
+--- a/libs/vkd3d-common/debug.c
++++ b/libs/vkd3d-common/debug.c
+@@ -172,6 +172,35 @@
+     }
+ }
+ 
++#ifdef _WIN32
++#include "engine_etw.h"
++static void venera_debug_output(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level,
++        const char *function, const char *fmt, va_list args)
++{
++    const char *channel_name = channel == VKD3D_DBG_CHANNEL_API ? "api" : "shader";
++    va_list copy;
++    char *message;
++    int count, prefix;
++    size_t length;
++
++    va_copy(copy, args);
++    count = vsnprintf(NULL, 0, fmt, copy);
++    va_end(copy);
++    if (count < 0)
++        return;
++    length = strlen(function) + 2 + (size_t)count;
++    message = malloc(length + 1);
++    if (!message)
++        return;
++    prefix = sprintf(message, "%s: ", function);
++    va_copy(copy, args);
++    vsnprintf(message + prefix, (size_t)count + 1, fmt, copy);
++    va_end(copy);
++    venera_engine_text(VENERA_VKD3D, debug_level_names[level], channel_name, message, length);
++    free(message);
++}
++#endif
++
+ void vkd3d_dbg_printf(enum vkd3d_dbg_channel channel, enum vkd3d_dbg_level level, const char *function, const char *fmt, ...)
+ {
+     unsigned int tid;
+@@ -186,6 +215,9 @@
+ 
+     va_start(args, fmt);
+     tid = vkd3d_get_current_thread_id();
++#ifdef _WIN32
++    venera_debug_output(channel, level, function, fmt, args);
++#endif
+ 
+     if (vkd3d_dbg_buffer.buffer)
+     {

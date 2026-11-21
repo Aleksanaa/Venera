@@ -58,14 +58,20 @@ ULONG VioGpuIdr::GetId(VOID)
 
     id = (ULONG)InterlockedIncrement(&m_nextId) - 1;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] id = %d\n", __FUNCTION__, id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: [%s] id = %d\n", __FUNCTION__, id);
+    }
 
     return id;
 }
 
 VOID VioGpuIdr::PutId(_In_ ULONG id)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] id = %d\n", __FUNCTION__, id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: [%s] id = %d\n", __FUNCTION__, id);
+    }
 }
 
 VOID VioGpuIdr::Close(VOID)

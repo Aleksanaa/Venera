@@ -4,6 +4,7 @@
 // The exe is a GUI program, which consoles do not wait for; venera-panel.com (shim.c) is the console program a shell
 // finds first, and runs the exe with its own console and handles.
 #include "panel.h"
+#include "debugchannel.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -22,6 +23,7 @@ const wchar_t kHelp[] =
     L"  (none)     Open the control panel.\n"
     L"  /info      Print the system report: the driver, the host, the guest with its displays, and\n"
     L"             what each graphics API offers. The exit code is 1 when something in it does not work.\n"
+    L"      /json      print the report as UTF-8 JSON\n"
     L"  /probe     Try each graphics API on the VirtIO GPU and print what it found as key=value lines\n"
     L"             (the check behind /info).\n"
     L"  /test      List the tests.\n"
@@ -30,8 +32,7 @@ const wchar_t kHelp[] =
     L"             group (d3d12), a test in one (d3d12.copy) or all. The exit code is 1 when one fails.\n"
     L"      /verbose   also print the output of those that pass\n"
     L"      /debug     turn the D3D12 debug layer on (needs the Graphics Tools optional feature)\n"
-    L"  /log       Print what the drivers log, as they log it, until Ctrl+C. Run as administrator for the\n"
-    L"             kernel driver's messages and services' output too.\n"
+    L"  /log       Follow driver messages from the debug service until Ctrl+C.\n"
     L"      /all       every program's debug output, not only the drivers'\n"
     L"  /set       List the settings, as on the Settings page, with their values and the values they take.\n"
     L"  /set NAME VALUE...\n"
@@ -146,7 +147,7 @@ int runTests(const std::vector<std::string>& names, bool verbose)
         TestResult r = runTest(id, nullptr);
         wchar_t time[32];
         swprintf(time, 32, L"%6.1f s", r.seconds);
-        out.print(std::wstring(r.ok ? L"passed " : L"FAILED ") + time + (r.ok ? L"" : L"  " + r.summary) + L"\n");
+        out.print(std::wstring(r.ok ? L"passed " : L"FAILED ") + time + (r.ok ? L"" : L"  " + r.summary.resolve(locale::Language::English)) + L"\n");
         if (!r.ok || verbose)
             out.print(indent(r.output, L"    "));
         (r.ok ? passed : failed)++;
@@ -196,19 +197,16 @@ int followLog(bool all)
     Output out(STD_OUTPUT_HANDLE), err(STD_ERROR_HANDLE);
     g_quit = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     SetConsoleCtrlHandler([](DWORD) -> BOOL { return SetEvent(g_quit); }, TRUE);
-    LogCapture capture;
+    GuestLogs capture;
     capture.start([&](LogLine&& l) {
         if (all || !l.component.empty())
             out.print(formatLogLine(l) + L"\n");
     });
-    for (const std::wstring& e : {capture.userError, capture.kernelError})
-        if (!e.empty())
-            err.print(e + L".\n");
-    if (!capture.userError.empty() && !capture.kernelError.empty())
-        return 1;
-    WaitForSingleObject(g_quit, INFINITE);
+    while (capture.running() && WaitForSingleObject(g_quit, 100) != WAIT_OBJECT_0) {}
+    std::wstring error = capture.error();
     capture.stop();
-    return 0;
+    if (!error.empty()) err.print(error + L"\n");
+    return error.empty() ? 0 : 1;
 }
 
 // /update [CHANNEL] [/from FILE]: FILE is what the About page downloaded. Exits 0 when the installer started or Venera
@@ -225,7 +223,7 @@ int runUpdate(Channel channel, const std::wstring& from)
     if (printed)
         Output(STD_ERROR_HANDLE).print(e + L".\n");
     else
-        MessageBoxW(nullptr, (e + L".").c_str(), L"Venera update", MB_ICONERROR);
+        MessageBoxW(nullptr, (e + L".").c_str(), locale::text(IDS_VeneraUpdate), MB_ICONERROR);
     return 1;
 }
 
@@ -306,7 +304,7 @@ int runCommandLine(int argc, wchar_t** argv, int* page)
             if (AttachConsole(ATTACH_PARENT_PROCESS) || GetLastError() == ERROR_ACCESS_DENIED)
                 Output(STD_ERROR_HANDLE).print(e + L".\n");
             else
-                MessageBoxW(nullptr, (e + L".").c_str(), L"Frame rate overlay", MB_ICONERROR);
+                MessageBoxW(nullptr, (e + L".").c_str(), locale::text(IDS_FpsOverlay), MB_ICONERROR);
             return 1;
         }
         if (o == L"update") {
@@ -341,11 +339,15 @@ int runCommandLine(int argc, wchar_t** argv, int* page)
             return 0;
         }
         if (o == L"info") {
+            bool json = false;
+            for (int j = i + 1; j < argc; j++)
+                if (option(argv[j]) == L"json")
+                    json = true;
             Output out(STD_OUTPUT_HANDLE);
             SystemInfo info = readSystemInfo();
             ProbeResult probe = probeNow(kProbeTimeoutMs);
             std::vector<InfoSection> report = describe(info, &probe);
-            std::wstring text = reportText(report);
+            std::wstring text = json ? widen(reportJson(report)) + L"\n" : reportText(report);
             for (size_t p; (p = text.find(L"\r\n")) != std::wstring::npos;)
                 text.replace(p, 2, L"\n");
             out.print(text);

@@ -79,7 +79,10 @@ void VioGpuAllocation::BlobCreateCompleteCB(void *ctx_void)
         ctx->user_cb(ctx->user_ctx);
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s res_id=0x%x\n", __FUNCTION__, alloc->GetId()));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s res_id=0x%x\n", __FUNCTION__, alloc->GetId());
+    }
 
     delete ctx;
     ExReleaseRundownProtection(&alloc->m_blob_create_rundown);
@@ -87,7 +90,10 @@ void VioGpuAllocation::BlobCreateCompleteCB(void *ctx_void)
 
 VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCATION_EXCHANGE *exchange)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     m_adapter = adapter;
     m_refs = 1;
@@ -136,7 +142,10 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
     KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
     m_busy = 0;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 }
 
 UINT VioGpuAllocation::GetStride(void) const
@@ -160,10 +169,12 @@ UINT VioGpuAllocation::GetStride(void) const
         case VIRGL_FORMAT_R8G8B8X8_UNORM:
             return m_options.width * 4;
         default:
-            DbgPrint(TRACE_LEVEL_WARNING,
-                     ("%s unsupported scanout format=%u, assuming 4 bytes per pixel\n",
-                      __FUNCTION__,
-                      m_options.format));
+            if (nDebugLevel >= TRACE_LEVEL_WARNING)
+            {
+                DbgPrint("VioGpu: %s unsupported scanout format=%u, assuming 4 bytes per pixel\n",
+                         __FUNCTION__,
+                         m_options.format);
+            }
             return m_options.width * 4;
     }
 }
@@ -271,22 +282,29 @@ void VioGpuAllocation::WaitForPendingBlobCreate()
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
     if (KeGetCurrentIrql() > APC_LEVEL)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s cannot wait for pending blob create at IRQL=%u res_id=0x%x\n",
-                  __FUNCTION__,
-                  KeGetCurrentIrql(),
-                  m_Id));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s cannot wait for pending blob create at IRQL=%u res_id=0x%x\n",
+                     __FUNCTION__,
+                     KeGetCurrentIrql(),
+                     m_Id);
+        }
         return;
     }
 
-    DbgPrint(TRACE_LEVEL_INFORMATION,
-             ("%s waiting for pending blob create res_id=0x%x\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: %s waiting for pending blob create res_id=0x%x\n", __FUNCTION__, m_Id);
+    }
     KeWaitForSingleObject(&m_blob_create_complete_event, Executive, KernelMode, FALSE, NULL);
 }
 
 VioGpuAllocation::~VioGpuAllocation(void)
 {
-    DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s res_id=0x%x\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: ---> %s res_id=0x%x\n", __FUNCTION__, m_Id);
+    }
 
     ASSERT(m_busy == 0);
     ExWaitForRundownProtectionRelease(&m_blob_create_rundown);
@@ -294,7 +312,10 @@ VioGpuAllocation::~VioGpuAllocation(void)
     if (m_alias_source)
     {
         // The host resource and its id belong to the source; an alias never maps or creates anything.
-        DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s alias of res_id=0x%x released\n", __FUNCTION__, m_Id));
+        if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+        {
+            DbgPrint("VioGpu: <--- %s alias of res_id=0x%x released\n", __FUNCTION__, m_Id);
+        }
         m_alias_source->Release();
         m_alias_source = NULL;
         return;
@@ -303,8 +324,10 @@ VioGpuAllocation::~VioGpuAllocation(void)
     ExAcquireFastMutex(&m_blob_map_mutex);
     if (!IsListEmpty(&m_blob_map_list))
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s res_id=0x%x blob maps still active\n", __FUNCTION__, m_Id));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: %s res_id=0x%x blob maps still active\n", __FUNCTION__, m_Id);
+        }
     }
     while (!IsListEmpty(&m_blob_map_list))
     {
@@ -314,24 +337,28 @@ VioGpuAllocation::~VioGpuAllocation(void)
         {
             m_blob_map_user_refs--;
         }
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s dropping map res_id=0x%x pid=%p process=%p user_va=%p size=0x%llx ref=%u\n",
-                  __FUNCTION__,
-                  m_Id,
-                  map->ProcessId,
-                  map->Process,
-                  map->UserVa,
-                  map->Size,
-                  map->RefCount));
+        if (nDebugLevel >= TRACE_LEVEL_WARNING)
+        {
+            DbgPrint("VioGpu: %s dropping map res_id=0x%x pid=%p process=%p user_va=%p size=0x%llx ref=%u\n",
+                     __FUNCTION__,
+                     m_Id,
+                     map->ProcessId,
+                     map->Process,
+                     map->UserVa,
+                     map->Size,
+                     map->RefCount);
+        }
         if (map->UserVa)
         {
-            DbgPrint(TRACE_LEVEL_WARNING,
-                     ("%s force unmap stale map res_id=0x%x user_va=%p pid=%p process=%p\n",
-                     __FUNCTION__,
-                      m_Id,
-                      map->UserVa,
-                      map->ProcessId,
-                      map->Process));
+            if (nDebugLevel >= TRACE_LEVEL_WARNING)
+            {
+                DbgPrint("VioGpu: %s force unmap stale map res_id=0x%x user_va=%p pid=%p process=%p\n",
+                         __FUNCTION__,
+                         m_Id,
+                         map->UserVa,
+                         map->ProcessId,
+                         map->Process);
+            }
             m_adapter->GetDxgkInterface()->DxgkCbUnmapMemory(
                 m_adapter->GetDxgkInterface()->DeviceHandle, map->UserVa);
             map->UserVa = NULL;
@@ -368,14 +395,20 @@ VioGpuAllocation::~VioGpuAllocation(void)
 
     if (resource_created)
     {
-        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s DestroyResource res_id=0x%x\n", __FUNCTION__, m_Id));
+        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+        {
+            DbgPrint("VioGpu: %s DestroyResource res_id=0x%x\n", __FUNCTION__, m_Id);
+        }
         m_adapter->ctrlQueue.DestroyResource(m_Id);
     }
     // The id can be reused: a flip token naming it must not skip a new allocation's flush.
     InterlockedCompareExchange(&m_adapter->vidpn.m_flippedResId, 0, (LONG)m_Id);
     m_adapter->resourceIdr.PutId(m_Id);
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 }
 
 NTSTATUS VioGpuAllocation::MakeAliasOf(VioGpuAllocation *source)
@@ -389,9 +422,11 @@ NTSTATUS VioGpuAllocation::MakeAliasOf(VioGpuAllocation *source)
     }
     if (!source->m_is_blob || !source->m_blob_created)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s source res_id=0x%x is not a created blob (blob=%u created=%u)\n",
-                  __FUNCTION__, source->m_Id, source->m_is_blob, source->m_blob_created));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s source res_id=0x%x is not a created blob (blob=%u created=%u)\n",
+                     __FUNCTION__, source->m_Id, source->m_is_blob, source->m_blob_created);
+        }
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -414,7 +449,10 @@ NTSTATUS VioGpuAllocation::MakeAliasOf(VioGpuAllocation *source)
 
 void VioGpuAllocation::AttachBacking(MDL *pMDL, size_t pageCount, size_t pageOffset)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     m_pMDL = pMDL;
     m_pageCount = pageCount;
@@ -434,9 +472,11 @@ void VioGpuAllocation::AttachBacking(MDL *pMDL, size_t pageCount, size_t pageOff
         }
         else
         {
-            DbgPrint(TRACE_LEVEL_WARNING,
-                     ("%s MmGetSystemAddressForMdlSafe failed res_id=0x%x mdl=%p\n",
-                      __FUNCTION__, m_Id, m_pMDL));
+            if (nDebugLevel >= TRACE_LEVEL_WARNING)
+            {
+                DbgPrint("VioGpu: %s MmGetSystemAddressForMdlSafe failed res_id=0x%x mdl=%p\n",
+                         __FUNCTION__, m_Id, m_pMDL);
+            }
         }
     }
     ExReleaseFastMutex(&m_cpu_copy_mutex);
@@ -451,12 +491,18 @@ void VioGpuAllocation::AttachBacking(MDL *pMDL, size_t pageCount, size_t pageOff
     }
 
     m_adapter->ctrlQueue.AttachBacking(m_Id, ents, (UINT)pageCount);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 }
 
 void VioGpuAllocation::DetachBacking()
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     ExAcquireFastMutex(&m_cpu_copy_mutex);
     m_cpu_copy_va = NULL;
@@ -467,7 +513,10 @@ void VioGpuAllocation::DetachBacking()
     ExReleaseFastMutex(&m_cpu_copy_mutex);
 
     m_adapter->ctrlQueue.DetachBacking(m_Id);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s\n", __FUNCTION__);
+    }
 }
 
 NTSTATUS VioGpuAllocation::MapForCpuCopy(ULONG ctx_id,
@@ -538,9 +587,11 @@ NTSTATUS VioGpuAllocation::MapForCpuCopy(ULONG ctx_id,
             // Match the host and user mappings to avoid conflicting cache aliases.
             const MEMORY_CACHING_TYPE cache_type =
                 VioGpuCacheTypeFromMapInfo(m_blob_map_info);
-            DbgPrint(TRACE_LEVEL_VERBOSE,
-                     ("%s kernel map res_id=0x%x map_info=0x%x cache_type=0x%x\n",
-                      __FUNCTION__, m_Id, m_blob_map_info, cache_type));
+            if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+            {
+                DbgPrint("VioGpu: %s kernel map res_id=0x%x map_info=0x%x cache_type=0x%x\n",
+                         __FUNCTION__, m_Id, m_blob_map_info, cache_type);
+            }
             PVOID va = MmMapIoSpace(shmem_pa, (SIZE_T)map_len, cache_type);
             if (!va)
             {
@@ -590,7 +641,10 @@ void VioGpuAllocation::UnmapForCpuCopy(PVOID map_va,
 
 void VioGpuAllocation::MarkBusy()
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     InterlockedIncrement(&m_busy);
     KeClearEvent(&m_busyNotification);
@@ -598,7 +652,10 @@ void VioGpuAllocation::MarkBusy()
 
 void VioGpuAllocation::UnmarkBusy()
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     if (InterlockedDecrement(&m_busy) == 0)
     {
@@ -624,18 +681,20 @@ void VioGpuAllocation::FlushToScreen(UINT scan_id,
                                      UINT stride,
                                      UINT offset)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("---> %s res_id=%d scanout=%u rect=%ux%u+%u+%u format=%u stride=%u offset=%u\n",
-              __FUNCTION__,
-              m_Id,
-              scan_id,
-              width,
-              height,
-              x,
-              y,
-              format,
-              stride,
-              offset));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s res_id=%d scanout=%u rect=%ux%u+%u+%u format=%u stride=%u offset=%u\n",
+                 __FUNCTION__,
+                 m_Id,
+                 scan_id,
+                 width,
+                 height,
+                 x,
+                 y,
+                 format,
+                 stride,
+                 offset);
+    }
 
     if (!width)
     {
@@ -673,7 +732,10 @@ void VioGpuAllocation::FlushToScreen(UINT scan_id,
     }
     m_adapter->ctrlQueue.ResFlush(m_Id, width, height, x, y);
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--- %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 }
 
 PAGED_CODE_SEG_BEGIN
@@ -693,9 +755,11 @@ static ULONG VioGpuD3DDDIToVirglColorFormat(D3DDDIFORMAT format)
         case D3DDDIFMT_X8B8G8R8:
             return VIRGL_FORMAT_R8G8B8X8_UNORM;
     }
-    DbgPrint(TRACE_LEVEL_ERROR,
-             ("%s ERROR owner=viogpu3d component=standard-allocation reason=unsupported_d3dddi_format format=%u action=reject\n",
-              __FUNCTION__, format));
+    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+    {
+        DbgPrint("VioGpu: %s ERROR owner=viogpu3d component=standard-allocation reason=unsupported_d3dddi_format format=%u action=reject\n",
+                 __FUNCTION__, format);
+    }
     return 0;
 }
 
@@ -716,14 +780,20 @@ D3DDDIFORMAT VioGpuToD3DDDIColorFormat(ULONG format)
         case VIRGL_FORMAT_R8G8B8X8_UNORM:
             return D3DDDIFMT_X8B8G8R8;
     }
-    DbgPrint(TRACE_LEVEL_ERROR, ("---> %s Unsupported color format %d\n", __FUNCTION__, format));
+    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+    {
+        DbgPrint("VioGpu: ---> %s Unsupported color format %d\n", __FUNCTION__, format);
+    }
     return D3DDDIFMT_X8B8G8R8;
 }
 
 NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStandardAllocation)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s type=%d\n", __FUNCTION__, pStandardAllocation->StandardAllocationType));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s type=%d\n", __FUNCTION__, pStandardAllocation->StandardAllocationType);
+    }
 
     if (!pStandardAllocation->pResourcePrivateDriverData && !pStandardAllocation->pAllocationPrivateDriverData)
     {
@@ -774,12 +844,14 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
                 allocationExchange->Stride = surfaceData->Width * 4;
                 allocationExchange->Size = (ULONGLONG)surfaceData->Width * (ULONGLONG)surfaceData->Height * 4;
 
-                DbgPrint(TRACE_LEVEL_INFORMATION,
-                         ("<--- %s shared primary surface: width=%d, height=%d, format=%d\n",
-                          __FUNCTION__,
-                          surfaceData->Width,
-                          surfaceData->Height,
-                          surfaceData->Format));
+                if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+                {
+                    DbgPrint("VioGpu: <--- %s shared primary surface: width=%d, height=%d, format=%d\n",
+                             __FUNCTION__,
+                             surfaceData->Width,
+                             surfaceData->Height,
+                             surfaceData->Format);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -804,12 +876,14 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
                 allocationExchange->ResourceOptions.flags |= VIRGL_RESOURCE_FLAG_MAP_COHERENT;
 
                 surfaceData->Pitch = surfaceData->Width * 4;
-                DbgPrint(TRACE_LEVEL_INFORMATION,
-                         ("<--- %s shadow surface: width=%d, height=%d, format=%d\n",
-                          __FUNCTION__,
-                          surfaceData->Width,
-                          surfaceData->Height,
-                          surfaceData->Format));
+                if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+                {
+                    DbgPrint("VioGpu: <--- %s shadow surface: width=%d, height=%d, format=%d\n",
+                             __FUNCTION__,
+                             surfaceData->Width,
+                             surfaceData->Height,
+                             surfaceData->Format);
+                }
                 return STATUS_SUCCESS;
             }
 
@@ -836,13 +910,19 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
                 }
 
                 surfaceData->Pitch = surfaceData->Width * 4;
-                DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s staging surface\n", __FUNCTION__));
+                if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+                {
+                    DbgPrint("VioGpu: <--- %s staging surface\n", __FUNCTION__);
+                }
                 return STATUS_SUCCESS;
             }
 
         default:
             {
-                DbgPrint(TRACE_LEVEL_FATAL, ("<--- Unknown standard allocation type \n"));
+                if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                {
+                    DbgPrint("VioGpu: <--- Unknown standard allocation type \n");
+                }
                 return STATUS_NOT_SUPPORTED;
             }
     }
@@ -851,7 +931,10 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
 NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_CREATEALLOCATION *pCreateAllocation)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
 
     DXGK_ALLOCATIONINFO *allocationInfo = pCreateAllocation->pAllocationInfo;
 
@@ -862,7 +945,10 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     if (max(resourceExchangeSize, pCreateAllocation->PrivateDriverDataSize) <
         legacyExchangeSize)
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s private driver data is too small\n", __FUNCTION__));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: <--- %s private driver data is too small\n", __FUNCTION__);
+        }
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -905,22 +991,28 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
         NTSTATUS status = source.Get() ? allocation->MakeAliasOf(source.Get()) : STATUS_INVALID_HANDLE;
         if (!NT_SUCCESS(status))
         {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("<--- %s alias of handle 0x%x failed status=0x%x\n",
-                      __FUNCTION__, alias.SourceAllocation, status));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: <--- %s alias of handle 0x%x failed status=0x%x\n",
+                         __FUNCTION__, alias.SourceAllocation, status);
+            }
             delete allocation;
             return status;
         }
-        DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("%s alias of handle 0x%x res_id=0x%x %ux%u format=%u stride=%u\n",
-                  __FUNCTION__, alias.SourceAllocation, allocation->GetId(), localExchange.ResourceOptions.width,
-                  localExchange.ResourceOptions.height, localExchange.ResourceOptions.format, localExchange.Stride));
+        if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+        {
+            DbgPrint("VioGpu: %s alias of handle 0x%x res_id=0x%x %ux%u format=%u stride=%u\n",
+                     __FUNCTION__, alias.SourceAllocation, allocation->GetId(), localExchange.ResourceOptions.width,
+                     localExchange.ResourceOptions.height, localExchange.ResourceOptions.format, localExchange.Stride);
+        }
     }
     const bool is_blob = allocation->IsBlob();
     if (is_blob && (!adapter->GetShmemLen()))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("<--- %s blob allocation requires shared memory\n", __FUNCTION__));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: <--- %s blob allocation requires shared memory\n", __FUNCTION__);
+        }
         delete allocation;
         return STATUS_NOT_SUPPORTED;
     }
@@ -933,9 +1025,11 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
         ULONGLONG offset = 0;
         if (!adapter->AllocateShmemRange(alloc_size, PAGE_SIZE, &offset))
         {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("<--- %s shmem alloc failed size=0x%llx shmem_len=0x%llx\n",
-                      __FUNCTION__, alloc_size, adapter->GetShmemLen()));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: <--- %s shmem alloc failed size=0x%llx shmem_len=0x%llx\n",
+                         __FUNCTION__, alloc_size, adapter->GetShmemLen());
+            }
             delete allocation;
             return STATUS_INSUFFICIENT_RESOURCES;
         }
@@ -1002,18 +1096,23 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
         allocationInfo->EvictionSegmentSet = 0;
     }
 
-    DbgPrint(TRACE_LEVEL_INFORMATION,
-             ("<--- %s res_id=0x%x size=%d driver_handle=%p flags=0x%x num=%u adapter=%p\n",
-              __FUNCTION__, allocation->GetId(), allocationInfo->Size,
-              allocation, pCreateAllocation->Flags.Value,
-              pCreateAllocation->NumAllocations, adapter));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: <--- %s res_id=0x%x size=%d driver_handle=%p flags=0x%x num=%u adapter=%p\n",
+                 __FUNCTION__, allocation->GetId(), allocationInfo->Size,
+                 allocation, pCreateAllocation->Flags.Value,
+                 pCreateAllocation->NumAllocations, adapter);
+    }
     return STATUS_SUCCESS;
 }
 
 NTSTATUS VioGpuAllocation::DescribeAllocation(DXGKARG_DESCRIBEALLOCATION *pDescribeAllocation)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     pDescribeAllocation->Width = m_options.width;
     pDescribeAllocation->Height = m_options.height;
@@ -1035,7 +1134,10 @@ NTSTATUS VioGpuAllocation::DescribeAllocation(DXGKARG_DESCRIBEALLOCATION *pDescr
 NTSTATUS VioGpuAllocation::MapApertureSegment(DXGKARG_BUILDPAGINGBUFFER *pBuildPagingBuffer)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     size_t pageCount = pBuildPagingBuffer->MapApertureSegment.NumberOfPages;
     size_t mdlPageOffset = pBuildPagingBuffer->MapApertureSegment.MdlOffset;
@@ -1051,7 +1153,10 @@ NTSTATUS VioGpuAllocation::MapApertureSegment(DXGKARG_BUILDPAGINGBUFFER *pBuildP
 NTSTATUS VioGpuAllocation::UnmapApertureSegment(DXGKARG_BUILDPAGINGBUFFER *pBuildPagingBuffer)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     UNREFERENCED_PARAMETER(pBuildPagingBuffer);
     DetachBacking();
@@ -1061,7 +1166,10 @@ NTSTATUS VioGpuAllocation::UnmapApertureSegment(DXGKARG_BUILDPAGINGBUFFER *pBuil
 NTSTATUS VioGpuAllocation::EscapeResourceInfo(VIOGPU_RES_INFO_REQ *resInfo)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     resInfo->Id = m_Id;
     return STATUS_SUCCESS;
@@ -1070,7 +1178,10 @@ NTSTATUS VioGpuAllocation::EscapeResourceInfo(VIOGPU_RES_INFO_REQ *resInfo)
 NTSTATUS VioGpuAllocation::EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s res_id=%d\n", __FUNCTION__, m_Id);
+    }
 
     while (resBusy->Wait && m_busy != 0)
     {
@@ -1089,18 +1200,20 @@ NTSTATUS VioGpuAllocation::EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy)
 NTSTATUS VioGpuAllocation::EscapeResourceSetScanoutBlob(VIOGPU_RES_SET_SCANOUT_BLOB_REQ *resScanout)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_INFORMATION,
-             ("<---> %s res_id=%d scanout=%u rect=%ux%u+%u+%u format=%u stride=%u offset=%u\n",
-              __FUNCTION__,
-              m_Id,
-              resScanout ? resScanout->ScanoutId : 0,
-              resScanout ? resScanout->Width : 0,
-              resScanout ? resScanout->Height : 0,
-              resScanout ? resScanout->X : 0,
-              resScanout ? resScanout->Y : 0,
-              resScanout ? resScanout->Format : 0,
-              resScanout ? resScanout->Stride : 0,
-              resScanout ? resScanout->Offset : 0));
+    if (nDebugLevel >= TRACE_LEVEL_INFORMATION)
+    {
+        DbgPrint("VioGpu: <---> %s res_id=%d scanout=%u rect=%ux%u+%u+%u format=%u stride=%u offset=%u\n",
+                 __FUNCTION__,
+                 m_Id,
+                 resScanout ? resScanout->ScanoutId : 0,
+                 resScanout ? resScanout->Width : 0,
+                 resScanout ? resScanout->Height : 0,
+                 resScanout ? resScanout->X : 0,
+                 resScanout ? resScanout->Y : 0,
+                 resScanout ? resScanout->Format : 0,
+                 resScanout ? resScanout->Stride : 0,
+                 resScanout ? resScanout->Offset : 0);
+    }
 
     if (!resScanout)
     {
@@ -1113,17 +1226,21 @@ NTSTATUS VioGpuAllocation::EscapeResourceSetScanoutBlob(VIOGPU_RES_SET_SCANOUT_B
     const ULONG format = resScanout->Format ? resScanout->Format : m_options.format;
     if (!VioGpuVirglFormatToScanout(format))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s ERROR owner=viogpu3d component=blob-scanout reason=unsupported_virgl_format res_id=0x%x format=%u action=reject\n",
-                  __FUNCTION__, m_Id, format));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s ERROR owner=viogpu3d component=blob-scanout reason=unsupported_virgl_format res_id=0x%x format=%u action=reject\n",
+                     __FUNCTION__, m_Id, format);
+        }
         return STATUS_NOT_SUPPORTED;
     }
     WaitForPendingBlobCreate();
     if (!m_blob_created)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s blob is not created res_id=0x%x status=0x%x\n",
-                  __FUNCTION__, m_Id, m_blob_create_status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s blob is not created res_id=0x%x status=0x%x\n",
+                     __FUNCTION__, m_Id, m_blob_create_status);
+        }
         return NT_SUCCESS(m_blob_create_status) ? STATUS_UNSUCCESSFUL : m_blob_create_status;
     }
 
@@ -1149,12 +1266,14 @@ VioGpuAllocation::BlobUserMapping *VioGpuAllocation::FindBlobMappingLocked(HANDL
         {
             if (process && map->Process && map->Process != process)
             {
-                DbgPrint(TRACE_LEVEL_WARNING,
-                         ("%s stale map for pid=%p: old_process=%p new_process=%p\n",
-                          __FUNCTION__,
-                          process_id,
-                          map->Process,
-                          process));
+                if (nDebugLevel >= TRACE_LEVEL_WARNING)
+                {
+                    DbgPrint("VioGpu: %s stale map for pid=%p: old_process=%p new_process=%p\n",
+                             __FUNCTION__,
+                             process_id,
+                             map->Process,
+                             process);
+                }
                 continue;
             }
             return map;
@@ -1167,7 +1286,10 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=0x%x handle=0x%x\n", __FUNCTION__, m_Id, resMap ? resMap->ResHandle : 0));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s res_id=0x%x handle=0x%x\n", __FUNCTION__, m_Id, resMap ? resMap->ResHandle : 0);
+    }
 
     if (!resMap)
     {
@@ -1180,9 +1302,11 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
     NTSTATUS blob_status = EnsureBlobCreatedAndWait(device ? device->GetId() : 0);
     if (!NT_SUCCESS(blob_status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s blob create failed status=0x%x res_id=0x%x\n",
-                  __FUNCTION__, blob_status, m_Id));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s blob create failed status=0x%x res_id=0x%x\n",
+                     __FUNCTION__, blob_status, m_Id);
+        }
         return blob_status;
     }
 
@@ -1224,13 +1348,15 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
     {
         PEPROCESS current_process = PsGetCurrentProcess();
         HANDLE current_pid = PsGetCurrentProcessId();
-        DbgPrint(TRACE_LEVEL_VERBOSE,
-                 ("%s target_pid=%p current_pid=%p target_process=%p current_process=%p\n",
-                  __FUNCTION__,
-                  target_pid,
-                  current_pid,
-                  target_process,
-                  current_process));
+        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+        {
+            DbgPrint("VioGpu: %s target_pid=%p current_pid=%p target_process=%p current_process=%p\n",
+                     __FUNCTION__,
+                     target_pid,
+                     current_pid,
+                     target_process,
+                     current_process);
+        }
     }
 
     ExAcquireFastMutex(&m_blob_map_mutex);
@@ -1264,9 +1390,11 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
         if (!m_adapter->ctrlQueue.ResourceMapBlob(m_Id, m_blob_offset, &m_blob_map_info))
         {
             ExReleaseFastMutex(&m_blob_map_mutex);
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("<--- %s ResourceMapBlob failed res_id=0x%x offset=0x%llx\n",
-                      __FUNCTION__, m_Id, m_blob_offset));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: <--- %s ResourceMapBlob failed res_id=0x%x offset=0x%llx\n",
+                         __FUNCTION__, m_Id, m_blob_offset);
+            }
             return STATUS_UNSUCCESSFUL;
         }
         m_blob_mapped = true;
@@ -1294,16 +1422,18 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
 
     PHYSICAL_ADDRESS map_pa = shmem_pa;
     map_pa.QuadPart += m_blob_offset;
-    DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("%s map_pa=0x%llx map_len=0x%llx cache_type=0x%x host_cache_type=0x%x shmem_pa=0x%llx shmem_len=0x%llx blob_offset=0x%llx\n",
-              __FUNCTION__,
-              map_pa.QuadPart,
-              map_len,
-              cache_type,
-              host_cache_type,
-              shmem_pa.QuadPart,
-              shmem_len,
-              m_blob_offset));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: %s map_pa=0x%llx map_len=0x%llx cache_type=0x%x host_cache_type=0x%x shmem_pa=0x%llx shmem_len=0x%llx blob_offset=0x%llx\n",
+                 __FUNCTION__,
+                 map_pa.QuadPart,
+                 map_len,
+                 cache_type,
+                 host_cache_type,
+                 shmem_pa.QuadPart,
+                 shmem_len,
+                 m_blob_offset);
+    }
     const BOOLEAN in_io_space = FALSE;
     user_va = NULL;
     status = dxgk->DxgkCbMapMemory(dxgk->DeviceHandle,
@@ -1344,13 +1474,15 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
         mapping_valid = probe_ok;
         if (!mapping_valid)
         {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("%s ERROR map probe failed user_va=%p map_len=0x%llx target_pid=%p target_process=%p\n",
-                      __FUNCTION__,
-                      user_va,
-                      map_len,
-                      target_pid,
-                      target_process));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: %s ERROR map probe failed user_va=%p map_len=0x%llx target_pid=%p target_process=%p\n",
+                         __FUNCTION__,
+                         user_va,
+                         map_len,
+                         target_pid,
+                         target_process);
+            }
             VIOGPU_ASSERT_CHK(false);
         }
 
@@ -1380,16 +1512,18 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
 
     if (!NT_SUCCESS(status) || !user_va || !mapping_valid)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s ERROR map failed res_id=0x%x status=0x%lx user_va=%p mapping_valid=%d map_pa=0x%llx map_len=0x%llx cache_type=0x%x\n",
-                  __FUNCTION__,
-                  m_Id,
-                  status,
-                  user_va,
-                  mapping_valid ? 1 : 0,
-                  map_pa.QuadPart,
-                  map_len,
-                  cache_type));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s ERROR map failed res_id=0x%x status=0x%lx user_va=%p mapping_valid=%d map_pa=0x%llx map_len=0x%llx cache_type=0x%x\n",
+                     __FUNCTION__,
+                     m_Id,
+                     status,
+                     user_va,
+                     mapping_valid ? 1 : 0,
+                     map_pa.QuadPart,
+                     map_len,
+                     cache_type);
+        }
         if (m_blob_map_user_refs == 0 && m_blob_mapped && !m_blob_kernel_va)
         {
             m_adapter->ctrlQueue.ResourceUnmapBlob(m_Id);
@@ -1436,14 +1570,16 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
 
     ExReleaseFastMutex(&m_blob_map_mutex);
 
-    DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("%s res_id=0x%x handle=0x%x m_blob_offset=0x%llx cache_type=0x%x map_len=0x%llx\n",
-              __FUNCTION__,
-              m_Id,
-              resMap->ResHandle,
-               m_blob_offset,
-              cache_type,
-              map_len));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: %s res_id=0x%x handle=0x%x m_blob_offset=0x%llx cache_type=0x%x map_len=0x%llx\n",
+                 __FUNCTION__,
+                 m_Id,
+                 resMap->ResHandle,
+                 m_blob_offset,
+                 cache_type,
+                 map_len);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -1451,7 +1587,10 @@ NTSTATUS VioGpuAllocation::EscapeResourceUnmapBlob(VIOGPU_RES_UNMAP_BLOB_REQ *re
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=0x%x\n", __FUNCTION__, m_Id));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <---> %s res_id=0x%x\n", __FUNCTION__, m_Id);
+    }
 
     if (!resUnmap)
     {
@@ -1473,14 +1612,16 @@ NTSTATUS VioGpuAllocation::EscapeResourceUnmapBlob(VIOGPU_RES_UNMAP_BLOB_REQ *re
         return STATUS_INVALID_PARAMETER;
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("%s unmap pid=%p process=%p user_va=%p ref=%u size=0x%llx\n",
-              __FUNCTION__,
-              target_pid,
-              map->Process,
-              map->UserVa,
-              map->RefCount,
-              map->Size));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: %s unmap pid=%p process=%p user_va=%p ref=%u size=0x%llx\n",
+                 __FUNCTION__,
+                 target_pid,
+                 map->Process,
+                 map->UserVa,
+                 map->RefCount,
+                 map->Size);
+    }
 
     map->RefCount--;
     m_blob_map_user_refs--;
@@ -1489,7 +1630,10 @@ NTSTATUS VioGpuAllocation::EscapeResourceUnmapBlob(VIOGPU_RES_UNMAP_BLOB_REQ *re
     {
         PVOID user_va = map->UserVa;
         RemoveEntryList(&map->ListEntry);
-        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s DxgkCbUnmapMemory res_id=0x%x user_va=%p\n", __FUNCTION__, m_Id, user_va));
+        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+        {
+            DbgPrint("VioGpu: %s DxgkCbUnmapMemory res_id=0x%x user_va=%p\n", __FUNCTION__, m_Id, user_va);
+        }
         m_adapter->GetDxgkInterface()->DxgkCbUnmapMemory(
             m_adapter->GetDxgkInterface()->DeviceHandle, user_va);
         if (map->Process)
@@ -1502,7 +1646,10 @@ NTSTATUS VioGpuAllocation::EscapeResourceUnmapBlob(VIOGPU_RES_UNMAP_BLOB_REQ *re
 
     if (m_blob_map_user_refs == 0 && m_blob_mapped && !m_blob_kernel_va)
     {
-        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s ResourceUnmapBlob res_id=0x%x\n", __FUNCTION__, m_Id));
+        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+        {
+            DbgPrint("VioGpu: %s ResourceUnmapBlob res_id=0x%x\n", __FUNCTION__, m_Id);
+        }
         m_adapter->ctrlQueue.ResourceUnmapBlob(m_Id);
         m_blob_mapped = false;
         m_blob_map_info = 0;

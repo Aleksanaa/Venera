@@ -115,7 +115,10 @@ void *mem_alloc_contiguous_pages(void *context, size_t size)
     }
     else
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("Ran out of memory in alloc_pages_exact(%Id)\n", size));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: Ran out of memory in alloc_pages_exact(%Id)\n", size);
+        }
     }
     return ptr;
 }
@@ -147,7 +150,10 @@ void *mem_alloc_nonpaged_block(void *context, size_t size)
     }
     else
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("Ran out of memory in alloc_pages_exact(%Id)\n", size));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: Ran out of memory in alloc_pages_exact(%Id)\n", size);
+        }
     }
     return ptr;
 }
@@ -170,7 +176,10 @@ static int PCIReadConfig(IVioGpuPCI *pDev, int where, void *buffer, size_t lengt
     PDXGKRNL_INTERFACE pDxgkInterface = pDev->GetDxgkInterface();
     ULONG BytesRead = 0;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     Status = pDxgkInterface->DxgkCbReadDeviceSpace(pDxgkInterface->DeviceHandle,
                                                    DXGK_WHICHSPACE_CONFIG,
                                                    buffer,
@@ -180,12 +189,18 @@ static int PCIReadConfig(IVioGpuPCI *pDev, int where, void *buffer, size_t lengt
 
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("DxgkCbReadDeviceSpace failed with status 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: DxgkCbReadDeviceSpace failed with status 0x%X\n", Status);
+        }
         return -1;
     }
     if (BytesRead != length)
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("[%s] read %d bytes at %d\n", __FUNCTION__, BytesRead, where));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: [%s] read %d bytes at %d\n", __FUNCTION__, BytesRead, where);
+        }
         return -1;
     }
     return 0;
@@ -295,7 +310,10 @@ PVOID CPciBar::GetVA(PDXGKRNL_INTERFACE pDxgkInterface)
 
     if (m_uSize > (ULONGLONG)MAXULONG)
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("%s ERROR BAR size 0x%I64x exceeds 4GB\n", __FUNCTION__, m_uSize));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: %s ERROR BAR size 0x%I64x exceeds 4GB\n", __FUNCTION__, m_uSize);
+        }
         return 0;
     }
 
@@ -314,13 +332,18 @@ PVOID CPciBar::GetVA(PDXGKRNL_INTERFACE pDxgkInterface)
                                                          &m_BaseVA);
                 if (Status == STATUS_SUCCESS)
                 {
-                    DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] mapped port BAR at %x\n", __FUNCTION__, m_BasePA.LowPart));
+                    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                    {
+                        DbgPrint("VioGpu: [%s] mapped port BAR at %x\n", __FUNCTION__, m_BasePA.LowPart);
+                    }
                 }
                 else
                 {
                     m_BaseVA = nullptr;
-                    DbgPrint(TRACE_LEVEL_ERROR,
-                             ("DxgkCbMapMemor (CmResourceTypePort) failed with status 0x%X\n", Status));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: DxgkCbMapMemor (CmResourceTypePort) failed with status 0x%X\n", Status);
+                    }
                 }
             }
             else
@@ -339,13 +362,18 @@ PVOID CPciBar::GetVA(PDXGKRNL_INTERFACE pDxgkInterface)
                                                      &m_BaseVA);
             if (Status == STATUS_SUCCESS)
             {
-                DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] mapped memory BAR at %I64x\n", __FUNCTION__, m_BasePA.QuadPart));
+                if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                {
+                    DbgPrint("VioGpu: [%s] mapped memory BAR at %I64x\n", __FUNCTION__, m_BasePA.QuadPart);
+                }
             }
             else
             {
                 m_BaseVA = nullptr;
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("[%s] failed to map memory BAR at %I64x\n", __FUNCTION__, m_BasePA.QuadPart));
+                if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                {
+                    DbgPrint("VioGpu: [%s] failed to map memory BAR at %I64x\n", __FUNCTION__, m_BasePA.QuadPart);
+                }
             }
         }
     }
@@ -374,27 +402,42 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
 
     m_pDxgkInterface = pDxgkInterface;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s\n", __FUNCTION__);
+    }
     Status = m_pDxgkInterface->DxgkCbReadDeviceSpace(m_pDxgkInterface->DeviceHandle,
                                                      DXGK_WHICHSPACE_CONFIG,
                                                      &pci_config,
                                                      0,
                                                      sizeof(pci_config),
                                                      &BytesRead);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s BytesRead = %d\n", __FUNCTION__, BytesRead));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: <--> %s BytesRead = %d\n", __FUNCTION__, BytesRead);
+    }
 
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("DxgkCbReadDeviceSpace failed with status 0x%X\n", Status));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: DxgkCbReadDeviceSpace failed with status 0x%X\n", Status);
+        }
         return false;
     }
 
     if (BytesRead != sizeof(pci_config))
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("[%s] could not read PCI config space\n", __FUNCTION__));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: [%s] could not read PCI config space\n", __FUNCTION__);
+        }
         return false;
     }
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s ListCount = %d\n", __FUNCTION__, pResList->Count));
+    if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+    {
+        DbgPrint("VioGpu: ---> %s ListCount = %d\n", __FUNCTION__, pResList->Count);
+    }
 
     for (ULONG i = 0; i < pResList->Count; ++i)
     {
@@ -407,7 +450,10 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
             {
                 case CmResourceTypePort:
                     {
-                        DbgPrint(TRACE_LEVEL_FATAL, ("CmResourceTypePort\n"));
+                        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                        {
+                            DbgPrint("VioGpu: CmResourceTypePort\n");
+                        }
                         break;
                     }
                     break;
@@ -416,21 +462,25 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
                         m_InterruptFlags = pResDescriptor->Flags;
                         if (IsMSIEnabled())
                         {
-                            DbgPrint(TRACE_LEVEL_FATAL,
-                                     ("Found MSI Interrupt vector %d, level %d, affinity 0x%X, flags %X\n",
-                                      pResDescriptor->u.MessageInterrupt.Translated.Vector,
-                                      pResDescriptor->u.MessageInterrupt.Translated.Level,
-                                      (ULONG)pResDescriptor->u.MessageInterrupt.Translated.Affinity,
-                                      pResDescriptor->Flags));
+                            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                            {
+                                DbgPrint("VioGpu: Found MSI Interrupt vector %d, level %d, affinity 0x%X, flags %X\n",
+                                         pResDescriptor->u.MessageInterrupt.Translated.Vector,
+                                         pResDescriptor->u.MessageInterrupt.Translated.Level,
+                                         (ULONG)pResDescriptor->u.MessageInterrupt.Translated.Affinity,
+                                         pResDescriptor->Flags);
+                            }
                         }
                         else
                         {
-                            DbgPrint(TRACE_LEVEL_FATAL,
-                                     ("Found Interrupt vector %d, level %d, affinity 0x%X, flags %X\n",
-                                      pResDescriptor->u.Interrupt.Vector,
-                                      pResDescriptor->u.Interrupt.Level,
-                                      (ULONG)pResDescriptor->u.Interrupt.Affinity,
-                                      pResDescriptor->Flags));
+                            if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                            {
+                                DbgPrint("VioGpu: Found Interrupt vector %d, level %d, affinity 0x%X, flags %X\n",
+                                         pResDescriptor->u.Interrupt.Vector,
+                                         pResDescriptor->u.Interrupt.Level,
+                                         (ULONG)pResDescriptor->u.Interrupt.Affinity,
+                                         pResDescriptor->Flags);
+                            }
                         }
                         interrupt_found = true;
                     }
@@ -440,8 +490,10 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
                         PHYSICAL_ADDRESS Start = pResDescriptor->u.Port.Start;
                         ULONG len = pResDescriptor->u.Port.Length;
                         bar = virtio_get_bar_index(&pci_config, Start);
-                        DbgPrint(TRACE_LEVEL_FATAL,
-                                 ("Found IO memory at %08I64X(%d) bar %d\n", Start.QuadPart, len, bar));
+                        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                        {
+                            DbgPrint("VioGpu: Found IO memory at %08I64X(%d) bar %d\n", Start.QuadPart, len, bar);
+                        }
                         if (bar < 0)
                         {
                             break;
@@ -455,8 +507,11 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
                         PHYSICAL_ADDRESS Start;
                         len = RtlCmDecodeMemIoResource(pResDescriptor, (PULONGLONG)&Start.QuadPart);
                         bar = virtio_get_bar_index(&pci_config, Start);
-                        DbgPrint(TRACE_LEVEL_VERBOSE, ("Found CM_RESOURCE_MEMORY_LARGE_XXX start=%llx len=%llx bar=%x\n", 
-                            Start.QuadPart, len, bar));
+                        if (nDebugLevel >= TRACE_LEVEL_VERBOSE)
+                        {
+                            DbgPrint("VioGpu: Found CM_RESOURCE_MEMORY_LARGE_XXX start=%llx len=%llx bar=%x\n",
+                                     Start.QuadPart, len, bar);
+                        }
                         if (bar < 0)
                         {
                             break;
@@ -465,23 +520,38 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
                     }
                     break;
                 case CmResourceTypeDma:
-                    DbgPrint(TRACE_LEVEL_FATAL, ("Dma\n"));
+                    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                    {
+                        DbgPrint("VioGpu: Dma\n");
+                    }
                     break;
                 case CmResourceTypeDeviceSpecific:
-                    DbgPrint(TRACE_LEVEL_FATAL, ("Device Specific\n"));
+                    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                    {
+                        DbgPrint("VioGpu: Device Specific\n");
+                    }
                     break;
                 case CmResourceTypeBusNumber:
-                    DbgPrint(TRACE_LEVEL_FATAL, ("Bus number\n"));
+                    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+                    {
+                        DbgPrint("VioGpu: Bus number\n");
+                    }
                     break;
                 default:
-                    DbgPrint(TRACE_LEVEL_ERROR, ("Unsupported descriptor type = %d\n", pResDescriptor->Type));
+                    if (nDebugLevel >= TRACE_LEVEL_ERROR)
+                    {
+                        DbgPrint("VioGpu: Unsupported descriptor type = %d\n", pResDescriptor->Type);
+                    }
                     break;
             }
         }
     }
     if (bar < 0 || !interrupt_found)
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("[%s] resource enumeration failed\n", __FUNCTION__));
+        if (nDebugLevel >= TRACE_LEVEL_FATAL)
+        {
+            DbgPrint("VioGpu: [%s] resource enumeration failed\n", __FUNCTION__);
+        }
         return false;
     }
     return true;
@@ -511,7 +581,10 @@ PVOID CPciResources::GetMappedAddress(UINT bar, ULONG uOffset)
     }
     else
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("[%s] failed to map BAR %d, offset %x\n", __FUNCTION__, bar, uOffset));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: [%s] failed to map BAR %d, offset %x\n", __FUNCTION__, bar, uOffset);
+        }
         return nullptr;
     }
 }
@@ -526,11 +599,13 @@ MapFrameBuffer(_In_ PHYSICAL_ADDRESS PhysicalAddress,
 
     if ((PhysicalAddress.QuadPart == (ULONGLONG)0) || (Length == 0) || (VirtualAddress == NULL))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("One of PhysicalAddress.QuadPart (0x%I64x), Length (%lu), VirtualAddress (%p) is NULL or 0\n",
-                  PhysicalAddress.QuadPart,
-                  Length,
-                  VirtualAddress));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: One of PhysicalAddress.QuadPart (0x%I64x), Length (%lu), VirtualAddress (%p) is NULL or 0\n",
+                     PhysicalAddress.QuadPart,
+                     Length,
+                     VirtualAddress);
+        }
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -541,18 +616,22 @@ MapFrameBuffer(_In_ PHYSICAL_ADDRESS PhysicalAddress,
         *VirtualAddress = MmMapIoSpace(PhysicalAddress, Length, MmNonCached);
         if (*VirtualAddress == NULL)
         {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("MmMapIoSpace returned a NULL buffer when trying to allocate %lu bytes", Length));
+            if (nDebugLevel >= TRACE_LEVEL_ERROR)
+            {
+                DbgPrint("VioGpu: MmMapIoSpace returned a NULL buffer when trying to allocate %lu bytes", Length);
+            }
             return STATUS_NO_MEMORY;
         }
     }
 
-    DbgPrint(TRACE_LEVEL_FATAL,
-             ("%s PhysicalAddress.QuadPart (0x%I64x), Length (%lu), VirtualAddress (%p)\n",
-              __FUNCTION__,
-              PhysicalAddress.QuadPart,
-              Length,
-              VirtualAddress));
+    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+    {
+        DbgPrint("VioGpu: %s PhysicalAddress.QuadPart (0x%I64x), Length (%lu), VirtualAddress (%p)\n",
+                 __FUNCTION__,
+                 PhysicalAddress.QuadPart,
+                 Length,
+                 VirtualAddress);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -561,15 +640,20 @@ UnmapFrameBuffer(_In_reads_bytes_(Length) VOID *VirtualAddress, _In_ ULONG Lengt
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_FATAL, ("%s Length (%lu), VirtualAddress (%p)\n", __FUNCTION__, Length, VirtualAddress));
+    if (nDebugLevel >= TRACE_LEVEL_FATAL)
+    {
+        DbgPrint("VioGpu: %s Length (%lu), VirtualAddress (%p)\n", __FUNCTION__, Length, VirtualAddress);
+    }
     if ((VirtualAddress == NULL) && (Length == 0))
     {
         return STATUS_SUCCESS;
     }
     else if ((VirtualAddress == NULL) || (Length == 0))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("Only one of Length (%lu), VirtualAddress (%p) is NULL or 0", Length, VirtualAddress));
+        if (nDebugLevel >= TRACE_LEVEL_ERROR)
+        {
+            DbgPrint("VioGpu: Only one of Length (%lu), VirtualAddress (%p) is NULL or 0", Length, VirtualAddress);
+        }
         return STATUS_INVALID_PARAMETER;
     }
 

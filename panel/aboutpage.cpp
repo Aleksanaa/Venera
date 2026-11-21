@@ -10,6 +10,7 @@
 #include <shellapi.h>
 
 #include <atomic>
+#include <algorithm>
 
 namespace panel {
 
@@ -25,27 +26,27 @@ constexpr wchar_t kProject[] = L"https://github.com/Aleksanaa/venera";
 constexpr wchar_t kTelegram[] = L"https://t.me/+pbvGcZWzH3RmNDA1";
 
 struct Credit {
-    const wchar_t *name, *use, *license, *url;
+    const wchar_t* name; unsigned use; locale::Message license; const wchar_t* url;
 };
 // What the installer's files are built from.
 const Credit kCredits[] = {
-    {L"yttrium", L"arehnman's virtio-gpu WDDM driver, resolution service and Mesa fork", L"BSD-3-Clause, MPL-2.0",
+    {L"yttrium", IDS_CreditYttrium, L"BSD-3-Clause, MPL-2.0",
      L"https://github.com/arehnman/yttrium-virtio-gpu"},
-    {L"Mesa", L"Venus, the Vulkan driver, and zink, OpenGL on Vulkan", L"MIT",
+    {L"Mesa", IDS_CreditMesa, L"MIT",
      L"https://github.com/arehnman/virtio-win-mesa"},
-    {L"DXVK", L"Direct3D 10 and 11 on Vulkan", L"Zlib", L"https://github.com/doitsujin/dxvk"},
-    {L"vkd3d-proton", L"Direct3D 12 on Vulkan", L"LGPL-2.1-or-later",
+    {L"DXVK", IDS_CreditDxvk, L"Zlib", L"https://github.com/doitsujin/dxvk"},
+    {L"vkd3d-proton", IDS_CreditVkd3d, L"LGPL-2.1-or-later",
      L"https://github.com/HansKristian-Work/vkd3d-proton"},
-    {L"dxil-spirv", L"Direct3D 12 shaders to SPIR-V, in vkd3d-proton", L"MIT",
+    {L"dxil-spirv", IDS_CreditDxil, L"MIT",
      L"https://github.com/HansKristian-Work/dxil-spirv"},
-    {L"dxbc-spirv", L"Direct3D 10 and 11 shaders to SPIR-V, in DXVK", L"MIT", L"https://github.com/doitsujin/dxbc-spirv"},
-    {L"libdisplay-info", L"Display information (EDID), in DXVK", L"MIT",
+    {L"dxbc-spirv", IDS_CreditDxbc, L"MIT", L"https://github.com/doitsujin/dxbc-spirv"},
+    {L"libdisplay-info", IDS_CreditDisplay, L"MIT",
      L"https://gitlab.freedesktop.org/emersion/libdisplay-info"},
-    {L"DirectX-Headers", L"Direct3D 12's headers", L"MIT", L"https://github.com/microsoft/DirectX-Headers"},
-    {L"Vulkan-Headers", L"Vulkan's headers", L"Apache-2.0 OR MIT", L"https://github.com/KhronosGroup/Vulkan-Headers"},
-    {L"MinGW-w64", L"The Windows runtime the drivers and tools are linked with", L"ZPL-2.1 and others",
+    {L"DirectX-Headers", IDS_CreditDirectx, L"MIT", L"https://github.com/microsoft/DirectX-Headers"},
+    {L"Vulkan-Headers", IDS_CreditVulkan, L"Apache-2.0 OR MIT", L"https://github.com/KhronosGroup/Vulkan-Headers"},
+    {L"MinGW-w64", IDS_CreditMingw, {IDS_LicenseMingw},
      L"https://www.mingw-w64.org"},
-    {L"GCC runtime and mcfgthread", L"C and C++ runtime libraries, linked in", L"GPL-3.0 with GCC exception",
+    {L"GCC runtime and mcfgthread", IDS_CreditRuntime, {IDS_LicenseRuntime},
      L"https://github.com/lhmouse/mcfgthread"},
 };
 constexpr int kCreditCount = sizeof(kCredits) / sizeof(kCredits[0]);
@@ -54,7 +55,8 @@ enum : int { kCheckId = kPageId, kChannelId, kDownloadId, kInstallId, kCancelId,
              kVersionText = kPageId + 100, kStatusText };
 
 struct Downloaded {
-    std::wstring path, error;
+    std::wstring path;
+    locale::Message error;
 };
 
 // The exe's icon (panel.rc), `px` pixels square, as premultiplied BGRA for a Direct2D bitmap.
@@ -99,7 +101,7 @@ public:
         if (cancel_)
             *cancel_ = true;
     }
-    const wchar_t* title() const override { return L"About"; }
+    const wchar_t* title() const override { return locale::text(IDS_About); }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui, float x, float w, float& y) override;
     void click(int id) override;
@@ -112,7 +114,7 @@ private:
     void check();
     void download();
     void install(const std::wstring& path);
-    void fail(const std::wstring& title, const std::wstring& error)
+    void fail(locale::Message title, locale::Message error)
     {
         state_ = kFailed;
         errorTitle_ = title;
@@ -121,14 +123,15 @@ private:
     void drawUpdate(Ui& ui, float x, float w, float& y);
     void drawAbout(Ui& ui, float x, float w, float& y);
     void drawIcon(Ui& ui, float x, float y, float size);
-    const wchar_t* newest() const { return channel_ == Channel::kDevelop ? L"build of main" : L"release"; }
+    const wchar_t* newest() const { return channel_ == Channel::kDevelop ? locale::text(IDS_DevelopNoun) : locale::text(IDS_ReleaseNoun); }
 
     HWND window_;
     State state_ = kIdle;
     Channel channel_ = buildChannel();  // or the other for this session: what it installs then follows that one
     std::wstring installed_ = installedVersion();
     Update update_;
-    std::wstring errorTitle_, error_, checkedAt_;
+    locale::Message errorTitle_, error_;
+    std::wstring checkedAt_;
     std::wstring downloaded_;  // kReady: the file
     ULONGLONG done_ = 0;
     unsigned gen_ = 0;  // the operation going on: what an older one posts is dropped
@@ -189,9 +192,7 @@ void About::install(const std::wstring& path)
     // it has no window but its error message box, which SW_HIDE would hide
     HANDLE process = startSelf(window_, args, SW_SHOWNORMAL);
     if (!process) {
-        fail(L"The update did not start", GetLastError() == ERROR_CANCELLED
-                                              ? L"Updating needs administrator rights: the prompt was turned down."
-                                              : L"Running venera-panel /update as administrator failed.");
+        fail({IDS_UpdateNotStarted}, {GetLastError() == ERROR_CANCELLED ? IDS_UpdateAdminDeclined : IDS_UpdateAdminFailed});
         return;
     }
     unsigned gen = ++gen_;
@@ -216,7 +217,7 @@ bool About::message(UINT msg, WPARAM wp, LPARAM lp)
         GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, nullptr, nullptr, time, 64);
         checkedAt_ = time;
         if (!update_.error.empty())
-            fail(L"Could not check for updates", update_.error);
+            fail({IDS_UpdateCheckFailed}, update_.error);
         else if (installed_.empty() || compareVersions(update_.version, installed_) > 0)
             state_ = kAvailable;
         else
@@ -234,7 +235,7 @@ bool About::message(UINT msg, WPARAM wp, LPARAM lp)
         if (wp != gen_)
             return false;
         if (!r->error.empty()) {
-            fail(L"Could not download Venera " + update_.version, r->error);
+            fail({IDS_DownloadFailed, {update_.version}}, r->error);
         } else {
             state_ = kReady;
             downloaded_ = r->path;
@@ -247,7 +248,7 @@ bool About::message(UINT msg, WPARAM wp, LPARAM lp)
         if (lp == 0)
             PostMessageW(window_, WM_CLOSE, 0, 0);
         else
-            fail(L"The update did not start", L"venera-panel /update showed why.");
+            fail({IDS_UpdateNotStarted}, {IDS_UpdateProcessFailed});
         return true;
     }
     return false;
@@ -269,8 +270,8 @@ void About::click(int id)
     } else if (id == kChannelId) {
         // The choices in a menu, as a ComboBox's dropdown, at the pointer.
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING | (channel_ == Channel::kRelease ? MF_CHECKED : 0), 1, L"Release");
-        AppendMenuW(menu, MF_STRING | (channel_ == Channel::kDevelop ? MF_CHECKED : 0), 2, L"Develop");
+        AppendMenuW(menu, MF_STRING | (channel_ == Channel::kRelease ? MF_CHECKED : 0), 1, locale::text(IDS_Release));
+        AppendMenuW(menu, MF_STRING | (channel_ == Channel::kDevelop ? MF_CHECKED : 0), 2, locale::text(IDS_Develop));
         POINT pt;
         GetCursorPos(&pt);
         int c = TrackPopupMenu(menu, TPM_RETURNCMD, pt.x, pt.y, 0, window_, nullptr);
@@ -305,70 +306,79 @@ void About::drawUpdate(Ui& ui, float x, float w, float& y)
     std::wstring title, sub;
     const wchar_t* glyph = L"";  // Sync
     UINT32 glyphColor = accent;
-    std::wstring have = installed_.empty() ? L"Venera is not installed" : L"Installed: " + installed_;
+    std::wstring have = installed_.empty() ? locale::text(IDS_VeneraNotInstalled) : locale::format(IDS_InstalledVersion, {installed_});
     switch (state_) {
     case kIdle:
-        title = installed_.empty() ? L"Venera is not installed" : L"Venera " + installed_;
-        sub = std::wstring(L"Check GitHub for the newest ") + newest();
+        title = installed_.empty() ? locale::text(IDS_VeneraNotInstalled) : L"Venera " + installed_;
+        sub = locale::text(channel_ == Channel::kDevelop ? IDS_CheckDevelop : IDS_CheckRelease);
         break;
     case kChecking:
-        title = L"Checking for updates";
-        sub = std::wstring(L"Asking GitHub for the newest ") + newest();
+        title = locale::text(IDS_CheckingUpdates);
+        sub = locale::text(channel_ == Channel::kDevelop ? IDS_AskingDevelop : IDS_AskingRelease);
         break;
     case kUpToDate:
-        title = L"You're up to date";
+        title = locale::text(IDS_UpToDate);
         glyph = L"";  // Completed
-        sub = have + L" · newest " + newest() + L": " + update_.version + L" · checked at " + checkedAt_ +
-              (update_.note.empty() ? L"" : L" · " + update_.note);
+        sub = locale::format(IDS_UpdateCurrent, {have, newest(), update_.version, checkedAt_}) +
+              (update_.note.empty() ? L"" : L" · " + update_.note.resolve());
         break;
     case kAvailable:
-        title = L"Venera " + update_.version + L" is available";
-        sub = have + L" · " + megabytes(update_.size) + (update_.note.empty() ? L"" : L" · " + update_.note);
+        title = locale::format(IDS_UpdateAvailable, {update_.version});
+        sub = have + L" · " + megabytes(update_.size) + (update_.note.empty() ? L"" : L" · " + update_.note.resolve());
         break;
     case kDownloading:
-        title = L"Downloading Venera " + update_.version;
-        sub = megabytes(done_) + L" of " + megabytes(update_.size);
+        title = locale::format(IDS_DownloadingVersion, {update_.version});
+        sub = locale::format(IDS_DownloadProgress, {megabytes(done_), megabytes(update_.size)});
         break;
     case kReady:
-        title = L"Venera " + update_.version + L" is ready to install";
-        sub = L"Installing needs administrator rights. The panel closes when the installer starts.";
+        title = locale::format(IDS_VersionReady, {update_.version});
+        sub = locale::text(IDS_InstallDescription);
         break;
     case kInstalling:
-        title = L"Installing Venera " + update_.version;
-        sub = L"Waiting for the installer to start";
+        title = locale::format(IDS_InstallingVersion, {update_.version});
+        sub = locale::text(IDS_WaitingInstaller);
         break;
     case kFailed:
-        title = errorTitle_;
+        title = errorTitle_.resolve();
         glyph = L"";  // Error
         glyphColor = kCritical;
-        sub = error_;
+        sub = error_.resolve();
         break;
     }
 
-    ui.card({x, y, x + w, y + kHeroH});
-    ui.text(glyph, Ui::kGlyph, {x + 24, y, x + 72, y + kHeroH}, glyphColor, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
-    float right = x + w - 24, cy = y + kHeroH / 2;
+    const wchar_t* action = state_ == kAvailable ? locale::text(IDS_Download) :
+        state_ == kReady ? locale::text(IDS_Install) : state_ == kDownloading ? locale::text(IDS_Cancel) :
+        state_ == kFailed ? locale::text(IDS_TryAgain) : locale::text(IDS_CheckUpdates);
+    float actionWidth = state_ == kChecking || state_ == kInstalling ? 28.f : ui.buttonWidth(action);
+    if (state_ == kDownloading) actionWidth += 44;
+    float textWidth = std::max(100.f, w - 144 - actionWidth);
+    auto heading = ui.wrap(title, Ui::kSubtitle, textWidth);
+    auto description = ui.wrap(sub, Ui::kBody, textWidth);
+    float heroH = std::max(kHeroH, heading.height + description.height + 48);
+    ui.card({x, y, x + w, y + heroH});
+    ui.text(glyph, Ui::kGlyph, {x + 24, y, x + 72, y + heroH}, glyphColor, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
+    float right = x + w - 24, cy = y + heroH / 2;
     if (state_ == kAvailable) {
-        right = ui.buttonRight(L"Download", right, cy, kDownloadId, true);
+        right = ui.buttonRight(locale::text(IDS_Download), right, cy, kDownloadId, true);
     } else if (state_ == kReady) {
-        right = ui.buttonRight(L"Install", right, cy, kInstallId, true);
+        right = ui.buttonRight(locale::text(IDS_Install), right, cy, kInstallId, true);
     } else if (state_ == kDownloading) {
-        right = ui.buttonRight(L"Cancel", right, cy, kCancelId, false) - 16 - 28;
+        right = ui.buttonRight(locale::text(IDS_Cancel), right, cy, kCancelId, false) - 16 - 28;
         ui.progressRing(right + 14, cy, 28, update_.size ? float(done_) / update_.size : -1);
     } else if (state_ == kChecking || state_ == kInstalling) {
         right -= 28;
         ui.progressRing(right + 14, cy, 28, -1);
     } else {
-        const wchar_t* label = state_ == kFailed ? L"Try again" : L"Check for updates";
+        const wchar_t* label = state_ == kFailed ? locale::text(IDS_TryAgain) : locale::text(IDS_CheckUpdates);
         right = ui.buttonRight(label, right, cy, kCheckId, false);
     }
-    ui.text(title, Ui::kSubtitle, {x + 96, y + 22, right - 24, y + 52});
-    ui.selectable(kStatusText, sub, Ui::kBody, {x + 96, y + 56, right - 24, y + 80}, kWhite, kTextSecondary);
-    y += kHeroH + kGap;
+    ui.text(heading, x + 96, y + 20);
+    ui.selectable(kStatusText, description, x + 96, y + 28 + heading.height, kWhite, kTextSecondary);
+    y += heroH + kGap;
 
-    float ccy = ui.settingsCard(x, y, w, L"" /* Switch */, L"Update channel",
-                                L"Release: tagged versions. Develop: the newest working build of main");
-    ui.comboBox(x + w - 16, ccy, kChannelId, {L"Release", L"Develop"}, channel_ == Channel::kDevelop,
+    float ccy = ui.settingsCard(x, y, w, L"" /* Switch */, locale::text(IDS_UpdateChannel),
+                                locale::text(IDS_UpdateChannelDescription));
+    ui.comboBox(x + w - 16, ccy, kChannelId, {locale::text(IDS_Release), locale::text(IDS_Develop)}, channel_ == Channel::kDevelop,
                 state_ != kDownloading && state_ != kInstalling);
 }
 
@@ -392,9 +402,9 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
         std::wstring value;
     };
     const Row rows[] = {
-        {L"Developer", L"Aleksana"},
-        {L"Contributors", L"MiRinChan, gjz010, xddxdd"},
-        {L"License", L"MIT"},
+        {locale::text(IDS_Developer), L"Aleksana"},
+        {locale::text(IDS_Contributors), L"MiRinChan, gjz010, xddxdd"},
+        {locale::text(IDS_License), L"MIT"},
     };
     constexpr int kRows = sizeof(rows) / sizeof(rows[0]);
     float topH = 144, h = topH + 1 + 12 + kRows * 32 + 12;
@@ -404,11 +414,11 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
     float right = ui.buttonRight(L"Telegram", x + w - 24, y + 72, kTelegramId, false);
     right = ui.buttonRight(L"GitHub", right - 8, y + 72, kGithubId, false) - 24;
     ui.text(L"Venera", Ui::kTitle, {tx, y + 26, right, y + 66});
-    ui.text(L"Hardware-accelerated Direct3D 9 to 12, Vulkan and OpenGL for Windows guests in QEMU", Ui::kBody,
+    ui.text(locale::text(IDS_ProductDescription), Ui::kBody,
             {tx, y + 68, right, y + 90}, kWhite, kTextSecondary);
     const std::wstring version =
-        L"Version " + installed_ + (buildChannel() == Channel::kDevelop ? L", develop build" : L"");
-    ui.selectable(kVersionText, installed_.empty() ? L"Not installed" : version, Ui::kCaption,
+        locale::format(buildChannel() == Channel::kDevelop ? IDS_DevelopVersion : IDS_Version, {installed_});
+    ui.selectable(kVersionText, installed_.empty() ? locale::text(IDS_NotInstalled) : version, Ui::kCaption,
                   {tx, y + 92, right, y + 112}, kWhite, kTextTertiary);
     ui.divider(x, w, y + topH);
     float ry = y + topH + 1 + 12;
@@ -420,7 +430,7 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
     y += h;
 
     // the projects, one row each, as Settings' related links: the license and an arrow out on the right
-    ui.sectionHeader(L"Open-source projects in Venera", x, y);
+    ui.sectionHeader(locale::text(IDS_OpenSourceProjects), x, y);
     h = kCreditCount * kRowH;
     ui.card({x, y, x + w, y + h});
     for (int i = 0; i < kCreditCount; i++) {
@@ -435,8 +445,8 @@ void About::drawAbout(Ui& ui, float x, float w, float& y)
                     pressed ? kControlPressed : kCardHover - kCardFill);
         ui.hot({x, top, x + w, top + kRowH}, id);
         float licenseW = 220;
-        ui.titleDesc(x + 16, x + w - licenseW - 56, top + kRowH / 2, c.name, c.use);
-        ui.text(c.license, Ui::kBody, {x + w - licenseW - 48, top, x + w - 48, top + kRowH}, kWhite, kTextSecondary,
+        ui.titleDesc(x + 16, x + w - licenseW - 56, top + kRowH / 2, c.name, locale::text(c.use));
+        ui.text(c.license.resolve(), Ui::kBody, {x + w - licenseW - 48, top, x + w - 48, top + kRowH}, kWhite, kTextSecondary,
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
         ui.text(L"" /* OpenInNewWindow */, Ui::kIconSmall, {x + w - 40, top, x + w - 16, top + kRowH}, kWhite,
                 kTextSecondary, DWRITE_TEXT_ALIGNMENT_CENTER);

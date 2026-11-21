@@ -1,0 +1,7 @@
+#pragma once
+#define TRACE_ALL 1
+#define WPP_INIT_TRACING(driver, path) ((void)0)
+#define WPP_CLEANUP(driver) ((void)0)
+void RecorderEvent(UCHAR recorderLevel, int, RECORDER_LOG, const char*,
+    ULONGLONG, ULONGLONG, ULONGLONG, USHORT eventId, UCHAR version,
+    UCHAR payloadLevel, ULONG, NTSTATUS, const char*, const char*);

@@ -29,6 +29,7 @@ set(pkg "${OUT_DIR}/package")
 file(REMOVE_RECURSE "${pkg}")
 file(MAKE_DIRECTORY "${pkg}")
 file(READ "${SOURCE_DIR}/pkg/venera.inf" inf)
+string(REGEX REPLACE "AddService *= *VeneraDebugGuest,[^\n]*" "" inf "${inf}")
 string(REPLACE "\r" "" inf "${inf}")
 string(REGEX REPLACE "\nDriverVer *=[^\n]*" "\n; Built from ${describe} at ${now}.\nDriverVer   = ${date},${number}"
        stamped "${inf}")
@@ -41,10 +42,15 @@ foreach(f IN LISTS FILES)
   get_filename_component(name "${f}" NAME)
   file(COPY_FILE "${f}" "${pkg}/${name}")
 endforeach()
+include("${CMAKE_CURRENT_LIST_DIR}/viosock-payload.cmake")
+viosock_payload("${VIOSOCK_DIR}" viosock_files)
+if(VIOSOCK_DIR)
+  file(MAKE_DIRECTORY "${pkg}/viosock")
+  file(COPY ${viosock_files} DESTINATION "${pkg}/viosock")
+endif()
 
-# Solid LZMS compresses the files together, so each *_32.dll mostly costs what differs from its 64-bit twin: about 40%
-# smaller than a cabinet's MSZIP. wimlib's default 64 MiB chunks are the largest Windows' WIMGAPI reads.
-execute_process(COMMAND "${WIMLIB}" capture "${pkg}" "${OUT_DIR}/payload.wim.tmp" Venera --solid
+# LZX with the default 32 KiB chunks is applied by Windows' WIMGAPI.
+execute_process(COMMAND "${WIMLIB}" capture "${pkg}" "${OUT_DIR}/payload.wim.tmp" Venera --compress=LZX
                 OUTPUT_QUIET RESULT_VARIABLE r)
 if(NOT r EQUAL 0)
   message(FATAL_ERROR "wimlib-imagex capture failed")

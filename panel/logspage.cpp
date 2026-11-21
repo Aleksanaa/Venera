@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
-// Logs: what the drivers print, live (LogCapture). Start begins a capture, which keeps going until Stop or the panel
-// closes. Without administrator rights it sees only this session's programs, and an InfoBar offers to restart the
-// panel elevated, for the kernel driver's messages and services' output.
+// Live debug-service subscription and local display filters.
 #include "panel.h"
+#include "debugchannel.h"
 
 #include <commdlg.h>
 #include <shlobj.h>
 
 #include <deque>
+#include <map>
 
 namespace panel {
 
@@ -23,7 +23,7 @@ enum : int { kCaptureId = kPageId, kClearId, kExportId, kElevateId, kFilterId, k
 
 // The SelectorBar narrows step by step: everything, the drivers' lines, their warnings and errors, their errors.
 enum Filter { kAll, kDrivers, kWarnings, kErrors };
-const wchar_t* const kFilters[] = {L"All", L"Drivers", L"Warnings", L"Errors"};
+const unsigned kFilters[] = {IDS_All, IDS_Drivers, IDS_Warnings, IDS_Errors};
 
 std::wstring clock(const SYSTEMTIME& t, bool ms)
 {
@@ -35,15 +35,15 @@ std::wstring clock(const SYSTEMTIME& t, bool ms)
     return buf;
 }
 
-struct Line : LogLine {
+struct Line : GuestLogUpdate {
     unsigned seq;
 };
 
 class Logs : public Page {
 public:
-    explicit Logs(HWND window) : window_(window) {}
-    ~Logs() override { capture_.stop(); }
-    const wchar_t* title() const override { return L"Logs"; }
+    explicit Logs(HWND window) : window_(window) { SetTimer(window_, kPageTimer + 31, 500, nullptr); }
+    ~Logs() override { KillTimer(window_, kPageTimer + 31); capture_.stop(); }
+    const wchar_t* title() const override { return locale::text(IDS_Logs); }
     const wchar_t* icon() const override { return L""; }
     void draw(Ui& ui, float x, float w, float& y) override;
     void click(int id) override;
@@ -55,91 +55,102 @@ private:
     void start();
     bool shown(const Line& l) const
     {
-        return filter_ == kAll || (!l.component.empty() && l.level >= filter_ - kDrivers);
+        return l.visible && (filter_ == kAll || (!l.line.component.empty() && l.line.level >= filter_ - kDrivers));
     }
     void exportLog();
-    void elevate();
 
     HWND window_;
-    LogCapture capture_;
-    bool admin_ = elevated();
+    GuestLogs capture_;
     SYSTEMTIME since_ = {};
-    int filter_ = kDrivers;
+    int filter_ = kAll;
     std::deque<Line> lines_;
+    std::map<decltype(GuestLogUpdate::cursor), unsigned> cursors_;
     unsigned seq_ = 0;
     std::mutex mutex_;
-    std::vector<LogLine> pending_;  // from the capture's threads
+    std::vector<GuestLogUpdate> pending_;
 };
 
 void Logs::start()
 {
     GetLocalTime(&since_);
-    capture_.start([this](LogLine&& l) {
+    capture_.startRevisable([this](GuestLogUpdate&& l) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (pending_.empty())
             PostMessageW(window_, kLines, 0, 0);
-        pending_.push_back(std::move(l));
+        if (pending_.size() < kMaxLines || l.revision)
+            pending_.push_back(std::move(l));
     });
 }
 
-bool Logs::message(UINT msg, WPARAM, LPARAM)
+bool Logs::message(UINT msg, WPARAM wp, LPARAM)
 {
+    if (msg == WM_TIMER && wp == kPageTimer + 31)
+        return true;
     if (msg != kLines)
         return false;
-    std::vector<LogLine> got;
+    std::vector<GuestLogUpdate> got;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         got.swap(pending_);
     }
-    for (LogLine& l : got)
-        lines_.push_back({std::move(l), seq_++});
-    while (lines_.size() > kMaxLines)
-        lines_.pop_front();
+    for (auto& update : got) {
+        if (update.revision) {
+            auto found = cursors_.find(update.cursor);
+            if (found != cursors_.end()) {
+                auto& row = lines_[found->second - lines_.front().seq];
+                row.line.pid = update.line.pid;
+                row.line.process = update.line.process.empty() ? row.source : std::move(update.line.process);
+                row.visible = update.visible;
+            }
+            continue;
+        }
+        if (!update.cursor.first.empty()) {
+            if (!cursors_.emplace(update.cursor, seq_).second)
+                continue;
+        }
+        lines_.push_back({std::move(update), seq_++});
+        if (lines_.size() > kMaxLines) {
+            cursors_.erase(lines_.front().cursor);
+            lines_.pop_front();
+        }
+    }
     return true;
 }
 
 void Logs::draw(Ui& ui, float x, float w, float& y)
 {
     if (capture_.running()) {
-        std::wstring desc = L"Since " + clock(since_, false) + L", from " +
-                            (capture_.kernelError.empty() ? L"programs, services and the kernel"
-                                                          : L"programs in this session");
-        float cy = ui.settingsCard(x, y, w, L"", L"Capturing debug output", desc, kCritical);
-        ui.buttonRight(L"Stop", x + w - 16, cy, kCaptureId, false);
+        std::wstring desc = locale::format(IDS_LogSince, {clock(since_, false)});
+        float cy = ui.settingsCard(x, y, w, L"", locale::text(IDS_FollowingDebug), desc, kCritical);
+        ui.buttonRight(locale::text(IDS_Stop), x + w - 16, cy, kCaptureId, false);
     } else {
-        float cy = ui.settingsCard(x, y, w, L"", L"Capture debug output",
-                                   L"What the drivers print while programs use the GPU");
-        ui.buttonRight(L"Start", x + w - 16, cy, kCaptureId, true);
+        float cy = ui.settingsCard(x, y, w, L"", locale::text(IDS_FollowDebug),
+                                   locale::text(IDS_LiveMessages));
+        ui.buttonRight(locale::text(IDS_Start), x + w - 16, cy, kCaptureId, true);
     }
 
-    // InfoBars for what the capture cannot see.
-    if (!admin_)
-        ui.infoBar(x, w, y, Ui::Severity::kInformational, L"",
-                   L"Restart as administrator to also see the kernel driver's messages and services' output.",
-                   L"Restart as administrator", kElevateId);
-    if (capture_.running() && !capture_.userError.empty())
-        ui.infoBar(x, w, y, Ui::Severity::kError, L"", capture_.userError + L".");
-    if (capture_.running() && admin_ && !capture_.kernelError.empty())
-        ui.infoBar(x, w, y, Ui::Severity::kError, L"", capture_.kernelError + L".");
+    std::wstring error = capture_.error();
+    if (!error.empty())
+        ui.infoBar(x, w, y, Ui::Severity::kError, L"", error);
     y += 16;
 
     // SelectorBar for which lines, actions on the right
     float fx = x;
     for (int i = 0; i < 4; i++) {
-        float tw = ui.measure(kFilters[i], Ui::kBody) + 24;
+        float tw = ui.measure(locale::text(kFilters[i]), Ui::kBody) + 24;
         D2D1_RECT_F r = {fx, y, fx + tw, y + 40};
         bool sel = filter_ == i, h = ui.pointer(kFilterId + i).over;
         if (h && !sel)
             ui.fill({r.left, r.top + 4, r.right, r.bottom - 4}, 4, kWhite, kControl);
-        ui.text(kFilters[i], Ui::kBody, r, kWhite, sel || h ? kTextPrimary : kTextSecondary,
+        ui.text(locale::text(kFilters[i]), Ui::kBody, r, kWhite, sel || h ? kTextPrimary : kTextSecondary,
                 DWRITE_TEXT_ALIGNMENT_CENTER);
         if (sel)
             ui.fill({fx + tw / 2 - 8, y + 36, fx + tw / 2 + 8, y + 39}, 1.5f, accent);
         ui.hot(r, kFilterId + i);
         fx += tw;
     }
-    float bx = ui.buttonRight(L"Export", x + w, y + 20, kExportId, false);
-    ui.buttonRight(L"Clear", bx - 8, y + 20, kClearId, false);
+    float bx = ui.buttonRight(locale::text(IDS_Export), x + w, y + 20, kExportId, false);
+    ui.buttonRight(locale::text(IDS_Clear), bx - 8, y + 20, kClearId, false);
     y += 40 + 12;
 
     std::vector<const Line*> shownLines;
@@ -148,9 +159,9 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
             shownLines.push_back(&l);
     if (shownLines.empty()) {
         ui.card({x, y, x + w, y + 64});
-        ui.text(!capture_.running() ? L"Start capturing to see what the drivers print."
-                : filter_ == kAll   ? L"Nothing yet."
-                                    : L"Nothing from the drivers yet. They print as programs use the GPU.",
+        ui.text(!capture_.running() ? locale::text(IDS_CaptureEmpty)
+                : filter_ == kAll   ? locale::text(IDS_NothingYet)
+                                    : locale::text(IDS_NoDriverMessages),
                 Ui::kBody, {x + 16, y, x + w - 16, y + 64}, kWhite, kTextSecondary);
         y += 64;
         return;
@@ -162,7 +173,7 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
         size_t i = unsigned(id - kLineText) - lines_.front().seq % 100000000;
         if (i >= lines_.size() || !shown(lines_[i]))
             return false;
-        *s = lines_[i].text;
+        *s = lines_[i].line.text;
         return true;
     });
     // The lines fill the card down to the window's bottom and scroll in it.
@@ -176,14 +187,19 @@ void Logs::draw(Ui& ui, float x, float w, float& y)
         float ry = y + 12 + i * kRowH;
         if (ry > bottom)
             break;
-        const Line* l = shownLines[i];
+        const LogLine* l = &shownLines[i]->line;
         if (l->level)
             ui.text(l->level == 2 ? L"" : L"", Ui::kIconSmall, {x + 12, ry, x + 30, ry + kRowH},
                     l->level == 2 ? kCritical : kCaution, 1, DWRITE_TEXT_ALIGNMENT_CENTER);
         ui.text(clock(l->time, true), Ui::kMono, {x + 38, ry, x + 142, ry + kRowH}, kWhite, kTextTertiary);
-        ui.text(l->component.empty() ? l->process : l->component, Ui::kMono, {x + 146, ry, x + 230, ry + kRowH},
+        std::wstring projection = l->process.substr(l->process.find_last_of(L"\\/") + 1);
+        if (l->pid) projection += L"[" + std::to_wstring(l->pid) + L"]";
+        if (!l->component.empty() && l->component != l->process)
+            projection = l->component + (projection.empty() ? L"" : L" · " + projection);
+        float body = x + std::min(320.f, std::max(238.f, w * .44f));
+        ui.text(projection, Ui::kMono, {x + 146, ry, body - 8, ry + kRowH},
                 kWhite, kTextSecondary);
-        ui.selectable(kLineText + int(l->seq % 100000000), l->text, Ui::kMono, {x + 238, ry, x + w - 20, ry + kRowH},
+        ui.selectable(kLineText + int(shownLines[i]->seq % 100000000), l->text, Ui::kMono, {body, ry, x + w - 20, ry + kRowH},
                      kWhite, kTextPrimary, kLineRun);
     }
     ui.endScroll();
@@ -201,10 +217,9 @@ void Logs::click(int id)
             start();
     } else if (id == kClearId) {
         lines_.clear();
+        cursors_.clear();
     } else if (id == kExportId) {
         exportLog();
-    } else if (id == kElevateId) {
-        elevate();
     }
 }
 
@@ -219,7 +234,11 @@ void Logs::exportLog()
     SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, docs);
     OPENFILENAMEW ofn = {sizeof(ofn)};
     ofn.hwndOwner = window_;
-    ofn.lpstrFilter = L"Text files (*.txt)\0*.txt\0All files\0*.*\0";
+    std::wstring filters = locale::text(IDS_TextFiles);
+    filters += L'\0'; filters += L"*.txt"; filters += L'\0';
+    filters += locale::text(IDS_AllFiles);
+    filters += L'\0'; filters += L"*.*"; filters += L'\0'; filters += L'\0';
+    ofn.lpstrFilter = filters.c_str();
     ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrInitialDir = docs;
@@ -229,7 +248,8 @@ void Logs::exportLog()
         return;
     std::wstring text;
     for (const Line& l : lines_)
-        text += formatLogLine(l) + L"\r\n";
+        if (l.visible)
+            text += formatLogLine(l.line) + L"\r\n";
     std::string utf8 = narrow(text);
     HANDLE f = CreateFileW(file, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE)
@@ -237,16 +257,6 @@ void Logs::exportLog()
     DWORD written;
     WriteFile(f, utf8.data(), DWORD(utf8.size()), &written, nullptr);
     CloseHandle(f);
-}
-
-// The panel again as administrator, on this page. This one lets go of debug output first: only one program can
-// read it.
-void Logs::elevate()
-{
-    bool was = capture_.running();
-    capture_.stop();
-    if (!restartElevated(window_, 2) && was)
-        start();
 }
 
 }  // namespace

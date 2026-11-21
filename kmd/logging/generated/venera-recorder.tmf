@@ -1,0 +1,14 @@
+5b4a52f6-c9de-3944-ec13-d1aa98628939 Venera // SRC=recorder.cpp
+#typev recorder_cpp53 10 "%0instance=%10!I64u! sequence=%11!I64u! time=%12!I64u! event=%13!u! version=%14!c! level=%15!c! line=%16!u! status=%17!ld! function=%18!s! message=%19!s!" //  LEVEL=level FLAGS=TRACE_ALL IFRLOG=RecorderLog
+{
+producerInstance, ItemULongLong -- 10
+sequence, ItemULongLong -- 11
+sourceTime, ItemULongLong -- 12
+eventId, ItemShort -- 13
+version, ItemUChar -- 14
+level, ItemUChar -- 15
+line, ItemLong -- 16
+status, ItemLong -- 17
+function, ItemString -- 18
+message, ItemString -- 19
+}

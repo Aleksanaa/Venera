@@ -1,0 +1,38 @@
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -40,6 +40,7 @@
+ #if DETECT_OS_WINDOWS
+ 
+ #include <windows.h>
++#include "engine_etw.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ 
+@@ -115,7 +116,7 @@
+    }
+ 
+ #if DETECT_OS_WINDOWS
+-   OutputDebugStringA(message);
++   venera_engine_text(VENERA_MESA_OS, "unknown", "default", message, strlen(message));
+ #if !defined(_GAMING_XBOX)
+    if(GetConsoleWindow() && !IsDebuggerPresent()) {
+       fflush(stdout);
+--- a/src/util/log.c
++++ b/src/util/log.c
+@@ -42,6 +42,7 @@
+ 
+ #if DETECT_OS_WINDOWS
+ #include <windows.h>
++#include "engine_etw.h"
+ #endif
+ 
+ enum mesa_log_control {
+@@ -412,7 +413,7 @@
+          LOGGER_VASNPRINTF_AFFIX_NEWLINE,
+          level, tag, format, va);
+ 
+-   OutputDebugStringA(msg);
++   venera_engine_text(VENERA_MESA_LOG, level_to_str(level), tag, msg, strlen(msg));
+ 
+    if (msg != local_msg)
+       free(msg);

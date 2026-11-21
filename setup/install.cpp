@@ -19,19 +19,26 @@
 // The kernel loads viogpu3d.sys on its own test signature (test signing on), whoever made it; the catalog's signature
 // only serves PnP, which wants a publisher it trusts. That is why the certificate can be local: its private key is
 // created on this computer, cannot be exported, and nobody else holds one that Windows here trusts.
+#include <winsock2.h>
+#include <ws2spi.h>
 #include "setup.h"
+#include "uninstaller-copy.h"
+#include "viosock-state.h"
 
+#include <cfgmgr32.h>
 #include <cryptuiapi.h>
 #include <mscat.h>
 #include <ncrypt.h>
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 #include <setupapi.h>
 #include <wincrypt.h>
 
 #include <filesystem>
 #include <fstream>
+#include "capture.h"
 
 namespace fs = std::filesystem;
 
@@ -44,6 +51,7 @@ namespace {
 
 constexpr wchar_t kKeyName[] = L"venera-test-signing";
 constexpr wchar_t kSetupName[] = L"venera-setup.exe";
+bool pending_reboot = false;
 // Earlier builds called the product vgd; an update from one removes what it left (remove_old_vgd).
 constexpr wchar_t kOldCertSubject[] = L"vgd test signing";
 constexpr wchar_t kOldCleanupTask[] = L"vgd cleanup";
@@ -58,11 +66,26 @@ std::wstring install_dir()
     return known_folder(FOLDERID_ProgramFiles) + L"\\Venera";
 }
 
+void configure_capture(bool enabled)
+{
+    const auto directory = known_folder(FOLDERID_ProgramData) + L"\\Venera\\DebugCapture";
+    DWORD code;
+    if (enabled) {
+        std::error_code error;
+        fs::create_directories(directory, error);
+        if (error) fail(L"Creating the kernel capture directory failed", error.value());
+        code = capture::configure(capture::primary, directory, false);
+        if (!code) code = capture::configure(capture::legacy, directory, true);
+    } else {
+        code = capture::remove(capture::primary, L"VeneraKernelLog", directory);
+        if (!code) code = capture::remove(capture::legacy, L"NT Kernel Logger", directory);
+    }
+    if (code) fail(L"Updating kernel capture failed", code);
+}
+
 // --- The payload
 
-// Applies image 1 of the WIM at `wim` into `dir` with Windows' WIMGAPI (wimgapi.dll in System32), which reads the solid
-// LZMS WIMs (ESD files) the build makes; `temp` is its scratch directory. MinGW has neither its header nor an import
-// library. Returns the error, 0 on success.
+// Applies image 1 with Windows' WIMGAPI; temp is its scratch directory.
 DWORD apply_wim(const std::wstring& wim, const std::wstring& dir, const std::wstring& temp)
 {
     using WimCreateFile = HANDLE(WINAPI*)(PCWSTR, DWORD, DWORD, DWORD, DWORD, PDWORD);
@@ -71,8 +94,11 @@ DWORD apply_wim(const std::wstring& wim, const std::wstring& dir, const std::wst
     using WimApplyImage = BOOL(WINAPI*)(HANDLE, PCWSTR, DWORD);
     using WimCloseHandle = BOOL(WINAPI*)(HANDLE);
     HMODULE lib = LoadLibraryExW(L"wimgapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!lib)
-        return GetLastError();
+    if (!lib) {
+        DWORD error = GetLastError();
+        log(L"Loading WIMGAPI failed: " + error_text(error));
+        return error;
+    }
     auto create_file = reinterpret_cast<WimCreateFile>(GetProcAddress(lib, "WIMCreateFile"));
     auto set_temporary_path = reinterpret_cast<WimSetTemporaryPath>(GetProcAddress(lib, "WIMSetTemporaryPath"));
     auto load_image = reinterpret_cast<WimLoadImage>(GetProcAddress(lib, "WIMLoadImage"));
@@ -84,14 +110,32 @@ DWORD apply_wim(const std::wstring& wim, const std::wstring& dir, const std::wst
         DWORD created = 0;
         HANDLE h = create_file(wim.c_str(), GENERIC_READ, OPEN_EXISTING, 0, 0, &created);
         HANDLE image = nullptr;
-        if (!h || !set_temporary_path(h, temp.c_str()) || !(image = load_image(h, 1)) ||
-            !apply_image(image, dir.c_str(), 0))
+        const wchar_t* stage = L"WIMCreateFile";
+        if (h) {
+            stage = L"WIMSetTemporaryPath";
+            if (set_temporary_path(h, temp.c_str())) {
+                stage = L"WIMLoadImage";
+                image = load_image(h, 1);
+                if (image) {
+                    stage = L"WIMApplyImage";
+                    if (apply_image(image, dir.c_str(), 0))
+                        stage = nullptr;
+                }
+            }
+        }
+        if (stage) {
             error = GetLastError();
+            log(format(L"%ls failed for %ls: %ls", stage, wim.c_str(), error_text(error).c_str()));
+        } else {
+            log(L"WIMApplyImage completed for " + wim);
+        }
         if (image)
             close_handle(image);
         if (h)
             close_handle(h);
     }
+    if (error == ERROR_PROC_NOT_FOUND)
+        log(L"Resolving WIMGAPI entry points failed: " + error_text(error));
     FreeLibrary(lib);
     return error;
 }
@@ -124,7 +168,8 @@ std::vector<std::wstring> unpack(const std::wstring& dir)
 
     std::vector<std::wstring> files;
     for (const auto& entry : fs::directory_iterator(dir))
-        files.push_back(entry.path().filename().wstring());
+        if (entry.is_regular_file())
+            files.push_back(entry.path().filename().wstring());
     log(format(L"Unpacked %zu files into %ls", files.size(), dir.c_str()));
     return files;
 }
@@ -348,14 +393,17 @@ void remove_package(const DriverPackage& p)
 }
 
 // Deletes a file now or, if it is loaded, at the next restart.
-void delete_file(const std::wstring& path)
+void delete_file(const std::wstring& path, bool required = false)
 {
     if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
         return;
     if (DeleteFileW(path.c_str()))
         log(L"Deleted " + path);
-    else if (MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT))
+    else if (MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT)) {
+        pending_reboot = true;
         log(L"Deleting " + path + L" at the next restart (in use)");
+    } else if (required)
+        fail(L"Deleting " + path + L" failed");
     else
         log(L"Could not delete " + path + L": " + error_text(GetLastError()));
 }
@@ -440,6 +488,219 @@ void delete_our_service(const wchar_t* name)
         CloseServiceHandle(scm);
 }
 
+bool our_debug_command(const wchar_t* command)
+{
+    int count = 0;
+    auto args = command ? CommandLineToArgvW(command, &count) : nullptr;
+    bool ours = args && count == 2 &&
+                _wcsicmp(fs::path(args[0]).filename().c_str(), L"venera-debug-guest.exe") == 0 &&
+                _wcsicmp(args[1], L"service") == 0;
+    LocalFree(args);
+    return ours;
+}
+
+void stop_debug_service(bool remove)
+{
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm)
+        fail(L"Opening Windows services failed");
+    SC_HANDLE service = OpenServiceW(scm, L"VeneraDebugGuest",
+                                    SERVICE_QUERY_CONFIG | SERVICE_QUERY_STATUS | SERVICE_STOP | DELETE);
+    DWORD error = service ? ERROR_SUCCESS : GetLastError();
+    if (service) {
+        std::vector<BYTE> buf(8192);
+        DWORD size = 0;
+        auto config = reinterpret_cast<QUERY_SERVICE_CONFIGW*>(buf.data());
+        if (!QueryServiceConfigW(service, config, buf.size(), &size)) {
+            error = GetLastError();
+        } else if (!our_debug_command(config->lpBinaryPathName)) {
+            error = ERROR_SERVICE_EXISTS;
+        } else {
+            SERVICE_STATUS_PROCESS status{};
+            const ULONGLONG deadline = GetTickCount64() + 30000;
+            bool requested = false;
+            for (;;) {
+                if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO,
+                                          reinterpret_cast<BYTE*>(&status), sizeof(status), &size)) {
+                    error = GetLastError();
+                    break;
+                }
+                if (status.dwCurrentState == SERVICE_STOPPED)
+                    break;
+                if (!requested && status.dwCurrentState != SERVICE_STOP_PENDING) {
+                    SERVICE_STATUS ignored{};
+                    if (!ControlService(service, SERVICE_CONTROL_STOP, &ignored)) {
+                        error = GetLastError();
+                        if (error != ERROR_SERVICE_NOT_ACTIVE)
+                            break;
+                        error = ERROR_SUCCESS;
+                    }
+                    requested = true;
+                }
+                if (GetTickCount64() >= deadline) {
+                    error = ERROR_SERVICE_REQUEST_TIMEOUT;
+                    break;
+                }
+                Sleep(100);
+            }
+            if (!error && remove && !DeleteService(service))
+                error = GetLastError();
+        }
+        CloseServiceHandle(service);
+    }
+    CloseServiceHandle(scm);
+    if (error != ERROR_SUCCESS && error != ERROR_SERVICE_DOES_NOT_EXIST)
+        fail(remove ? L"Removing the debug collector failed" : L"Stopping the debug collector failed", error);
+}
+
+std::vector<wchar_t> socket_property(HDEVINFO set, SP_DEVINFO_DATA& dev, DWORD property)
+{
+    DWORD bytes = 0, type = 0;
+    SetupDiGetDeviceRegistryPropertyW(set, &dev, property, &type, nullptr, 0, &bytes);
+    if (!bytes)
+        return {};
+    std::vector<wchar_t> value(bytes / sizeof(wchar_t) + 2, L'\0');
+    if (!SetupDiGetDeviceRegistryPropertyW(set, &dev, property, &type,
+                                          reinterpret_cast<BYTE*>(value.data()), bytes, nullptr) ||
+        (type != REG_SZ && type != REG_MULTI_SZ))
+        return {};
+    return value;
+}
+
+bool socket_controllers_ready()
+{
+    HDEVINFO set = SetupDiGetClassDevsW(nullptr, L"PCI", nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (set == INVALID_HANDLE_VALUE) {
+        log(L"VirtIO socket controller enumeration failed: " + error_text(GetLastError()));
+        return false;
+    }
+    std::vector<viosock::Controller> controllers;
+    SP_DEVINFO_DATA dev{sizeof(dev)};
+    DWORD enumeration_error = ERROR_SUCCESS;
+    for (DWORD index = 0;; ++index) {
+        if (!SetupDiEnumDeviceInfo(set, index, &dev)) {
+            enumeration_error = GetLastError();
+            break;
+        }
+        auto ids = socket_property(set, dev, SPDRP_HARDWAREID);
+        bool match = false;
+        for (const wchar_t* id = ids.data(); !ids.empty() && *id; id += wcslen(id) + 1)
+            match |= viosock::matches(id);
+        if (!match) {
+            if (ids.empty()) {
+                wchar_t instance[MAX_DEVICE_ID_LEN]{};
+                SetupDiGetDeviceInstanceIdW(set, &dev, instance, ARRAYSIZE(instance), nullptr);
+                log(format(L"VirtIO socket hardware ID query failed for PCI device %ls", instance));
+                enumeration_error = ERROR_INVALID_DATA;
+                break;
+            }
+            continue;
+        }
+        auto service = socket_property(set, dev, SPDRP_SERVICE);
+        auto driver = socket_property(set, dev, SPDRP_DRIVER);
+        ULONG status = 0, problem = 0;
+        CONFIGRET cr = CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0);
+        controllers.push_back({!service.empty() && viosock::equal_id(service.data(), L"VirtioSocket"),
+                               !driver.empty() && driver[0] != L'\0', cr == CR_SUCCESS,
+                               (status & DN_STARTED) != 0, problem});
+        wchar_t instance[MAX_DEVICE_ID_LEN]{};
+        SetupDiGetDeviceInstanceIdW(set, &dev, instance, ARRAYSIZE(instance), nullptr);
+        log(format(L"VirtIO socket controller %ls: hardware=%ls service=%ls driver=%ls status=0x%lx "
+                   L"problem=%lu query=%lu", instance, ids.data(), service.empty() ? L"" : service.data(),
+                   driver.empty() ? L"" : driver.data(), status, problem, static_cast<unsigned long>(cr)));
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    bool ready = viosock::ready(controllers, enumeration_error == ERROR_NO_MORE_ITEMS);
+    log(format(L"VirtIO socket readiness: controllers=%zu enumeration=%lu ready=%u", controllers.size(),
+               enumeration_error, static_cast<unsigned>(ready)));
+    return ready;
+}
+
+bool wsp_running(bool start)
+{
+    auto scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm)
+        return false;
+    auto service = OpenServiceW(scm, L"VirtioSocketWSP", SERVICE_QUERY_STATUS | (start ? SERVICE_START : 0));
+    bool running = false;
+    if (service) {
+        if (start)
+            StartServiceW(service, 0, nullptr);
+        const auto deadline = GetTickCount64() + (start ? 10000 : 0);
+        do {
+            SERVICE_STATUS_PROCESS status{};
+            DWORD bytes = 0;
+            if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<BYTE*>(&status),
+                                      sizeof(status), &bytes))
+                break;
+            running = status.dwCurrentState == SERVICE_RUNNING;
+            if (running || !start || status.dwCurrentState == SERVICE_STOPPED || GetTickCount64() >= deadline)
+                break;
+            Sleep(100);
+        } while (true);
+        CloseServiceHandle(service);
+    }
+    CloseServiceHandle(scm);
+    return running;
+}
+
+viosock::Provider socket_provider_state()
+{
+    viosock::Provider state{wsp_running(false), false, false};
+    WSADATA data{};
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
+        return state;
+    DWORD bytes = 0;
+    WSAEnumProtocolsW(nullptr, nullptr, &bytes);
+    std::vector<BYTE> buffer(bytes);
+    auto protocols = reinterpret_cast<WSAPROTOCOL_INFOW*>(buffer.data());
+    int count = bytes ? WSAEnumProtocolsW(nullptr, protocols, &bytes) : SOCKET_ERROR;
+    for (int i = 0; i < count && !state.listener_ready; ++i) {
+        auto& protocol = protocols[i];
+        if (protocol.iSocketType != SOCK_STREAM || protocol.ProtocolChain.ChainLen != BASE_PROTOCOL)
+            continue;
+        wchar_t path[MAX_PATH]{};
+        int length = ARRAYSIZE(path), error = 0;
+        if (WSCGetProviderPath(&protocol.ProviderId, path, &length, &error) != 0 ||
+            _wcsicmp(fs::path(path).filename().c_str(), L"viosocklib.dll") != 0)
+            continue;
+        state.registered = true;
+        SOCKET socket = WSASocketW(protocol.iAddressFamily, protocol.iSocketType, protocol.iProtocol,
+                                  &protocol, 0, WSA_FLAG_OVERLAPPED);
+        if (socket == INVALID_SOCKET)
+            continue;
+        struct Address {
+            unsigned short family;
+            unsigned short reserved;
+            unsigned long port;
+            unsigned long cid;
+        } address{static_cast<unsigned short>(protocol.iAddressFamily), 0, 0, 0xffffffffUL};
+        static_assert(sizeof(Address) == 12);
+        state.listener_ready = bind(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 &&
+                listen(socket, 1) == 0;
+        log(format(L"VirtIO socket provider: family=%d listener=%u error=%d", protocol.iAddressFamily,
+                   static_cast<unsigned>(state.listener_ready), state.listener_ready ? 0 : WSAGetLastError()));
+        closesocket(socket);
+    }
+    WSACleanup();
+    return state;
+}
+
+bool add_viosock(const std::wstring& dir)
+{
+    const auto inf = dir + L"\\viosock\\viosock.inf";
+    if (!fs::is_regular_file(inf))
+        fail(L"The VirtIO socket package is unavailable in this installer", ERROR_FILE_NOT_FOUND);
+    DWORD code = run(L"pnputil.exe", L"/add-driver \"" + inf + L"\" /install");
+    if (!viosock::accepted(code, false) && code != ERROR_NO_MORE_ITEMS)
+        fail(L"Installing the VirtIO socket package failed", code);
+    const bool service_ready = wsp_running(true);
+    bool ready = service_ready && viosock_ready();
+    if (!viosock::accepted(code, ready))
+        fail(L"The VirtIO socket provider needs setup", ERROR_NOT_READY);
+    return viosock::restart_required(code, ready);
+}
+
 // Earlier builds called the product vgd (and its settings key vgd3d12). Installing over one removes its uninstaller,
 // its Apps & features entry, its settings, log and staging directory, its certificate, and a cleanup it scheduled, so
 // that only Venera is left. Its driver package goes with the other packages the cleanup removes at the next boot.
@@ -489,8 +750,11 @@ void register_product(const std::wstring& version, DWORD size_kb)
     std::wstring exe = dir + L"\\" + kSetupName;
     std::error_code ec;
     fs::create_directories(dir, ec);
-    if (!fs::equivalent(self_path(), exe, ec) && !CopyFileW(self_path().c_str(), exe.c_str(), FALSE))
-        fail(L"Copying the uninstaller to " + exe + L" failed");
+    if (!fs::equivalent(self_path(), exe, ec)) {
+        DWORD error = copy_uninstaller(self_path().c_str(), exe.c_str());
+        if (error != ERROR_SUCCESS)
+            fail(L"Copying the uninstaller to " + exe + L" failed", error);
+    }
 
     HKEY key;
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) != ERROR_SUCCESS)
@@ -506,8 +770,10 @@ void register_product(const std::wstring& version, DWORD size_kb)
     set_string(key, L"InstallDate", format(L"%04u%02u%02u", now.wYear, now.wMonth, now.wDay));
     set_string(key, L"UninstallString", L"\"" + exe + L"\" /uninstall");
     set_string(key, L"QuietUninstallString", L"\"" + exe + L"\" /uninstall /S");
-    set_dword(key, L"NoModify", 1);
-    set_dword(key, L"NoRepair", 1);
+    set_string(key, L"ModifyPath", L"\"" + exe + L"\" /modify");
+    set_string(key, L"RepairPath", L"\"" + exe + L"\" /repair");
+    set_dword(key, L"NoModify", 0);
+    set_dword(key, L"NoRepair", 0);
     set_dword(key, L"EstimatedSize", size_kb);
     RegCloseKey(key);
     log(L"Registered " + version + L" in Apps & features, uninstaller " + exe);
@@ -553,6 +819,7 @@ void install_panel(const std::wstring& staging)
             !MoveFileExW(pending.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_DELAY_UNTIL_REBOOT))
             fail(L"Installing " + to + L" at the next reboot failed", GetLastError());
         log(L"Installing " + to + L" at the next reboot: the running control panel holds it");
+        pending_reboot = true;
     }
 }
 
@@ -629,15 +896,20 @@ void create_shortcuts()
     log(std::wstring(L"Added ") + kPanelName + L" to the Start menu and the desktop's context menu");
 }
 
-void remove_shortcuts()
+void remove_shortcuts(bool required = false)
 {
     std::wstring menu = start_menu_dir();
     std::error_code ec;
     if (fs::remove(menu + L"\\" + kPanelName + L".lnk", ec))
         log(L"Removed the control panel's Start menu shortcut");
+    if (required && ec)
+        fail(L"Removing the control panel shortcut failed", ec.value());
     fs::remove(menu, ec);  // only when it is empty
-    if (RegDeleteTreeW(HKEY_CLASSES_ROOT, L"DesktopBackground\\Shell\\Venera") == ERROR_SUCCESS)
+    DWORD error = RegDeleteTreeW(HKEY_CLASSES_ROOT, L"DesktopBackground\\Shell\\Venera");
+    if (error == ERROR_SUCCESS)
         log(L"Removed the control panel from the desktop's context menu");
+    else if (required && error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+        fail(L"Removing the desktop menu entry failed", error);
 }
 
 void remove_install_dir()
@@ -710,8 +982,27 @@ void schedule_cleanup()
 
 }  // namespace
 
-bool install(const SystemState& state, const std::wstring& version, const Progress& progress)
+bool viosock_available()
 {
+#ifdef VENERA_HAS_VIOSOCK
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool viosock_ready()
+{
+    const bool controllers_ready = socket_controllers_ready();
+    return controllers_ready && viosock::ready(controllers_ready, socket_provider_state());
+}
+
+bool install(const SystemState& state, const std::wstring& version, const Progress& progress,
+             const components::Plan& plan)
+{
+    pending_reboot = false;
+    if (!plan.error.empty())
+        fail(std::wstring(plan.error.begin(), plan.error.end()), ERROR_INVALID_PARAMETER);
     std::wstring dir = staging_dir();
     progress(5, L"Unpacking the driver package");
     std::vector<std::wstring> files = unpack(dir);
@@ -719,47 +1010,168 @@ bool install(const SystemState& state, const std::wstring& version, const Progre
     for (const auto& f : files)
         size_kb += fs::file_size(dir + L"\\" + f) / 1024;
 
-    progress(25, state.cert_exists ? L"Checking the signing certificate" : L"Creating the signing certificate");
-    PCCERT_CONTEXT cert = signing_cert();
-    progress(35, L"Signing the driver package");
-    make_catalog(dir, files);
-    sign(dir + L"\\venera.cat", cert);
-    CertFreeCertificateContext(cert);
+    auto recorded = components::current_selection(state.components);
+    auto save_selection = [&] {
+        HKEY key = nullptr;
+        DWORD error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0, KEY_SET_VALUE,
+                                      nullptr, &key, nullptr);
+        if (error != ERROR_SUCCESS)
+            fail(L"Saving component selection failed", error);
+        DWORD flags = 1 | (recorded.panel ? 2 : 0) | (recorded.collector ? 4 : 0) | (recorded.transport ? 8 : 0);
+        error = RegSetValueExW(key, L"SelectedComponents", 0, REG_DWORD,
+                               reinterpret_cast<const BYTE*>(&flags), sizeof(flags));
+        RegCloseKey(key);
+        if (error != ERROR_SUCCESS)
+            fail(L"Saving component selection failed", error);
+    };
+    if (!state.components.installed)
+        recorded = {true, false, false, false};
+    if (plan.graphics || plan.transport_install || plan.collector_install || plan.collector_remove) {
+        progress(10, L"Stopping the debug collector");
+        stop_debug_service(false);
+    }
+    if (plan.transport_install) {
+        progress(15, L"Installing the VirtIO socket package");
+        pending_reboot |= add_viosock(dir);
+        recorded = components::completed(recorded, plan.selected, false, false, true);
+        save_selection();
+    }
+    std::wstring collector = state.collector_path;
 
-    progress(45, L"Adding the driver package to the driver store");
-    std::wstring inf = dir + L"\\venera.inf";
-    wchar_t published[MAX_PATH];
-    PWSTR published_name = nullptr;
-    if (!SetupCopyOEMInfW(inf.c_str(), nullptr, SPOST_PATH, 0, published, ARRAYSIZE(published), nullptr,
-                          &published_name))
-        fail(L"Adding the driver package to the driver store failed");
-    std::wstring oem = published_name;
-    // The device installs from the driver store's copy: %13% (where the INF puts its files) is that folder.
-    wchar_t stored[MAX_PATH];
-    if (!SetupGetInfDriverStoreLocationW(published, nullptr, nullptr, stored, ARRAYSIZE(stored), nullptr))
-        fail(L"Finding " + oem + L" in the driver store failed");
-    log(L"Driver store: " + oem + L", " + stored);
+    if (plan.graphics) {
+        progress(25, state.cert_exists ? L"Checking the signing certificate" : L"Creating the signing certificate");
+        PCCERT_CONTEXT cert = signing_cert();
+        progress(35, L"Signing the driver package");
+        make_catalog(dir, files);
+        sign(dir + L"\\venera.cat", cert);
+        CertFreeCertificateContext(cert);
 
-    progress(55, L"Installing the driver on the VirtIO GPU, from the next boot");
-    int devices = install_on_devices(stored, false);
-    if (devices == 0)
-        fail(L"There is no VirtIO GPU to install the driver on", ERROR_SUCCESS);
-    log(format(L"Installed on %d VirtIO GPU(s); it starts at the next boot", devices));
+        progress(45, L"Adding the driver package to the driver store");
+        std::wstring inf = dir + L"\\venera.inf";
+        wchar_t published[MAX_PATH];
+        PWSTR published_name = nullptr;
+        if (!SetupCopyOEMInfW(inf.c_str(), nullptr, SPOST_PATH, 0, published, ARRAYSIZE(published), nullptr,
+                              &published_name))
+            fail(L"Adding the driver package to the driver store failed");
+        std::wstring oem = published_name;
+        // The device installs from the driver store's copy: %13% (where the INF puts its files) is that folder.
+        wchar_t stored[MAX_PATH];
+        if (!SetupGetInfDriverStoreLocationW(published, nullptr, nullptr, stored, ARRAYSIZE(stored), nullptr))
+            fail(L"Finding " + oem + L" in the driver store failed");
+        log(L"Driver store: " + oem + L", " + stored);
+
+        progress(55, L"Installing the driver on the VirtIO GPU, from the next boot");
+        int devices = install_on_devices(stored, false);
+        if (devices == 0)
+            fail(L"There is no VirtIO GPU to install the driver on", ERROR_SUCCESS);
+        log(format(L"Installed on %d VirtIO GPU(s); it starts at the next boot", devices));
+        pending_reboot = true;
+        collector = (fs::path(stored).parent_path() / L"venera-debug-guest.exe").wstring();
+    }
 
     progress(80, L"Registering in Apps & features");
-    register_product(version, size_kb);
+    register_product(plan.graphics || state.installed_version.empty() ? version : state.installed_version, size_kb);
     progress(82, L"Removing what earlier vgd builds left");
     remove_old_vgd();
-    progress(85, L"Installing the control panel");
-    install_panel(dir);
-    progress(90, L"Adding the control panel to the Start menu and the desktop's menu");
-    create_shortcuts();
-    progress(95, L"Scheduling the removal of the drivers it replaces at the next boot");
-    schedule_cleanup();
+    if (plan.panel_install) {
+        progress(85, L"Installing the control panel");
+        install_panel(dir);
+        create_shortcuts();
+    } else if (!plan.selected.panel) {
+        progress(85, L"Removing the control panel");
+        remove_shortcuts(true);
+        for (const auto name : {kPanelExe, kPanelCom}) {
+            delete_file(install_dir() + L"\\" + name, true);
+            delete_file(install_dir() + L"\\" + name + L".new", true);
+        }
+    }
+    recorded = components::completed(recorded, plan.selected, true, false, false);
+    save_selection();
+    if (plan.selected.collector && (plan.collector_install || plan.transport_install)) {
+        progress(90, L"Installing the debug collector");
+        if (collector.empty() || !fs::is_regular_file(collector)) {
+            for (const auto& package : state.packages) {
+                if (!package.ours())
+                    continue;
+                wchar_t stored[MAX_PATH];
+                if (SetupGetInfDriverStoreLocationW((inf_dir() + L"\\" + package.inf).c_str(), nullptr, nullptr,
+                                                    stored, ARRAYSIZE(stored), nullptr)) {
+                    auto candidate = fs::path(stored).parent_path() / L"venera-debug-guest.exe";
+                    if (fs::is_regular_file(candidate)) {
+                        collector = candidate.wstring();
+                        break;
+                    }
+                }
+            }
+        }
+        if (collector.empty() || !fs::is_regular_file(collector))
+            fail(L"Repair Graphics to restore the debug collector files", ERROR_FILE_NOT_FOUND);
+        DWORD prepared = run(collector, L"prepare-history");
+        if (prepared) fail(L"Preparing captured history failed", prepared);
+        configure_capture(true);
+        SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);
+        if (!scm)
+            fail(L"Opening Windows services failed");
+        const auto command = L"\"" + collector + L"\" service";
+        SC_HANDLE service = OpenServiceW(scm, L"VeneraDebugGuest", SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_STATUS);
+        DWORD error = service ? ERROR_SUCCESS : GetLastError();
+        if (!service && error == ERROR_SERVICE_DOES_NOT_EXIST) {
+            service = CreateServiceW(scm, L"VeneraDebugGuest", L"Venera debug collector",
+                                     SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_STATUS,
+                                     SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                                     command.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr);
+            error = service ? ERROR_SUCCESS : GetLastError();
+        } else if (service && !ChangeServiceConfigW(service, SERVICE_NO_CHANGE, SERVICE_AUTO_START, SERVICE_NO_CHANGE,
+                                                   command.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+            error = GetLastError();
+        }
+        const bool transport_ready = !error && viosock_ready();
+        if (!error && !transport_ready)
+            pending_reboot = true;
+        if (!error && transport_ready && !StartServiceW(service, 0, nullptr)) {
+            error = GetLastError();
+            if (error == ERROR_SERVICE_ALREADY_RUNNING)
+                error = ERROR_SUCCESS;
+        }
+        if (!error && transport_ready) {
+            SERVICE_STATUS_PROCESS status{};
+            DWORD size = 0;
+            const auto deadline = GetTickCount64() + 30000;
+            for (;;) {
+                if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<BYTE*>(&status),
+                                           sizeof(status), &size)) {
+                    error = GetLastError();
+                    break;
+                }
+                if (status.dwCurrentState == SERVICE_RUNNING)
+                    break;
+                if (status.dwCurrentState == SERVICE_STOPPED || GetTickCount64() >= deadline) {
+                    error = ERROR_SERVICE_REQUEST_TIMEOUT;
+                    break;
+                }
+                Sleep(100);
+            }
+        }
+        if (service)
+            CloseServiceHandle(service);
+        CloseServiceHandle(scm);
+        if (error)
+            fail(L"Starting the debug collector failed", error);
+    } else if (!plan.selected.collector) {
+        progress(90, L"Removing the debug collector");
+        stop_debug_service(true);
+        configure_capture(false);
+    }
+    recorded = components::completed(recorded, plan.selected, false, true, true);
+    save_selection();
+    if (plan.graphics) {
+        progress(95, L"Preparing the graphics driver for the next restart");
+        schedule_cleanup();
+    }
     std::error_code ec;
     fs::remove_all(dir, ec);
     progress(100, L"Done");
-    return true;
+    return pending_reboot;
 }
 
 void cleanup()
@@ -787,6 +1199,9 @@ void cleanup()
 
 bool uninstall(const Progress& progress)
 {
+    progress(5, L"Removing the debug collector");
+    stop_debug_service(true);
+    configure_capture(false);
     progress(10, L"Switching the VirtIO GPU to Microsoft Basic Display, from the next boot");
     int devices = install_on_devices(inf_dir() + L"\\display.inf", true);
     log(format(L"Switched %d VirtIO GPU(s) to Microsoft Basic Display; it starts at the next boot", devices));

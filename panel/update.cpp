@@ -241,13 +241,13 @@ struct Handle {
 // GETs an https URL, following redirects to https only: GitHub's JSON, or else a file (from GitHub's API, a release's
 // asset). `sink` takes the body as it comes, with its whole length (0 when the server does not say), and returns false
 // to stop. Returns why it failed, else empty.
-std::wstring get(const std::wstring& url, bool json,
+locale::Message get(const std::wstring& url, bool json,
                  const std::function<bool(const char* data, DWORD size, ULONGLONG total)>& sink)
 {
     URL_COMPONENTS u = {sizeof(u)};
     u.dwHostNameLength = u.dwUrlPathLength = u.dwExtraInfoLength = DWORD(-1);
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &u) || u.nScheme != INTERNET_SCHEME_HTTPS)
-        return L"Not an https address: " + url;
+        return {IDS_UpdateAddress, {url}};
     std::wstring host(u.lpszHostName, u.dwHostNameLength);
     std::wstring path = std::wstring(u.lpszUrlPath, u.dwUrlPathLength) + std::wstring(u.lpszExtraInfo, u.dwExtraInfoLength);
 
@@ -255,7 +255,7 @@ std::wstring get(const std::wstring& url, bool json,
     session.h = WinHttpOpen(L"venera-panel", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                             WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session.h)
-        return L"Connecting failed: " + systemMessage(GetLastError());
+        return {IDS_UpdateConnect, {systemMessage(GetLastError())}};
     WinHttpSetTimeouts(session.h, 15000, 15000, 30000, 30000);
     connection.h = WinHttpConnect(session.h, host.c_str(), u.nPort, 0);
     if (connection.h)
@@ -267,16 +267,15 @@ std::wstring get(const std::wstring& url, bool json,
         headers += L"X-GitHub-Api-Version: 2022-11-28\r\n";
     if (!request.h || !WinHttpSendRequest(request.h, headers.c_str(), DWORD(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
         !WinHttpReceiveResponse(request.h, nullptr))
-        return L"Connecting to " + host + L" failed: " + systemMessage(GetLastError());
+        return {IDS_UpdateConnectHost, {host, systemMessage(GetLastError())}};
 
     DWORD status = 0, length = 0, size = sizeof(status);
     WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX,
                         &status, &size, WINHTTP_NO_HEADER_INDEX);
     if (status != 200) {
         if (api && (status == 403 || status == 429))
-            return L"GitHub turned the request down (HTTP " + std::to_wstring(status) +
-                   L"): it takes 60 an hour from an address without signing in. Try again later";
-        return host + L" answered HTTP " + std::to_wstring(status);
+            return {IDS_UpdateRateLimit, {std::to_wstring(status)}};
+        return {IDS_UpdateHttp, {host, std::to_wstring(status)}};
     }
     size = sizeof(length);
     WinHttpQueryHeaders(request.h, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
@@ -285,25 +284,25 @@ std::wstring get(const std::wstring& url, bool json,
     for (;;) {
         DWORD got = 0;
         if (!WinHttpReadData(request.h, buf.data(), DWORD(buf.size()), &got))
-            return L"Downloading from " + host + L" failed: " + systemMessage(GetLastError());
+            return {IDS_UpdateDownloadHost, {host, systemMessage(GetLastError())}};
         if (!got)
             return {};
         if (!sink(buf.data(), got, length))
-            return L"Cancelled";
+            return {IDS_Cancelled};
     }
 }
 
-std::wstring getJson(const std::wstring& url, Json* out)
+locale::Message getJson(const std::wstring& url, Json* out)
 {
     std::string body;
-    std::wstring e = get(url, true, [&](const char* d, DWORD n, ULONGLONG) {
+    auto e = get(url, true, [&](const char* d, DWORD n, ULONGLONG) {
         body.append(d, n);
         return body.size() < (64u << 20);
     });
     if (!e.empty())
         return e;
     if (!JsonParser(body).parse(out))
-        return L"GitHub's answer is not JSON";
+        return {IDS_UpdateJson};
     return {};
 }
 
@@ -377,17 +376,17 @@ bool writeAll(HANDLE h, const char* data, DWORD size)
 }
 
 // Downloads `url` into the new file `path`; *sha256 is the checksum of what it wrote.
-std::wstring downloadTo(const std::wstring& url, const std::wstring& path, std::string* sha256,
+locale::Message downloadTo(const std::wstring& url, const std::wstring& path, std::string* sha256,
                         const std::function<bool(ULONGLONG, ULONGLONG)>& progress)
 {
     File f;
     f.h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f.h == INVALID_HANDLE_VALUE)
-        return L"Creating " + path + L" failed: " + systemMessage(GetLastError());
+        return {IDS_UpdateCreateFile, {path, systemMessage(GetLastError())}};
     Sha256 hash;
     ULONGLONG done = 0;
     bool writeFailed = false;
-    std::wstring e = get(url, false, [&](const char* d, DWORD n, ULONGLONG total) {
+    auto e = get(url, false, [&](const char* d, DWORD n, ULONGLONG total) {
         if (!writeAll(f.h, d, n)) {
             writeFailed = true;
             return false;
@@ -397,7 +396,7 @@ std::wstring downloadTo(const std::wstring& url, const std::wstring& path, std::
         return !progress || progress(done, total);
     });
     if (writeFailed)
-        return L"Writing " + path + L" failed: " + systemMessage(GetLastError());
+        return {IDS_UpdateWriteFile, {path, systemMessage(GetLastError())}};
     if (!e.empty())
         return e;
     *sha256 = hash.hex();
@@ -453,7 +452,7 @@ std::wstring windowsDir()
 // A new directory in Windows' Temp that only SYSTEM and Administrators can open, with a random name: users can make
 // directories there, but not rename or delete others' (as they could in their own %TEMP%), so what is in it stays as
 // this process wrote it.
-std::wstring makePrivateDir(std::wstring* error)
+std::wstring makePrivateDir(locale::Message* error)
 {
     UCHAR random[8];
     BCryptGenRandom(nullptr, random, sizeof(random), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
@@ -465,21 +464,21 @@ std::wstring makePrivateDir(std::wstring* error)
     SECURITY_ATTRIBUTES sa = {sizeof(sa)};
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
                                                               SDDL_REVISION_1, &sa.lpSecurityDescriptor, nullptr)) {
-        *error = L"Making the update's directory failed: " + systemMessage(GetLastError());
+        *error = {IDS_UpdateCreateDirectory, {systemMessage(GetLastError())}};
         return {};
     }
     BOOL made = CreateDirectoryW(dir.c_str(), &sa);
     DWORD e = GetLastError();
     LocalFree(sa.lpSecurityDescriptor);
     if (!made) {
-        *error = L"Making " + dir + L" failed: " + systemMessage(e);
+        *error = {IDS_UpdateMakeDirectory, {dir, systemMessage(e)}};
         return {};
     }
     return dir;
 }
 
 // Runs System32's tar.exe (bsdtar, which reads zips) to take `member` out of `zip` into `dir`.
-std::wstring unzip(const std::wstring& zip, const std::wstring& member, const std::wstring& dir)
+locale::Message unzip(const std::wstring& zip, const std::wstring& member, const std::wstring& dir)
 {
     std::wstring tar = windowsDir() + L"\\System32\\tar.exe";
     std::wstring cmd = L"\"" + tar + L"\" -x -f \"" + zip + L"\" -C \"" + dir + L"\" \"" + member + L"\"";
@@ -487,7 +486,7 @@ std::wstring unzip(const std::wstring& zip, const std::wstring& member, const st
     PROCESS_INFORMATION pi;
     if (!CreateProcessW(tar.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, dir.c_str(), &si,
                         &pi))
-        return L"Running tar.exe failed: " + systemMessage(GetLastError());
+        return {IDS_UpdateTar, {systemMessage(GetLastError())}};
     DWORD code = 1;
     if (WaitForSingleObject(pi.hProcess, 120000) == WAIT_OBJECT_0)
         GetExitCodeProcess(pi.hProcess, &code);
@@ -496,7 +495,7 @@ std::wstring unzip(const std::wstring& zip, const std::wstring& member, const st
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     if (code || GetFileAttributesW((dir + L"\\" + member).c_str()) == INVALID_FILE_ATTRIBUTES)
-        return L"Unpacking " + member + L" from the build failed";
+        return {IDS_UpdateUnpack, {member}};
     return {};
 }
 
@@ -570,7 +569,7 @@ Update findUpdate(Channel c)
             break;
         }
         if (u.name.empty())
-            u.error = L"The newest release, " + j["tag_name"].str() + L", has no installer";
+            u.error = {IDS_UpdateReleaseInstaller, {j["tag_name"].str()}};
     } else {
         // The newest builds of main; the newest that worked, saying so when it is not the newest of all.
         u.error = getJson(std::wstring(kApi) + L"/actions/workflows/" + kWorkflow +
@@ -585,14 +584,13 @@ Update findUpdate(Channel c)
                 break;
             }
         if (!run) {
-            u.error = L"None of main's recent builds worked";
+            u.error = {IDS_UpdateBuildsFailed};
             return u;
         }
         const Json& newest = j["workflow_runs"].items.front();
         if (&newest != run) {
             std::wstring commit = newest["head_sha"].str().substr(0, 7);
-            u.note = newest["status"].s != "completed" ? L"The newest commit, " + commit + L", is still building"
-                                                        : L"The build of the newest commit, " + commit + L", failed";
+            u.note = {newest["status"].s != "completed" ? IDS_UpdateBuilding : IDS_UpdateBuildFailed, {commit}};
         }
         Json artifacts;
         u.error = getJson((*run)["artifacts_url"].str(), &artifacts);
@@ -610,14 +608,14 @@ Update findUpdate(Channel c)
             break;
         }
         if (u.name.empty())
-            u.error = L"The newest build of main that worked has no installer left (GitHub keeps them 90 days)";
+            u.error = {IDS_UpdateBuildInstaller};
     }
     // Only what can be checked. The version and the name go into paths and tar's command line.
     if (u.error.empty() && u.sha256.empty())
-        u.error = L"GitHub gives no checksum for " + u.name;
+        u.error = {IDS_UpdateDigestMissing, {u.name}};
     if (u.error.empty() && (u.version.empty() || u.version.find_first_not_of(L"0123456789abcdef.") != std::wstring::npos ||
                             u.name.find_first_of(L"\\/:\"*?<>|") != std::wstring::npos))
-        u.error = L"Not an installer's name: " + u.name;
+        u.error = {IDS_UpdateInstallerName, {u.name}};
     return u;
 }
 
@@ -630,46 +628,47 @@ std::wstring downloadPath(const Update& u)
     return dir + L"\\" + u.name;
 }
 
-std::wstring downloadUpdate(const Update& u, const std::wstring& path,
+locale::Message downloadUpdate(const Update& u, const std::wstring& path,
                             const std::function<bool(ULONGLONG, ULONGLONG)>& progress)
 {
     if (!u.sha256.empty() && fileSha256(path) == u.sha256)  // downloaded already
         return {};
     std::wstring part = path + L".part";
     std::string sha256;
-    std::wstring e = downloadTo(u.url, part, &sha256, progress);
+    auto e = downloadTo(u.url, part, &sha256, progress);
     if (e.empty() && sha256 != u.sha256)
-        e = L"The download does not match GitHub's checksum";
+        e = {IDS_UpdateVerifyFailed};
     if (e.empty() && !MoveFileExW(part.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING))
-        e = L"Saving " + path + L" failed: " + systemMessage(GetLastError());
+        e = {IDS_UpdateSaveFile, {path, systemMessage(GetLastError())}};
     if (!e.empty())
         DeleteFileW(part.c_str());
     return e;
 }
 
-std::wstring installUpdate(Channel c, const std::wstring& downloaded,
+locale::Message installUpdate(Channel c, const std::wstring& downloaded,
                            const std::function<void(const std::wstring&)>& say, bool* started)
 {
     *started = false;
     if (!elevated())
-        return L"Updating needs administrator rights";
-    say(std::wstring(L"Asking GitHub for the newest ") + (c == Channel::kDevelop ? L"build of main" : L"release"));
+        return {IDS_UpdateAdminNeeded};
+    say(locale::text(c == Channel::kDevelop ? IDS_AskingDevelop : IDS_AskingRelease));
     Update u = findUpdate(c);
     if (!u.error.empty())
         return u.error;
     std::wstring installed = installedVersion();
     if (!installed.empty() && compareVersions(u.version, installed) <= 0) {
-        say(L"Venera " + installed + L" is up to date (the newest is " + u.version + L")");
+        say(locale::format(IDS_UpdateInstalledCurrent, {installed, u.version}));
         return {};
     }
 
-    std::wstring error, dir = makePrivateDir(&error);
+    locale::Message error;
+    std::wstring dir = makePrivateDir(&error);
     if (dir.empty())
         return error;
     std::wstring file = dir + L"\\" + u.name;
     std::string sha256;
     if (downloaded.empty() || !copyTo(downloaded, file, &sha256) || sha256 != u.sha256) {
-        say(L"Downloading " + u.name);
+        say(locale::format(IDS_UpdateDownloadingFile, {u.name}));
         int shown = -1;
         error = downloadTo(u.url, file, &sha256, [&](ULONGLONG done, ULONGLONG total) {
             int percent = total ? int(done * 100 / total) : -1;
@@ -681,8 +680,8 @@ std::wstring installUpdate(Channel c, const std::wstring& downloaded,
             return error;
     }
     if (sha256 != u.sha256)
-        return L"The download does not match GitHub's checksum";
-    say(L"The checksum matches GitHub's");
+        return {IDS_UpdateVerifyFailed};
+    say(locale::text(IDS_UpdateVerified));
 
     std::wstring exe = file;
     if (endsWith(u.name, L".zip")) {
@@ -694,14 +693,14 @@ std::wstring installUpdate(Channel c, const std::wstring& downloaded,
         exe = dir + L"\\" + member;
     }
     if (fileVersion(exe) != u.version)
-        return L"The installer's version is not " + u.version;
+        return {IDS_UpdateInstallerVersion, {u.version}};
 
-    say(L"Starting the installer of Venera " + u.version);
+    say(locale::format(IDS_UpdateStartingInstaller, {u.version}));
     std::wstring cmd = L"\"" + exe + L"\"";
     STARTUPINFOW si = {sizeof(si)};
     PROCESS_INFORMATION pi;
     if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si, &pi))
-        return L"Starting the installer failed: " + systemMessage(GetLastError());
+        return {IDS_UpdateStartFailed, {systemMessage(GetLastError())}};
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     // It runs from there until it is done: gone at the next restart, which an update of the driver asks for.

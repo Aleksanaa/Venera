@@ -123,13 +123,13 @@ void writeLogFile(bool on)
 class Settings : public Page {
 public:
     explicit Settings(HWND window) : window_(window) { load(); }
-    const wchar_t* title() const override { return L"Settings"; }
+    const wchar_t* title() const override { return locale::text(IDS_Settings); }
     const wchar_t* icon() const override { return L"\uE713"; }
     void draw(Ui& ui, float x, float w, float& y) override;
     void click(int id) override;
 
 private:
-    enum : int { kElevateId = kPageId, kDwmId, kLogFileId, kVerboseId, kPointerId = kPageId + 20,
+    enum : int { kElevateId = kPageId, kDwmId, kLogFileId, kVerboseId, kLanguageId, kPointerId = kPageId + 20,
                  kLevelId = kPageId + 50 };
 
     void load();
@@ -155,54 +155,78 @@ void Settings::load()
 
 void Settings::draw(Ui& ui, float x, float w, float& y)
 {
+    ui.sectionHeader(locale::text(IDS_PersonalPreferences), x, y);
+    float languageY = ui.settingsCard(x, y, w, L"\uE774", locale::text(IDS_Language), locale::text(IDS_LanguageDescription));
+    ui.comboBox(x + w - 16, languageY, kLanguageId,
+                {locale::text(IDS_SystemDefault), L"English", L"简体中文"}, int(locale::preference()));
+
+    ui.sectionHeader(locale::text(IDS_DriverSettings), x, y);
     if (!admin_)
-        ui.infoBar(x, w, y, Ui::Severity::kInformational, L"", L"Restart as administrator to change these.",
-                   L"Restart as administrator", kElevateId);
+        ui.infoBar(x, w, y, Ui::Severity::kInformational, L"", locale::text(IDS_RestartAdminPrompt),
+                   locale::text(IDS_RestartAdmin), kElevateId);
 
     float cy;
     if (driver_) {
-        ui.sectionHeader(L"Pointer", x, y);
+        ui.sectionHeader(locale::text(IDS_Pointer), x, y);
         for (int i = 0; i < kPointerCount; i++) {
             const PointerSetting& p = kPointer[i];
-            cy = ui.settingsCard(x, y, w, p.icon, p.title, p.desc);
+            cy = ui.settingsCard(x, y, w, p.icon,
+                locale::text(i == 0 ? IDS_HardwareCursor : IDS_SwapRedBlue),
+                locale::text(i == 0 ? IDS_HardwareCursorDescription : IDS_SwapRedBlueDescription));
             ui.toggle(x + w - 16, cy, kPointerId + i, pointer_[i] != 0, admin_ && (i == 0 || pointer_[0]));
         }
     }
 
-    ui.sectionHeader(L"Logging", x, y);
+    ui.sectionHeader(locale::text(IDS_Logging), x, y);
     if (admin_ && changed_)
         ui.infoBar(x, w, y, Ui::Severity::kInformational, L"",
-                   L"Programs started from now on use these. Restart the Desktop Window Manager for the desktop's own.",
-                   L"Restart it", kDwmId);
-    cy = ui.settingsCard(x, y, w, L"\uE8A5", L"Log file",
-                         logFile_.empty() ? L"The drivers also write what they print to a file"
-                                          : L"The drivers also write what they print to " + logFile_);
+                   locale::text(IDS_LoggingChanged),
+                   locale::text(IDS_RestartIt), kDwmId);
+    cy = ui.settingsCard(x, y, w, L"\uE8A5", locale::text(IDS_LogFile),
+                         logFile_.empty() ? locale::text(IDS_LogFileDescription)
+                                          : locale::format(IDS_LogDestination, {logFile_}));
     ui.toggle(x + w - 16, cy, kLogFileId, !logFile_.empty(), admin_);
-    cy = ui.settingsCard(x, y, w, L"\uE9D9", L"Verbose",
-                         L"Also every format and multisampling query. Slows programs down.");
+    cy = ui.settingsCard(x, y, w, L"\uE9D9", locale::text(IDS_Verbose),
+                         locale::text(IDS_VerboseDescription));
     ui.toggle(x + w - 16, cy, kVerboseId, verbose_, admin_);
     for (int i = 0; i < kLevelCount; i++) {
         const Level& l = kLevels[i];
-        std::wstring desc = l.desc;
+        std::wstring desc = i == 0 ? locale::text(IDS_VulkanMessagesDescription) : L"";
         // DXVK and vkd3d-proton write a file per program beside the driver's log file, and nothing without one.
         if (desc.empty())
             desc = logFile_.empty()
-                       ? std::wstring(L"Needs the log file")
-                       : std::wstring(!wcscmp(l.name, L"DXVK_LOG_LEVEL")
-                                          ? L"What DXVK prints, to <program>_venera_d3d11.log in "
-                                          : L"What vkd3d-proton prints, to <program>_venera_d3d12.log in ") +
-                             logFile_.substr(0, logFile_.find_last_of(L'\\'));
+                       ? std::wstring(locale::text(IDS_NeedsLogFile))
+                       : locale::format(i == 1 ? IDS_DxvkDestination : IDS_Vkd3dDestination,
+                             {logFile_.substr(0, logFile_.find_last_of(L'\\'))});
         std::vector<std::wstring> labels;
-        for (const auto& c : l.choices)
-            labels.push_back(c.first);
-        cy = ui.settingsCard(x, y, w, l.icon, l.title, desc);
+        const unsigned ordinary[] = {IDS_Default, IDS_None, IDS_Errors, IDS_Warnings, IDS_Information, IDS_Debug};
+        const unsigned mesa[] = {IDS_Default, IDS_Errors, IDS_Warnings, IDS_Information, IDS_Debug};
+        const unsigned vkd3d[] = {IDS_Default, IDS_None, IDS_Errors, IDS_Fixmes, IDS_Warnings, IDS_Information, IDS_Trace};
+        for (size_t c = 0; c < l.choices.size(); c++)
+            labels.push_back(locale::text((i == 0 ? mesa : i == 1 ? ordinary : vkd3d)[c]));
+        const unsigned titles[] = {IDS_VulkanMessages, IDS_D3D11Messages, IDS_D3D12Messages};
+        cy = ui.settingsCard(x, y, w, l.icon, locale::text(titles[i]), desc);
         ui.comboBox(x + w - 16, cy, kLevelId + i, labels, levels_[i], admin_);
     }
 }
 
 void Settings::click(int id)
 {
-    if (id == kElevateId) {
+    if (id == kLanguageId) {
+        HMENU menu = CreatePopupMenu();
+        const wchar_t* labels[] = {locale::text(IDS_SystemDefault), L"English", L"简体中文"};
+        for (int i = 0; i < 3; i++)
+            AppendMenuW(menu, MF_STRING | (i == int(locale::preference()) ? MF_CHECKED : 0), i + 1, labels[i]);
+        POINT point; GetCursorPos(&point);
+        int selected = TrackPopupMenu(menu, TPM_RETURNCMD, point.x, point.y, 0, window_, nullptr);
+        DestroyMenu(menu);
+        if (selected > 0) {
+            if (locale::change(locale::Preference(selected - 1)))
+                SendMessageW(window_, kLanguageChanged, 0, 0);
+            else
+                MessageBoxW(window_, locale::text(IDS_LanguageSaveFailed), locale::text(IDS_Settings), MB_OK | MB_ICONERROR);
+        }
+    } else if (id == kElevateId) {
         restartElevated(window_, 1);
     } else if (id >= kPointerId && id < kPointerId + kPointerCount) {
         int i = id - kPointerId;
@@ -223,8 +247,12 @@ void Settings::click(int id)
         // The choices in a menu, as a ComboBox's dropdown, at the pointer.
         int i = id - kLevelId;
         HMENU menu = CreatePopupMenu();
+        const unsigned ordinary[] = {IDS_Default, IDS_None, IDS_Errors, IDS_Warnings, IDS_Information, IDS_Debug};
+        const unsigned mesa[] = {IDS_Default, IDS_Errors, IDS_Warnings, IDS_Information, IDS_Debug};
+        const unsigned vkd3d[] = {IDS_Default, IDS_None, IDS_Errors, IDS_Fixmes, IDS_Warnings, IDS_Information, IDS_Trace};
         for (size_t c = 0; c < kLevels[i].choices.size(); c++)
-            AppendMenuW(menu, MF_STRING | (int(c) == levels_[i] ? MF_CHECKED : 0), c + 1, kLevels[i].choices[c].first);
+            AppendMenuW(menu, MF_STRING | (int(c) == levels_[i] ? MF_CHECKED : 0), c + 1,
+                locale::text((i == 0 ? mesa : i == 1 ? ordinary : vkd3d)[c]));
         POINT pt;
         GetCursorPos(&pt);
         int c = TrackPopupMenu(menu, TPM_RETURNCMD, pt.x, pt.y, 0, window_, nullptr);

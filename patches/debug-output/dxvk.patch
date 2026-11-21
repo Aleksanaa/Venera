@@ -1,0 +1,24 @@
+--- a/src/util/log/log.cpp
++++ b/src/util/log/log.cpp
+@@ -3,6 +3,10 @@
+ #include "log.h"
+ 
+ #include "../util_env.h"
++
++#ifdef _WIN32
++#include "engine_etw.h"
++#endif
+ 
+ namespace dxvk {
+   
+@@ -48,6 +52,10 @@
+   void Logger::emitMsg(LogLevel level, const std::string& message) {
+     if (level >= m_minLevel) {
+       std::lock_guard<dxvk::mutex> lock(m_mutex);
++#ifdef _WIN32
++      static const char* levels[] = { "trace", "debug", "info", "warn", "err" };
++      venera_engine_text(VENERA_DXVK, levels[static_cast<unsigned>(level)], "default", message.data(), message.size());
++#endif
+       
+       static std::array<const char*, 5> s_prefixes
+         = {{ "trace: ", "debug: ", "info:  ", "warn:  ", "err:   " }};

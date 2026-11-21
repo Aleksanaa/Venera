@@ -49,4 +49,15 @@ add_subdirectory(svc)
 add_subdirectory(panel)
 
 # The installer, with the driver package (pkg/) inside.
+find_program(VENERA_CARGO cargo REQUIRED)
+set(VENERA_DEBUG_GUEST_EXE "${CMAKE_SOURCE_DIR}/build/debug-channel/x86_64-pc-windows-gnu/release/venera-debug-guest.exe")
+add_custom_target(venera-debug-guest
+    COMMAND "${CMAKE_COMMAND}" -E env "CARGO_HOME=${CMAKE_SOURCE_DIR}/build/cargo-home"
+            "${VENERA_CARGO}" build --locked --release
+            --manifest-path "${CMAKE_SOURCE_DIR}/debug-channel/Cargo.toml"
+            --target x86_64-pc-windows-gnu --target-dir "${CMAKE_SOURCE_DIR}/build/debug-channel"
+            -p venera-debug-guest
+    BYPRODUCTS "${VENERA_DEBUG_GUEST_EXE}"
+    COMMENT "Building the Windows debug collector"
+    VERBATIM)
 add_subdirectory(setup)
